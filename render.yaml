@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: ayushwellness-oms-api
+    runtime: python
+    rootDir: apps/api
+    # This project uses plain pip + pyproject.toml (setuptools build
+    # backend) — there is no [tool.poetry] section and never has been.
+    # Render's Python buildpack defaults to running Poetry whenever it
+    # finds a pyproject.toml, which breaks here (Poetry mis-resolves the
+    # project's Python requirement against a non-Poetry PEP 621
+    # project). Explicit commands below make Render use pip instead, and
+    # apps/api/runtime.txt pins the interpreter version, matching what's
+    # already used in docker/api.Dockerfile (python:3.12-slim) and
+    # already proven to work (the same requirements-lock.txt is used for
+    # the Docker image build).
+    buildCommand: pip install --upgrade pip && pip install -r requirements-lock.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # Values are never stored here (sync: false) — set each of these
+      # in the Render dashboard for this service.
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: SHOPIFY_STORE_DOMAIN
+        sync: false
+      - key: SHOPIFY_ACCESS_TOKEN
+        sync: false
+      - key: SHOPIFY_WEBHOOK_SECRET
+        sync: false
+      - key: SHIPROCKET_EMAIL
+        sync: false
+      - key: SHIPROCKET_PASSWORD
+        sync: false
+      - key: SHIPROCKET_PICKUP_LOCATION
+        sync: false

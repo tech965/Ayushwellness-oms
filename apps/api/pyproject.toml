@@ -2,7 +2,7 @@
 name = "ayushwellness-oms-api"
 version = "0.1.0"
 description = "AyushWellness OMS - Operations Intelligence Platform API"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<4.0"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
