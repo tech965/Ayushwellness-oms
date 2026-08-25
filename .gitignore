@@ -1,0 +1,46 @@
+# --- Environment ---
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.test
+
+# --- Node / frontend ---
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+coverage/
+.turbo/
+
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# --- Databases ---
+*.sqlite3
+*.db
+
+# --- Logs ---
+*.log
+npm-debug.log*
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# --- Docker ---
+docker/**/*.local.yml

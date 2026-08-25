@@ -1,0 +1,17 @@
+{
+  "name": "ayushwellness-oms",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AyushWellness OMS — Operations Intelligence Platform (monorepo root)",
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "build:web": "npm --prefix apps/web run build",
+    "lint:web": "npm --prefix apps/web run lint",
+    "typecheck:web": "npm --prefix apps/web run typecheck",
+    "test:web": "npm --prefix apps/web run test",
+    "format:web": "npm --prefix apps/web run format"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
