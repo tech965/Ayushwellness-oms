@@ -38,3 +38,38 @@ services:
         sync: false
       - key: SHIPROCKET_PICKUP_LOCATION
         sync: false
+
+  - type: worker
+    name: ayushwellness-oms-worker
+    runtime: python
+    rootDir: apps/api
+    # Processes SyncJob/WebhookEvent tasks queued by the web service
+    # (app.tasks.sync_tasks, webhook_processing, shiprocket_sync,
+    # reconciliation_tasks, retry_processing — see
+    # app/workers/celery_app.py). Without this service running, sync
+    # jobs triggered via POST /api/v1/sync/{id}/trigger stay QUEUED
+    # forever — the web service only enqueues them, it never executes
+    # them itself.
+    buildCommand: pip install --upgrade pip && pip install -r requirements-lock.txt
+    startCommand: celery -A app.workers.celery_app worker --loglevel=info
+    envVars:
+      # Same values as the web service above — set independently here
+      # too, since Render services don't share env vars by default.
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: SHOPIFY_STORE_DOMAIN
+        sync: false
+      - key: SHOPIFY_ACCESS_TOKEN
+        sync: false
+      - key: SHOPIFY_WEBHOOK_SECRET
+        sync: false
+      - key: SHIPROCKET_EMAIL
+        sync: false
+      - key: SHIPROCKET_PASSWORD
+        sync: false
+      - key: SHIPROCKET_PICKUP_LOCATION
+        sync: false
