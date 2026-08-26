@@ -32,3 +32,19 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+
+def dispose_engine_sync() -> None:
+    """Discard pooled connections left over from a closed event loop.
+
+    Every Celery task calls `asyncio.run(...)`, which creates a fresh
+    event loop and closes it when the task finishes. `engine` is a
+    single per-process object shared across tasks, so a connection its
+    pool checked out under one task's loop can't be reused once that
+    loop is gone — the next task hitting the pool gets
+    "Future attached to a different loop" (asyncpg/SQLAlchemy). Call this
+    synchronously right after each `asyncio.run(...)` (in a `finally`) so
+    the next task's loop always starts with a clean pool instead of a
+    stale, loop-bound connection.
+    """
+    engine.sync_engine.dispose()

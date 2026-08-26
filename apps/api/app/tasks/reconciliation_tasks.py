@@ -14,7 +14,7 @@ import asyncio
 import uuid
 
 from app.core.logging import get_logger
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal, dispose_engine_sync
 from app.services.reconciliation_service import ReconciliationService
 from app.workers.celery_app import celery_app
 
@@ -36,4 +36,7 @@ async def _execute_reconciliation_run(run_id: str) -> None:
 @celery_app.task(name="reconciliation.run")
 def run_reconciliation_task(run_id: str) -> None:
     logger.info("reconciliation_run_started", run_id=run_id)
-    asyncio.run(_execute_reconciliation_run(run_id))
+    try:
+        asyncio.run(_execute_reconciliation_run(run_id))
+    finally:
+        dispose_engine_sync()

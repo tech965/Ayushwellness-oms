@@ -8,7 +8,7 @@ import asyncio
 import uuid
 
 from app.core.logging import get_logger
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal, dispose_engine_sync
 from app.services.sync_service import SyncService
 from app.workers.celery_app import celery_app
 
@@ -27,7 +27,10 @@ def execute_sync_task(sync_job_id: str) -> None:
     since it already created the job synchronously to return its id.
     """
     logger.info("sync_task_started", sync_job_id=sync_job_id)
-    asyncio.run(_execute_sync(sync_job_id))
+    try:
+        asyncio.run(_execute_sync(sync_job_id))
+    finally:
+        dispose_engine_sync()
 
 
 async def _run_sync(integration_id: str, sync_type: str, entity_type: str) -> None:
@@ -45,7 +48,10 @@ def run_sync_task(integration_id: str, sync_type: str, entity_type: str) -> None
     beat, `app.tasks.retry_processing`) that don't already have a job id.
     """
     logger.info("sync_task_started", integration_id=integration_id, entity_type=entity_type)
-    asyncio.run(_run_sync(integration_id, sync_type, entity_type))
+    try:
+        asyncio.run(_run_sync(integration_id, sync_type, entity_type))
+    finally:
+        dispose_engine_sync()
 
 
 @celery_app.task(name="sync.run_scheduled")

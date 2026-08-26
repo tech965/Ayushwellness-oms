@@ -17,7 +17,7 @@ import asyncio
 import uuid
 
 from app.core.logging import get_logger
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal, dispose_engine_sync
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import get_adapter
 from app.repositories.integration import IntegrationRepository
@@ -77,3 +77,5 @@ def process_webhook_event_task(self, webhook_event_id: str) -> None:
             "webhook_event_task_failed", webhook_event_id=webhook_event_id, error=str(exc)
         )
         raise self.retry(exc=exc, countdown=60 * (2**self.request.retries)) from exc
+    finally:
+        dispose_engine_sync()
