@@ -40,6 +40,28 @@ class ShopifyAdapter(IntegrationAdapter):
         self._client = ShopifyClient(config)
         return self._client
 
+    async def aclose(self) -> None:
+        """Closes and drops the cached client so the next call lazily
+        creates a fresh one. `ShopifyAdapter` is a process-lifetime
+        singleton (registered once at worker startup), but each Celery
+        task runs its own `asyncio.run(...)` — a client's connections
+        opened under one task's event loop break once that loop closes,
+        so this must run after every task (see `app.db.session.
+        dispose_engine_sync`, which has the identical problem for the DB
+        engine).
+
+        Drops the reference *before* attempting the close, not after —
+        `client.aclose()` closing an already-broken connection can
+        itself raise (`app.integrations.registry.aclose_all_adapters`
+        catches that). If the drop happened after, a raise would leave
+        `self._client` pointed at the same dead client forever, and
+        every later call would keep reusing — and re-failing on — it.
+        """
+        if self._client is None:
+            return
+        client, self._client = self._client, None
+        await client.aclose()
+
     async def authenticate(self) -> None:
         client = self._get_client()
         try:

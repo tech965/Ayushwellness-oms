@@ -121,7 +121,12 @@ class SyncService:
             entity_type=entity_type,
             external_id=external_id,
             error_type=error_type,
-            error_message=error_message,
+            # error_message is String(1000) — an oversized message here
+            # must never itself crash the sync (it already did once: a
+            # long duplicate-key error message overflowed the column,
+            # and *that* INSERT failure took down the whole Celery task
+            # instead of just recording one bad record and moving on).
+            error_message=error_message[:1000],
             payload_reference=payload_reference,
         )
         await self.sync_jobs.update(job, error_count=job.error_count + 1)

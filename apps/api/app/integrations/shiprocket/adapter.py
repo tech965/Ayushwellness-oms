@@ -42,6 +42,18 @@ class ShiprocketAdapter(IntegrationAdapter):
         self._client = ShiprocketClient(config)
         return self._client
 
+    async def aclose(self) -> None:
+        """Closes and drops the cached client so the next call lazily
+        creates a fresh one — see `ShopifyAdapter.aclose` for why this is
+        needed (identical process-lifetime-singleton-vs-per-task-event-
+        loop issue) and why the reference must drop before the close is
+        attempted, not after.
+        """
+        if self._client is None:
+            return
+        client, self._client = self._client, None
+        await client.aclose()
+
     # --- IntegrationAdapter interface --------------------------------
 
     async def authenticate(self) -> None:

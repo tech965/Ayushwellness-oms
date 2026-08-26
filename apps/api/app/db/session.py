@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
+from app.integrations.registry import aclose_all_adapters
 
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -35,18 +36,25 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
+async def _cleanup_after_task() -> None:
+    await engine.dispose()
+    await aclose_all_adapters()
+
+
 def dispose_engine_sync() -> None:
-    """Discard pooled connections left over from a closed event loop.
+    """Discard everything left over from a closed event loop: pooled DB
+    connections and any registered integration adapter's HTTP client.
 
     Every Celery task calls `asyncio.run(...)`, which creates a fresh
-    event loop and closes it when the task finishes. `engine` is a
-    single per-process object shared across tasks, so a connection its
-    pool checked out under one task's loop can't be reused once that
-    loop is gone — the next task hitting the pool gets
-    "Future attached to a different loop" (asyncpg/SQLAlchemy). Call this
-    right after each `asyncio.run(...)` (in a `finally`) so the next
-    task's loop always starts with a clean pool instead of a stale,
-    loop-bound connection.
+    event loop and closes it when the task finishes. `engine` (this
+    module) and every `IntegrationAdapter` (`app.integrations.registry`)
+    are single per-process objects shared across tasks, so a connection
+    either one opened under one task's loop can't be reused once that
+    loop is gone — the next task hitting either one gets a "different
+    loop"/"event loop is closed" error (asyncpg/SQLAlchemy for the DB,
+    httpx for Shopify/Shiprocket). Call this right after each
+    `asyncio.run(...)` (in a `finally`) so the next task always starts
+    with clean, unused connections instead of stale, loop-bound ones.
 
     Uses its own short-lived `asyncio.run(...)` rather than
     `engine.sync_engine.dispose()` — asyncpg's connection.close() still
@@ -54,4 +62,4 @@ def dispose_engine_sync() -> None:
     which a plain sync call outside any loop can't provide (raises
     `MissingGreenlet`). A fresh loop just for disposal gives it one.
     """
-    asyncio.run(engine.dispose())
+    asyncio.run(_cleanup_after_task())
