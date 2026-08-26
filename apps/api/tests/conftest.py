@@ -12,6 +12,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
+from app.core.config import settings
 from app.core.security import hash_password
 from app.db.base import Base
 from app.db.session import get_db
@@ -58,6 +59,27 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests must never depend on whatever real credentials happen to be
+    in the developer's local `.env` (pydantic-settings loads it
+    unconditionally, test runs included). Every test starts from a
+    credentials-absent baseline; a test that wants "configured" behavior
+    already overrides these itself (e.g. `monkeypatch.setattr(settings,
+    "SHOPIFY_ACCESS_TOKEN", ...)` in test_shopify_sync.py), which still
+    wins since it runs later, in the same test's monkeypatch stack.
+    """
+    for attr in (
+        "SHOPIFY_ACCESS_TOKEN",
+        "SHOPIFY_STORE_DOMAIN",
+        "SHOPIFY_WEBHOOK_SECRET",
+        "SHIPROCKET_EMAIL",
+        "SHIPROCKET_PASSWORD",
+        "SHIPROCKET_PICKUP_LOCATION",
+    ):
+        monkeypatch.setattr(settings, attr, None)
 
 
 async def _create_user_with_permissions(
