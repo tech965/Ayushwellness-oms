@@ -179,6 +179,12 @@ class ShopifyProductNormalizer(ProductNormalizer):
                 _decimal(raw["compareAtPrice"]) if raw.get("compareAtPrice") else None
             ),
             "inventory_quantity": raw.get("inventoryQuantity") or 0,
+            # `ProductVariant.weight` no longer exists on Shopify's live
+            # GraphQL schema (confirmed against a real store — it's been
+            # removed in favor of `inventoryItem.measurement.weight`) —
+            # `queries.py` no longer requests it, so this is always None
+            # until PRODUCTS_QUERY is updated to fetch weight via that
+            # nested path instead.
             "weight": _decimal(raw.get("weight")) if raw.get("weight") is not None else None,
             "barcode": raw.get("barcode"),
             "options": options or None,

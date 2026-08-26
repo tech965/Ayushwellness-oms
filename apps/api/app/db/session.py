@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -43,8 +44,14 @@ def dispose_engine_sync() -> None:
     pool checked out under one task's loop can't be reused once that
     loop is gone — the next task hitting the pool gets
     "Future attached to a different loop" (asyncpg/SQLAlchemy). Call this
-    synchronously right after each `asyncio.run(...)` (in a `finally`) so
-    the next task's loop always starts with a clean pool instead of a
-    stale, loop-bound connection.
+    right after each `asyncio.run(...)` (in a `finally`) so the next
+    task's loop always starts with a clean pool instead of a stale,
+    loop-bound connection.
+
+    Uses its own short-lived `asyncio.run(...)` rather than
+    `engine.sync_engine.dispose()` — asyncpg's connection.close() still
+    needs a greenlet/event-loop context to do its async close handshake,
+    which a plain sync call outside any loop can't provide (raises
+    `MissingGreenlet`). A fresh loop just for disposal gives it one.
     """
-    engine.sync_engine.dispose()
+    asyncio.run(engine.dispose())

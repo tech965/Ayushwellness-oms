@@ -86,7 +86,6 @@ query Products($first: Int!, $after: String, $query: String) {
               price
               compareAtPrice
               inventoryQuantity
-              weight
               barcode
               selectedOptions { name value }
             }
