@@ -290,7 +290,16 @@ class ShopifyOrderNormalizer(OrderNormalizer):
     def _normalize_line_item(raw: dict[str, Any]) -> dict[str, Any]:
         quantity = raw.get("quantity") or 0
         unit_price = _money(raw.get("originalUnitPriceSet"))
-        discount_amount = _money(raw.get("discountedTotalSet"))
+        # `discountedTotalSet` is the line's *after-discount total* (what
+        # the customer actually paid for the line) — NOT a discount
+        # amount. Treating it as a discount and subtracting it from
+        # unit_price*quantity used to zero out total_amount whenever a
+        # line had no per-line discount (unit_price*qty - discountedTotal
+        # ~= 0). Derive discount_amount from it instead of the reverse.
+        # See scripts/backfill_order_item_totals.py for the one-off fix
+        # to rows already written by the old, buggy formula.
+        line_total_after_discount = _money(raw.get("discountedTotalSet"))
+        discount_amount = max(Decimal("0"), (unit_price * quantity) - line_total_after_discount)
         # Shopify's line-item GraphQL shape has no dedicated tax-amount
         # money field at this selection depth; tax is aggregated at the
         # order level (totalTaxSet) rather than per line item.
@@ -306,7 +315,7 @@ class ShopifyOrderNormalizer(OrderNormalizer):
             "unit_price": unit_price,
             "discount_amount": discount_amount,
             "tax_amount": tax_amount,
-            "total_amount": (unit_price * quantity) - discount_amount + tax_amount,
+            "total_amount": line_total_after_discount + tax_amount,
         }
 
 

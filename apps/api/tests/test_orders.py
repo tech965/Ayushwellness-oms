@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from app.models.customer import Customer
 from app.repositories.order import OrderRepository
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -195,3 +196,94 @@ async def test_duplicate_external_order_id_upserts_instead_of_duplicating(
     assert created_second is False
     assert second.id == first.id
     assert second.total_amount == Decimal("150.00")
+
+
+async def test_order_detail_embeds_customer_when_linked(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Regression test: `GET /orders/{id}` used to expose only
+    `customer_id`, forcing the frontend into a second round trip that
+    rendered as "Customer — —" whenever it hadn't resolved yet.
+    """
+    customer = Customer(full_name="Jane Doe", email="jane@example.com", phone="+911234567890")
+    db_session.add(customer)
+    await db_session.commit()
+    await db_session.refresh(customer)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        payload = _order_payload("OMS-CUST-1")
+        payload["customer_id"] = str(customer.id)
+        created = await auth_client.post("/api/v1/orders", json=payload)
+        order_id = created.json()["data"]["id"]
+
+        response = await auth_client.get(f"/api/v1/orders/{order_id}")
+        data = response.json()["data"]
+
+        assert data["customer"] is not None
+        assert data["customer"]["full_name"] == "Jane Doe"
+        assert data["customer"]["email"] == "jane@example.com"
+
+
+async def test_order_detail_customer_is_null_without_a_linked_customer(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        created = await auth_client.post("/api/v1/orders", json=_order_payload("OMS-CUST-2"))
+        order_id = created.json()["data"]["id"]
+
+        response = await auth_client.get(f"/api/v1/orders/{order_id}")
+        assert response.json()["data"]["customer"] is None
+
+
+async def test_list_orders_filters_by_payment_type(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        cod_payload = _order_payload("OMS-COD-1")
+        cod_payload["payment_type"] = "cod"
+        await auth_client.post("/api/v1/orders", json=cod_payload)
+        await auth_client.post("/api/v1/orders", json=_order_payload("OMS-PREPAID-1"))
+
+        response = await auth_client.get("/api/v1/orders", params={"payment_type": "cod"})
+        data = response.json()["data"]
+
+        assert len(data) == 1
+        assert data[0]["order_number"] == "OMS-COD-1"
+
+
+async def test_list_orders_filters_by_amount_range(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        await auth_client.post("/api/v1/orders", json=_order_payload("OMS-AMT-1"))
+
+        below = await auth_client.get("/api/v1/orders", params={"amount_min": "1000"})
+        assert below.json()["data"] == []
+
+        above = await auth_client.get("/api/v1/orders", params={"amount_max": "1000"})
+        assert len(above.json()["data"]) == 1
+
+
+async def test_export_orders_returns_an_xlsx_workbook(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        await auth_client.post("/api/v1/orders", json=_order_payload("OMS-EXPORT-1"))
+
+        response = await auth_client.get("/api/v1/orders/export")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert len(response.content) > 0

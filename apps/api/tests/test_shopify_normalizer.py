@@ -193,6 +193,35 @@ def test_order_normalization_maps_totals_addresses_and_line_items() -> None:
     assert item["quantity"] == 2
     assert item["shopify_variant_id"] == "99"
     assert item["unit_price"] == Decimal("500.00")
+    # `discountedTotalSet` (950.00) is the line's *after-discount total*,
+    # not a discount amount — total_amount must equal it directly, and
+    # discount_amount is derived as unit_price*qty - discountedTotalSet
+    # (1000.00 - 950.00 = 50.00). Regression test for the bug where this
+    # used to be swapped, zeroing total_amount whenever a line had no
+    # per-line discount.
+    assert item["total_amount"] == Decimal("950.00")
+    assert item["discount_amount"] == Decimal("50.00")
+
+
+def test_line_item_with_no_discount_still_gets_a_nonzero_total() -> None:
+    """The exact real-world shape of the reported bug: a line with no
+    per-line discount used to compute total_amount = unit_price*qty -
+    discountedTotalSet ~= 0, instead of total_amount = discountedTotalSet.
+    """
+    raw = {
+        "id": "gid://shopify/LineItem/2",
+        "sku": "ASH-30",
+        "title": "Ashwagandha 30ct",
+        "quantity": 1,
+        "originalUnitPriceSet": {"shopMoney": {"amount": "649.00"}},
+        "discountedTotalSet": {"shopMoney": {"amount": "649.00"}},
+        "variant": {"id": "gid://shopify/ProductVariant/1"},
+    }
+
+    item = ShopifyOrderNormalizer._normalize_line_item(raw)
+
+    assert item["total_amount"] == Decimal("649.00")
+    assert item["discount_amount"] == Decimal("0")
 
 
 def test_order_with_cancelled_at_is_flagged_cancelled() -> None:

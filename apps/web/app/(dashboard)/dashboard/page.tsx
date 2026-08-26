@@ -1,68 +1,259 @@
 "use client"
 
+import * as React from "react"
 import {
   AlertTriangle,
   Boxes,
-  ClipboardList,
+  Clock3,
+  IndianRupee,
   PackageCheck,
+  PackageX,
+  RefreshCcw,
   RotateCcw,
   ShoppingCart,
   Truck,
+  Undo2,
   Users,
+  Wallet,
 } from "lucide-react"
+import { startOfDay, subDays } from "date-fns"
 
+import { CourierPerformanceCard } from "@/components/dashboard/courier-performance-card"
+import { KpiCard } from "@/components/dashboard/kpi-card"
+import { BreakdownList } from "@/components/dashboard/breakdown-list"
+import { OrdersRevenueChart } from "@/components/dashboard/orders-revenue-chart"
+import { RecentActivityCard } from "@/components/dashboard/recent-activity-card"
+import { TopProductsCard } from "@/components/dashboard/top-products-card"
+import { DateRangePicker, type DateRangeValue } from "@/components/shared/date-range-picker"
 import { PageHeader } from "@/components/shared/page-header"
-import { QueryStates } from "@/components/shared/query-states"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { useDashboardSummary } from "@/services/dashboard"
-import type { DashboardSummary } from "@/types/dashboard"
+import { Skeleton } from "@/components/ui/skeleton"
+import { formatMoney } from "@/lib/format"
+import { useUrlFilters } from "@/lib/use-url-filters"
+import {
+  useAnalyticsSummary,
+  useBreakdowns,
+  useCourierPerformance,
+  useOrdersTimeseries,
+  useRecentActivity,
+  useTopProducts,
+} from "@/services/analytics"
+import type { TimeseriesInterval } from "@/types/analytics"
 
-const STAT_CONFIG: {
-  key: keyof DashboardSummary
-  label: string
-  icon: typeof ShoppingCart
-}[] = [
-  { key: "total_orders", label: "Total orders", icon: ShoppingCart },
-  { key: "total_customers", label: "Total customers", icon: Users },
-  { key: "total_products", label: "Total products", icon: Boxes },
-  { key: "total_shipments", label: "Total shipments", icon: Truck },
-  { key: "delivered_shipments", label: "Delivered shipments", icon: PackageCheck },
-  { key: "delayed_shipments", label: "Delayed shipments", icon: AlertTriangle },
-  { key: "open_ndr_count", label: "Open NDR", icon: ClipboardList },
-  { key: "open_rto_count", label: "Open RTO", icon: RotateCcw },
-]
+const FILTER_DEFAULTS = { date_from: "", date_to: "" }
+
+function money(value: string): string {
+  return formatMoney(value)
+}
+function count(value: string): string {
+  return Number(value).toLocaleString("en-IN")
+}
+
+function DashboardSkeleton() {
+  return (
+    <>
+      <PageHeader title="Dashboard" description="Real-time operations overview from the OMS database." />
+      <div className="flex flex-col gap-6">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-24 w-full" />
+          ))}
+        </div>
+        <Skeleton className="h-[300px] w-full" />
+      </div>
+    </>
+  )
+}
 
 export default function DashboardPage() {
-  const query = useDashboardSummary()
+  return (
+    <React.Suspense fallback={<DashboardSkeleton />}>
+      <DashboardContent />
+    </React.Suspense>
+  )
+}
+
+function DashboardContent() {
+  const { filters, setFilters } = useUrlFilters(FILTER_DEFAULTS)
+  const [interval, setInterval] = React.useState<TimeseriesInterval>("day")
+
+  const displayRange: DateRangeValue = {
+    from: filters.date_from ? new Date(filters.date_from) : startOfDay(subDays(new Date(), 29)),
+    to: filters.date_to ? new Date(filters.date_to) : new Date(),
+  }
+
+  const dateParams = {
+    date_from: filters.date_from || undefined,
+    date_to: filters.date_to || undefined,
+  }
+
+  const summaryQuery = useAnalyticsSummary(dateParams)
+  const timeseriesQuery = useOrdersTimeseries({ ...dateParams, interval })
+  const breakdownsQuery = useBreakdowns(dateParams)
+  const topProductsQuery = useTopProducts({ ...dateParams, limit: 10 })
+  const courierQuery = useCourierPerformance(dateParams)
+  const recentActivityQuery = useRecentActivity()
+
+  const orderQueryString = new URLSearchParams(
+    Object.entries(dateParams).filter((entry): entry is [string, string] => Boolean(entry[1]))
+  ).toString()
+
+  function ordersHref(extra: Record<string, string>): string {
+    const params = new URLSearchParams(orderQueryString)
+    for (const [key, value] of Object.entries(extra)) params.set(key, value)
+    return `/orders?${params.toString()}`
+  }
+
+  const summary = summaryQuery.data
 
   return (
     <>
-      <PageHeader title="Dashboard" description="Live counts from the OMS database." />
-      <QueryStates
-        isLoading={query.isLoading}
-        isError={query.isError}
-        error={query.error}
-        data={query.data}
-        onRetry={() => void query.refetch()}
-      >
-        {(summary) => (
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            {STAT_CONFIG.map(({ key, label, icon: Icon }) => (
-              <Card key={key}>
-                <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
-                  <CardTitle className="text-muted-foreground text-sm font-medium">
-                    {label}
-                  </CardTitle>
-                  <Icon className="text-muted-foreground size-4" />
-                </CardHeader>
-                <CardContent>
-                  <p className="text-2xl font-semibold">{summary[key]}</p>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        )}
-      </QueryStates>
+      <PageHeader
+        title="Dashboard"
+        description="Real-time operations overview from the OMS database."
+        actions={
+          <DateRangePicker
+            value={displayRange}
+            onChange={(range) =>
+              setFilters({
+                date_from: range.from ? range.from.toISOString() : "",
+                date_to: range.to ? range.to.toISOString() : "",
+              })
+            }
+          />
+        }
+      />
+
+      <div className="flex flex-col gap-6">
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <KpiCard
+            label="Total Orders"
+            icon={ShoppingCart}
+            kpi={summary?.total_orders}
+            format={count}
+            href={ordersHref({})}
+          />
+          <KpiCard
+            label="Total Revenue"
+            icon={IndianRupee}
+            kpi={summary?.total_revenue}
+            format={money}
+            href={ordersHref({})}
+          />
+          <KpiCard label="New Customers" icon={Users} kpi={summary?.total_customers} format={count} href="/customers" />
+          <KpiCard label="New Products" icon={Boxes} kpi={summary?.total_products} format={count} href="/products" />
+        </section>
+
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <KpiCard
+            label="Fulfilled Orders"
+            icon={PackageCheck}
+            kpi={summary?.fulfilled_orders}
+            format={count}
+          />
+          <KpiCard
+            label="Unfulfilled Orders"
+            icon={PackageX}
+            kpi={summary?.unfulfilled_orders}
+            format={count}
+            invert
+          />
+          <KpiCard
+            label="COD Orders"
+            icon={Wallet}
+            kpi={summary?.cod_orders}
+            format={count}
+            href={ordersHref({ payment_type: "cod" })}
+          />
+          <KpiCard
+            label="Prepaid Orders"
+            icon={Wallet}
+            kpi={summary?.prepaid_orders}
+            format={count}
+            href={ordersHref({ payment_type: "prepaid" })}
+          />
+        </section>
+
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <KpiCard
+            label="Delivered Shipments"
+            icon={PackageCheck}
+            kpi={summary?.delivered_shipments}
+            format={count}
+            href={ordersHref({ shipment_status: "delivered" })}
+          />
+          <KpiCard
+            label="In Transit"
+            icon={Truck}
+            kpi={summary?.in_transit_shipments}
+            format={count}
+            href={ordersHref({ shipment_status: "in_transit" })}
+          />
+          <KpiCard
+            label="Out for Delivery"
+            icon={Truck}
+            kpi={summary?.out_for_delivery_shipments}
+            format={count}
+            href={ordersHref({ shipment_status: "out_for_delivery" })}
+          />
+          <KpiCard
+            label="Delayed Shipments"
+            icon={AlertTriangle}
+            kpi={summary?.delayed_shipments}
+            format={count}
+            href="/shipments"
+            invert
+          />
+          <KpiCard label="Open NDR" icon={Clock3} kpi={summary?.open_ndr} format={count} href="/ndr" invert />
+          <KpiCard label="Open RTO" icon={RotateCcw} kpi={summary?.open_rto} format={count} href="/rto" invert />
+          <KpiCard label="Returns" icon={Undo2} kpi={summary?.returns} format={count} href="/returns" />
+          <KpiCard label="Refunds" icon={RefreshCcw} kpi={summary?.refunds} format={count} href="/refunds" />
+        </section>
+
+        <OrdersRevenueChart
+          data={timeseriesQuery.data}
+          interval={interval}
+          onIntervalChange={setInterval}
+          isLoading={timeseriesQuery.isLoading}
+        />
+
+        <section className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
+          <BreakdownList
+            title="Order Status"
+            domain="order"
+            data={breakdownsQuery.data?.order_status}
+            isLoading={breakdownsQuery.isLoading}
+            hrefFor={(status) => ordersHref({ status })}
+          />
+          <BreakdownList
+            title="Payment Type"
+            domain="payment"
+            data={breakdownsQuery.data?.payment_type}
+            isLoading={breakdownsQuery.isLoading}
+            hrefFor={(status) => ordersHref({ payment_type: status })}
+          />
+          <BreakdownList
+            title="Payment Status"
+            domain="payment"
+            data={breakdownsQuery.data?.payment_status}
+            isLoading={breakdownsQuery.isLoading}
+            hrefFor={(status) => ordersHref({ payment_status: status })}
+          />
+          <BreakdownList
+            title="Shipment Pipeline"
+            domain="shipment"
+            data={breakdownsQuery.data?.shipment_status}
+            isLoading={breakdownsQuery.isLoading}
+            hrefFor={(status) => ordersHref({ shipment_status: status })}
+          />
+        </section>
+
+        <section className="grid gap-4 lg:grid-cols-2">
+          <TopProductsCard data={topProductsQuery.data} isLoading={topProductsQuery.isLoading} />
+          <CourierPerformanceCard data={courierQuery.data} isLoading={courierQuery.isLoading} />
+        </section>
+
+        <RecentActivityCard data={recentActivityQuery.data} isLoading={recentActivityQuery.isLoading} />
+      </div>
     </>
   )
 }

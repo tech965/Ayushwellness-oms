@@ -26,6 +26,7 @@ from app.repositories.product import ProductVariantRepository
 from app.schemas.common import PageParams, SortParams
 from app.schemas.order import OrderItemCreateRequest
 from app.services.audit_service import AuditService
+from app.services.export_service import ExportService
 
 ORDER_STATUS_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.PENDING: {OrderStatus.CONFIRMED, OrderStatus.CANCELLED},
@@ -57,6 +58,12 @@ class OrderService:
         q: str | None = None,
         status: str | None = None,
         payment_status: str | None = None,
+        payment_type: str | None = None,
+        shipment_status: str | None = None,
+        courier_id: uuid.UUID | None = None,
+        sku: str | None = None,
+        amount_min: Decimal | None = None,
+        amount_max: Decimal | None = None,
         customer_id: uuid.UUID | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
@@ -65,6 +72,12 @@ class OrderService:
             q=q,
             status=status,
             payment_status=payment_status,
+            payment_type=payment_type,
+            shipment_status=shipment_status,
+            courier_id=courier_id,
+            sku=sku,
+            amount_min=amount_min,
+            amount_max=amount_max,
             customer_id=customer_id,
             date_from=date_from,
             date_to=date_to,
@@ -74,8 +87,17 @@ class OrderService:
         )
         return list(items), total
 
+    async def export_orders(self, filters: dict) -> bytes:
+        query = self.orders.search_query(**filters)
+        orders = await self.orders.list_for_export(query, limit=ExportService.MAX_ROWS)
+        return ExportService().orders_to_xlsx(orders)
+
     async def get_order(self, order_id: uuid.UUID) -> Order:
-        order = await self.orders.get_by_id_with_items(order_id)
+        # Eager-loads `customer` too (not just `items`) so
+        # `OrderDetailResponse.customer` can always be populated without a
+        # second round trip — every caller of `get_order` eventually
+        # serializes through `OrderDetailResponse`.
+        order = await self.orders.get_by_id_with_items_and_customer(order_id)
         if order is None:
             raise NotFoundError("Order not found.")
         return order

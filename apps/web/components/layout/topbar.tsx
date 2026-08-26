@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import { usePathname } from "next/navigation"
 import { Menu, LogOut, Settings, UserRound } from "lucide-react"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -14,8 +15,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
+import { CommandPalette } from "@/components/layout/command-palette"
 import { SidebarNav } from "@/components/layout/sidebar-nav"
+import { ThemeToggle } from "@/components/layout/theme-toggle"
 import { useAuth } from "@/lib/auth-context"
+import { allNavItems } from "@/lib/navigation"
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/)
@@ -24,13 +28,22 @@ function initials(name: string): string {
   return chars.join("").toUpperCase()
 }
 
+function useCurrentSectionLabel(): string {
+  const pathname = usePathname()
+  const match = allNavItems
+    .filter((item) => pathname === item.href || pathname.startsWith(`${item.href}/`))
+    .sort((a, b) => b.href.length - a.href.length)[0]
+  return match?.label ?? "AyushWellness OMS"
+}
+
 export function Topbar() {
   const { user, logout } = useAuth()
   const displayName = user?.name ?? "..."
+  const sectionLabel = useCurrentSectionLabel()
 
   return (
-    <header className="border-border bg-background flex h-14 shrink-0 items-center justify-between border-b px-4">
-      <div className="flex items-center gap-2">
+    <header className="border-border bg-background flex h-14 shrink-0 items-center justify-between gap-3 border-b px-4">
+      <div className="flex min-w-0 items-center gap-2">
         <Sheet>
           <SheetTrigger asChild>
             <Button variant="ghost" size="icon" className="md:hidden">
@@ -46,39 +59,45 @@ export function Topbar() {
             <SidebarNav />
           </SheetContent>
         </Sheet>
+        <h2 className="text-foreground truncate text-sm font-semibold">{sectionLabel}</h2>
       </div>
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="ghost" className="gap-2 px-2">
-            <Avatar className="size-7">
-              <AvatarFallback className="text-xs">{initials(displayName)}</AvatarFallback>
-            </Avatar>
-            <span className="hidden text-sm font-medium sm:inline">{displayName}</span>
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-52">
-          <DropdownMenuLabel>My Account</DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem asChild>
-            <Link href="/settings">
-              <UserRound className="size-4" />
-              Profile
-            </Link>
-          </DropdownMenuItem>
-          <DropdownMenuItem asChild>
-            <Link href="/settings">
-              <Settings className="size-4" />
-              Settings
-            </Link>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem variant="destructive" onSelect={logout}>
-            <LogOut className="size-4" />
-            Log out
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <div className="flex items-center gap-2">
+        <CommandPalette />
+        <ThemeToggle />
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" className="gap-2 px-2">
+              <Avatar className="size-7">
+                <AvatarFallback className="text-xs">{initials(displayName)}</AvatarFallback>
+              </Avatar>
+              <span className="hidden text-sm font-medium sm:inline">{displayName}</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-52">
+            <DropdownMenuLabel>My Account</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild>
+              <Link href="/settings">
+                <UserRound className="size-4" />
+                Profile
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild>
+              <Link href="/settings">
+                <Settings className="size-4" />
+                Settings
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onSelect={logout}>
+              <LogOut className="size-4" />
+              Log out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     </header>
   )
 }

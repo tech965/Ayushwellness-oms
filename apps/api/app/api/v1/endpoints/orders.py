@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import StreamingResponse
 
 from app.core.exceptions import AuthorizationError
 from app.db.session import get_db
@@ -15,12 +17,14 @@ from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
 from app.models.enums import OrderStatus
+from app.models.order import Order
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.order import (
     OrderCreateRequest,
     OrderDetailResponse,
     OrderEventCreateRequest,
     OrderEventResponse,
+    OrderListResponse,
     OrderResponse,
     OrderStatusTransitionRequest,
 )
@@ -33,32 +37,100 @@ from app.services.shiprocket_service import ShiprocketOperationsService
 router = APIRouter()
 
 
-@router.get("", response_model=PaginatedResponse[OrderResponse])
-async def list_orders(
+def _order_filters(
     q: str | None = Query(default=None),
     status: str | None = Query(default=None),
     payment_status: str | None = Query(default=None),
+    payment_type: str | None = Query(default=None),
+    shipment_status: str | None = Query(default=None),
+    courier_id: uuid.UUID | None = Query(default=None),
+    sku: str | None = Query(default=None),
+    amount_min: Decimal | None = Query(default=None, ge=0),
+    amount_max: Decimal | None = Query(default=None, ge=0),
     customer_id: uuid.UUID | None = Query(default=None),
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
+) -> dict:
+    """Shared filter set for `list_orders` and `export_orders` so the two
+    routes can never drift apart on which query params they accept.
+    """
+    return {
+        "q": q,
+        "status": status,
+        "payment_status": payment_status,
+        "payment_type": payment_type,
+        "shipment_status": shipment_status,
+        "courier_id": courier_id,
+        "sku": sku,
+        "amount_min": amount_min,
+        "amount_max": amount_max,
+        "customer_id": customer_id,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+
+
+def _to_list_response(order: Order) -> OrderListResponse:
+    """Denormalizes the Orders-table columns from the relationships
+    `OrderRepository.search_query` already eager-loads, so the list
+    endpoint never issues a query per row.
+    """
+    # An order can have more than one Shipment (a re-ship after RTO); the
+    # most recently created one is "the" shipment for a list-row summary,
+    # matching the export's convention (`ExportService.orders_to_xlsx`).
+    shipment = order.shipments[-1] if order.shipments else None
+
+    items = order.items
+    total_quantity = sum(item.quantity for item in items)
+    item_summary: str | None = None
+    if items:
+        first = items[0].product_name
+        item_summary = first if len(items) == 1 else f"{first} +{len(items) - 1} more"
+
+    return OrderListResponse(
+        **OrderResponse.model_validate(order).model_dump(),
+        customer_name=order.customer.full_name if order.customer else None,
+        customer_phone=order.customer.phone if order.customer else None,
+        item_summary=item_summary,
+        total_quantity=total_quantity,
+        shipment_status=shipment.current_status.value if shipment else None,
+        courier_name=shipment.courier.name if shipment and shipment.courier else None,
+        tracking_number=shipment.awb if shipment else None,
+    )
+
+
+@router.get("", response_model=PaginatedResponse[OrderListResponse])
+async def list_orders(
+    filters: dict = Depends(_order_filters),
     page_params: PageParams = Depends(pagination_params),
     sort_params: SortParams = Depends(sort_params_dep),
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("orders.read")),
-) -> PaginatedResponse[OrderResponse]:
+) -> PaginatedResponse[OrderListResponse]:
     items, total = await OrderService(session).list_orders(
-        page_params=page_params,
-        sort_params=sort_params,
-        q=q,
-        status=status,
-        payment_status=payment_status,
-        customer_id=customer_id,
-        date_from=date_from,
-        date_to=date_to,
+        page_params=page_params, sort_params=sort_params, **filters
     )
     return PaginatedResponse(
-        data=[OrderResponse.model_validate(o) for o in items],
+        data=[_to_list_response(o) for o in items],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
+
+
+@router.get("/export")
+async def export_orders(
+    filters: dict = Depends(_order_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("orders.read")),
+) -> StreamingResponse:
+    """Streams the filtered orders (no pagination — same filters as
+    `list_orders`, capped at `ExportService.MAX_ROWS` rows) as a real
+    `.xlsx` workbook.
+    """
+    workbook = await OrderService(session).export_orders(filters)
+    return StreamingResponse(
+        iter([workbook]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=orders-export.xlsx"},
     )
 
 

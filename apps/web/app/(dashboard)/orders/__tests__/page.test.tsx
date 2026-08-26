@@ -6,11 +6,18 @@ import OrdersPage from "@/app/(dashboard)/orders/page"
 import { useOrders } from "@/services/orders"
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+  usePathname: () => "/orders",
+  useSearchParams: () => new URLSearchParams(),
 }))
 
 vi.mock("@/services/orders", () => ({
   useOrders: vi.fn(),
+  useExportOrders: () => ({ mutate: vi.fn(), isPending: false }),
+}))
+
+vi.mock("@/services/couriers", () => ({
+  useCouriers: () => ({ data: [] }),
 }))
 
 const mockedUseOrders = vi.mocked(useOrders)

@@ -14,6 +14,24 @@ import type { Shipment } from "@/types/shipment"
 interface ListParams extends OrderListFilters {
   page: number
   pageSize: number
+  sortBy?: string
+  sortOrder?: "asc" | "desc"
+}
+
+function toOrderQueryParams(params: OrderListFilters) {
+  return {
+    q: params.q || undefined,
+    status: params.status,
+    payment_status: params.payment_status,
+    payment_type: params.payment_type,
+    shipment_status: params.shipment_status,
+    courier_id: params.courier_id,
+    sku: params.sku,
+    amount_min: params.amount_min || undefined,
+    amount_max: params.amount_max || undefined,
+    date_from: params.date_from,
+    date_to: params.date_to,
+  }
 }
 
 async function fetchOrders(params: ListParams): Promise<PaginatedResponse<Order>> {
@@ -21,14 +39,39 @@ async function fetchOrders(params: ListParams): Promise<PaginatedResponse<Order>
     params: {
       page: params.page,
       page_size: params.pageSize,
-      q: params.q || undefined,
-      status: params.status,
-      payment_status: params.payment_status,
-      date_from: params.date_from,
-      date_to: params.date_to,
+      sort_by: params.sortBy,
+      sort_order: params.sortOrder,
+      ...toOrderQueryParams(params),
     },
   })
   return response.data
+}
+
+async function downloadOrdersExport(filters: OrderListFilters): Promise<void> {
+  const response = await apiClient.get("/orders/export", {
+    params: toOrderQueryParams(filters),
+    responseType: "blob",
+  })
+  const url = window.URL.createObjectURL(new Blob([response.data]))
+  const link = document.createElement("a")
+  link.href = url
+  link.download = "orders-export.xlsx"
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+/** Downloads the same filtered set as `useOrders`, unpaginated, as a real
+ * `.xlsx` workbook (`GET /orders/export`) — no pagination params, capped
+ * server-side at `ExportService.MAX_ROWS`. Wrapped as a mutation (rather
+ * than a plain async call) purely so the Export button gets `isPending`
+ * for free, matching every other async action in this codebase.
+ */
+export function useExportOrders() {
+  return useMutation({
+    mutationFn: downloadOrdersExport,
+  })
 }
 
 export function useOrders(params: ListParams) {

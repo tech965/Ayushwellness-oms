@@ -108,6 +108,12 @@ const PRODUCT_STATUS_TONES: Record<string, StatusTone> = {
   archived: "danger",
 }
 
+const FULFILLMENT_STATUS_TONES: Record<string, StatusTone> = {
+  unfulfilled: "neutral",
+  partial: "warning",
+  fulfilled: "success",
+}
+
 const SHIPMENT_DELAY_TONES: Record<string, StatusTone> = {
   on_time: "success",
   at_risk: "warning",
@@ -156,6 +162,7 @@ const RECONCILIATION_RESULT_STATUS_TONES: Record<string, StatusTone> = {
 export type StatusDomain =
   | "order"
   | "payment"
+  | "fulfillment"
   | "shipment"
   | "shipment_delay"
   | "ndr"
@@ -172,6 +179,7 @@ export type StatusDomain =
 const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   order: ORDER_STATUS_TONES,
   payment: PAYMENT_STATUS_TONES,
+  fulfillment: FULFILLMENT_STATUS_TONES,
   shipment: SHIPMENT_STATUS_TONES,
   shipment_delay: SHIPMENT_DELAY_TONES,
   ndr: NDR_STATUS_TONES,

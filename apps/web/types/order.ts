@@ -1,5 +1,7 @@
 // Mirrors app/schemas/order.py
 
+import type { Customer } from "./customer"
+
 export type OrderStatus =
   | "pending"
   | "confirmed"
@@ -52,6 +54,16 @@ export interface Order {
   source_system: string | null
   created_at: string
   updated_at: string
+  // Present only on rows from `GET /orders` (`OrderListResponse`) — see
+  // `_to_list_response` in the backend endpoint. Absent (undefined) on
+  // plain `OrderResponse` rows, e.g. a customer's order history.
+  customer_name?: string | null
+  customer_phone?: string | null
+  item_summary?: string | null
+  total_quantity?: number
+  shipment_status?: string | null
+  courier_name?: string | null
+  tracking_number?: string | null
 }
 
 export interface OrderAddress {
@@ -68,6 +80,7 @@ export interface OrderAddress {
 
 export interface OrderDetail extends Order {
   items: OrderItem[]
+  customer: Customer | null
 }
 
 export interface OrderEvent {
@@ -86,9 +99,30 @@ export interface OrderListFilters {
   q?: string
   status?: OrderStatus
   payment_status?: PaymentStatus
+  payment_type?: PaymentType
+  shipment_status?: string
+  courier_id?: string
+  sku?: string
+  amount_min?: string
+  amount_max?: string
   date_from?: string
   date_to?: string
 }
+
+export const PAYMENT_TYPE_OPTIONS: { label: string; value: PaymentType }[] = [
+  { label: "COD", value: "cod" },
+  { label: "Prepaid", value: "prepaid" },
+  { label: "Other", value: "other" },
+]
+
+export const PAYMENT_STATUS_OPTIONS: { label: string; value: PaymentStatus }[] = [
+  { label: "Pending", value: "pending" },
+  { label: "Authorized", value: "authorized" },
+  { label: "Paid", value: "paid" },
+  { label: "Failed", value: "failed" },
+  { label: "Refunded", value: "refunded" },
+  { label: "Partially Refunded", value: "partially_refunded" },
+]
 
 export const ORDER_STATUS_OPTIONS: { label: string; value: OrderStatus }[] = [
   { label: "Pending", value: "pending" },

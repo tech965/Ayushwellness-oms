@@ -1,4 +1,5 @@
 import type { ReactNode } from "react"
+import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react"
 
 import {
   Table,
@@ -15,6 +16,10 @@ export interface DataTableColumn<TRow> {
   header: ReactNode
   cell: (row: TRow) => ReactNode
   className?: string
+  /** Backend column name this header sorts by (e.g. `"order_datetime"`).
+   * Omit for columns that aren't sortable (e.g. a computed summary column).
+   */
+  sortKey?: string
 }
 
 interface DataTableProps<TRow> {
@@ -22,30 +27,58 @@ interface DataTableProps<TRow> {
   data: TRow[]
   rowKey: (row: TRow) => string
   onRowClick?: (row: TRow) => void
+  sortBy?: string
+  sortOrder?: "asc" | "desc"
+  onSortChange?: (sortKey: string) => void
 }
 
 /**
  * Plain column-definition table shared by every list page. Sorting and
  * pagination are server-driven (query params against the backend, see
  * PaginationBar/FilterBar) rather than client-side, so this deliberately
- * doesn't pull in a headless table library — it only needs to render rows.
+ * doesn't pull in a headless table library — it only needs to render rows
+ * and, for columns with a `sortKey`, a clickable header that reports the
+ * next sort state back to the caller.
  */
 export function DataTable<TRow>({
   columns,
   data,
   rowKey,
   onRowClick,
+  sortBy,
+  sortOrder,
+  onSortChange,
 }: DataTableProps<TRow>) {
   return (
     <div className="overflow-x-auto rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
-            {columns.map((column) => (
-              <TableHead key={column.id} className={column.className}>
-                {column.header}
-              </TableHead>
-            ))}
+            {columns.map((column) => {
+              const isSortable = Boolean(column.sortKey && onSortChange)
+              const isActive = isSortable && column.sortKey === sortBy
+              const Icon = isActive ? (sortOrder === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
+
+              return (
+                <TableHead key={column.id} className={column.className}>
+                  {isSortable ? (
+                    <button
+                      type="button"
+                      onClick={() => onSortChange?.(column.sortKey!)}
+                      className={cn(
+                        "hover:text-foreground -mx-1 flex items-center gap-1 rounded px-1 py-0.5",
+                        column.className?.includes("text-right") && "ml-auto flex-row-reverse"
+                      )}
+                    >
+                      {column.header}
+                      <Icon className={cn("size-3.5", !isActive && "opacity-40")} />
+                    </button>
+                  ) : (
+                    column.header
+                  )}
+                </TableHead>
+              )
+            })}
           </TableRow>
         </TableHeader>
         <TableBody>

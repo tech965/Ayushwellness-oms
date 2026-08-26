@@ -13,6 +13,7 @@ from app.models.enums import (
     PaymentStatus,
     PaymentType,
 )
+from app.schemas.customer import CustomerResponse
 
 
 class OrderItemCreateRequest(BaseModel):
@@ -85,6 +86,30 @@ class OrderResponse(BaseModel):
 
 class OrderDetailResponse(OrderResponse):
     items: list[OrderItemResponse] = []
+    # `None` covers both "guest checkout, no customer on the order" and
+    # "customer_id is set but that Customer hasn't synced yet" — the
+    # frontend already has customer_id to tell those apart if needed.
+    customer: CustomerResponse | None = None
+
+
+class OrderListResponse(OrderResponse):
+    """`OrderResponse` plus the denormalized fields the Orders table needs
+    to render customer/product/shipment columns without an N+1 request per
+    row — only `list_orders` (`GET /orders`) returns this; every other
+    order-list usage (e.g. `GET /customers/{id}/orders`) still returns
+    plain `OrderResponse` since those tables don't show these columns.
+    Computed by `OrderService.list_orders` from the same eager-loaded
+    `Order.customer`/`Order.items`/`Order.shipments` relationships
+    `OrderRepository.search_query` already loads.
+    """
+
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    item_summary: str | None = None
+    total_quantity: int = 0
+    shipment_status: str | None = None
+    courier_name: str | None = None
+    tracking_number: str | None = None
 
 
 class OrderEventResponse(BaseModel):
