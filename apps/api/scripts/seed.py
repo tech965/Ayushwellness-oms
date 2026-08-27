@@ -71,6 +71,11 @@ PERMISSIONS: dict[str, str] = {
     "webhooks.read": "View webhook event log",
     "reconciliation.read": "View reconciliation runs and results",
     "reconciliation.manage": "Trigger a reconciliation run and resolve mismatches",
+    "telecalling.manage": (
+        "Team Leader: view team orders/telecallers, assign/reassign orders, "
+        "view team calling activity and performance"
+    ),
+    "calls.manage": "Telecaller: view own assigned orders, log calls, manage own follow-ups",
 }
 
 ROLE_PERMISSIONS: dict[str, list[str] | str] = {
@@ -121,6 +126,8 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "webhooks.read",
         "reconciliation.read",
     ],
+    "TEAM_LEADER": ["telecalling.manage"],
+    "TELECALLER": ["calls.manage"],
 }
 
 COURIERS = [

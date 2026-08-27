@@ -200,6 +200,22 @@ class SyncService:
         in Phase 2.1 the registry is always empty, so every sync fails
         gracefully with a single recorded `SyncError` instead of attempting
         any network call.
+
+        `since` (the incremental-sync boundary) is derived per entity
+        type from sync-job history, not from `Integration.
+        last_successful_sync_at` — that field is one shared timestamp per
+        *integration*, so for a multi-entity integration (Shopify: orders,
+        customers, products) it only reflects whichever entity type
+        happened to sync most recently. Reading it as "since" for every
+        entity type meant that once any one entity type's sync completed
+        and bumped it, the *next* entity type's incremental sync — even on
+        its own first-ever run — saw a `since` of moments ago instead of
+        "never", and fetched almost nothing. Confirmed live: a first-ever
+        orders+customers+products sync against the real Shopify store
+        correctly pulled every order (orders ran first, `since=None`), but
+        customers and products (which ran immediately after, in the same
+        cycle) each received 0 records, because orders' completion had
+        already set `Integration.last_successful_sync_at` to "just now".
         """
         job = await self._get_sync_job(sync_job_id)
         job_id = job.id
@@ -210,7 +226,14 @@ class SyncService:
         integration = await self.integrations.get_by_id(job.integration_id)
         adapter = get_adapter(integration.code) if integration else None
         integration_code = integration.code if integration else str(job.integration_id)
-        since = integration.last_successful_sync_at if integration else None
+        last_job_for_entity = (
+            await self.sync_jobs.get_last_successful_for_entity(
+                integration_id=job.integration_id, entity_type=entity_type
+            )
+            if integration
+            else None
+        )
+        since = last_job_for_entity.completed_at if last_job_for_entity else None
 
         if adapter is None:
             await self.record_error(

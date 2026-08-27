@@ -33,6 +33,19 @@ pagination.
   `read_products`, `read_orders` (read-only — this integration never
   writes back to Shopify).
 
+  **Historical order visibility (Round 4 finding):** `read_orders` only
+  grants access to orders from roughly the last 60 days; older orders
+  are invisible to every endpoint this integration calls (`ordersCount`,
+  the paginated `orders` query, and the equivalent REST window),
+  regardless of any code change here — this is a Shopify-enforced scope
+  boundary, not a bug. Confirmed live via `currentAppInstallation {
+  accessScopes }` against the production store: only `read_customers`,
+  `read_products`, `read_orders` were granted — not `read_all_orders`.
+  To see the full order history, the merchant must re-approve the app
+  in Shopify Admin with `read_all_orders` added; this cannot be done
+  from the API/OAuth token alone, and this codebase must never fabricate
+  or backfill historical orders to work around the gap.
+
 ## Components (`apps/api/app/integrations/shopify/`)
 
 | File | Responsibility |

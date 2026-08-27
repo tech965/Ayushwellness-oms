@@ -5,15 +5,28 @@ import { usePathname } from "next/navigation"
 
 import { Separator } from "@/components/ui/separator"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { useAuth } from "@/lib/auth-context"
 import { cn } from "@/lib/utils"
-import { navGroups } from "@/lib/navigation"
+import { navGroups, teamLeaderNavGroups, telecallerNavGroups } from "@/lib/navigation"
 
 export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
   const pathname = usePathname()
+  const { hasRole } = useAuth()
+
+  // A Telecaller/Team Leader gets the minimal role-specific nav instead
+  // of the full Admin OMS menu (spec: "Do not show the full Admin OMS
+  // navigation") — purely a UI simplification; the actual access
+  // boundary is enforced server-side regardless of which links render
+  // here. Superusers/other roles keep the full `navGroups`.
+  const effectiveGroups = hasRole("TELECALLER")
+    ? telecallerNavGroups
+    : hasRole("TEAM_LEADER")
+      ? teamLeaderNavGroups
+      : navGroups
 
   return (
     <nav className="flex flex-col gap-1 px-3 py-4">
-      {navGroups.map((group, index) => (
+      {effectiveGroups.map((group, index) => (
         <div key={group.label} className="flex flex-col gap-1">
           {index > 0 && <Separator className="my-2" />}
           {!collapsed && (

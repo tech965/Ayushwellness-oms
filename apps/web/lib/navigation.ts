@@ -3,13 +3,17 @@ import {
   BarChart3,
   Bell,
   Boxes,
+  CalendarClock,
   ClipboardList,
   FileClock,
   Gauge,
   History,
   LayoutDashboard,
+  ListChecks,
   Package,
   PackageX,
+  Phone,
+  PhoneCall,
   Plug,
   Repeat,
   RotateCcw,
@@ -83,3 +87,32 @@ export const navGroups: NavGroup[] = [
 ]
 
 export const allNavItems: NavItem[] = navGroups.flatMap((group) => group.items)
+
+/** Minimal nav for TELECALLER — spec: "Do not show the full Admin OMS
+ * navigation." The real access boundary is backend-side (`calls.manage`);
+ * this is purely UI simplification for a role that has no business
+ * reason to see the rest of the app's chrome.
+ */
+export const telecallerNavGroups: NavGroup[] = [
+  {
+    label: "Telecalling",
+    items: [
+      { label: "Dashboard", href: "/telecaller/dashboard", icon: LayoutDashboard },
+      { label: "My Assigned Orders", href: "/telecaller/orders", icon: Phone },
+      { label: "Follow-ups", href: "/telecaller/follow-ups", icon: CalendarClock },
+      { label: "Call History", href: "/telecaller/calls", icon: PhoneCall },
+    ],
+  },
+]
+
+/** Minimal nav for TEAM_LEADER. */
+export const teamLeaderNavGroups: NavGroup[] = [
+  {
+    label: "Team",
+    items: [
+      { label: "Dashboard", href: "/team/dashboard", icon: LayoutDashboard },
+      { label: "Unfulfilled Orders", href: "/team/orders/unfulfilled", icon: ListChecks },
+      { label: "Telecallers", href: "/team/telecallers", icon: Users },
+    ],
+  },
+]

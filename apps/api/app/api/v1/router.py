@@ -36,6 +36,8 @@ from app.api.v1.endpoints import (
     sync,
     sync_jobs,
     tasks,
+    team,
+    telecaller,
     users,
     webhook_events,
 )
@@ -73,6 +75,8 @@ api_router.include_router(automation.router, prefix="/automation", tags=["automa
 api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(audit_logs.router, prefix="/audit-logs", tags=["audit-logs"])
+api_router.include_router(team.router, prefix="/team", tags=["team"])
+api_router.include_router(telecaller.router, prefix="/telecaller", tags=["telecaller"])
 
 api_router.include_router(
     shopify_webhooks.router, prefix="/webhooks/shopify", tags=["webhooks:shopify"]

@@ -33,13 +33,26 @@ class UserService:
         return user
 
     async def create_user(
-        self, *, name: str, email: str, phone: str | None, password: str, role_ids: list[uuid.UUID]
+        self,
+        *,
+        name: str,
+        email: str,
+        phone: str | None,
+        password: str,
+        role_ids: list[uuid.UUID],
+        team_leader_id: uuid.UUID | None = None,
     ) -> User:
         if await self.users.get_by_email(email) is not None:
             raise ConflictError("A user with this email already exists.")
+        if team_leader_id is not None:
+            await self._validate_team_leader(team_leader_id)
 
         user = await self.users.create(
-            name=name, email=email, phone=phone, password_hash=hash_password(password)
+            name=name,
+            email=email,
+            phone=phone,
+            password_hash=hash_password(password),
+            team_leader_id=team_leader_id,
         )
         await self._sync_roles(user, role_ids)
         await self.session.commit()
@@ -53,19 +66,31 @@ class UserService:
         phone: str | None = None,
         is_active: bool | None = None,
         role_ids: list[uuid.UUID] | None = None,
+        team_leader_id: uuid.UUID | None = None,
+        clear_team_leader: bool = False,
     ) -> User:
         user = await self.get_user(user_id)
-        fields = {
+        fields: dict[str, str | bool | uuid.UUID | None] = {
             k: v
             for k, v in {"name": name, "phone": phone, "is_active": is_active}.items()
             if v is not None
         }
+        if clear_team_leader:
+            fields["team_leader_id"] = None
+        elif team_leader_id is not None:
+            await self._validate_team_leader(team_leader_id)
+            fields["team_leader_id"] = team_leader_id
         if fields:
             await self.users.update(user, **fields)
         if role_ids is not None:
             await self._sync_roles(user, role_ids)
         await self.session.commit()
         return await self.get_user(user_id)
+
+    async def _validate_team_leader(self, team_leader_id: uuid.UUID) -> None:
+        team_leader = await self.users.get_with_permissions(team_leader_id)
+        if team_leader is None or "TEAM_LEADER" not in team_leader.role_names:
+            raise NotFoundError("team_leader_id does not reference a Team Leader.")
 
     async def deactivate_user(self, user_id: uuid.UUID) -> User:
         return await self.update_user(user_id, is_active=False)

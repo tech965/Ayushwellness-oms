@@ -83,7 +83,13 @@ def _isolate_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _create_user_with_permissions(
-    session: AsyncSession, *, email: str, permission_codes: list[str], is_superuser: bool = False
+    session: AsyncSession,
+    *,
+    email: str,
+    permission_codes: list[str],
+    is_superuser: bool = False,
+    role_name: str | None = None,
+    team_leader_id=None,  # noqa: ANN001
 ) -> User:
     user = User(
         name="Test User",
@@ -91,12 +97,13 @@ async def _create_user_with_permissions(
         password_hash=hash_password("Test1234!"),
         is_active=True,
         is_superuser=is_superuser,
+        team_leader_id=team_leader_id,
     )
     session.add(user)
     await session.flush()
 
     if permission_codes:
-        role = Role(name=f"role-{email}", description="Test role")
+        role = Role(name=role_name or f"role-{email}", description="Test role")
         session.add(role)
         await session.flush()
 
@@ -132,6 +139,8 @@ async def make_authenticated_client():
         permission_codes: list[str] | None = None,
         is_superuser: bool = False,
         email: str = "user@example.com",
+        role_name: str | None = None,
+        team_leader_id=None,  # noqa: ANN001
     ) -> AsyncClient:
         from app.core.security import create_access_token
 
@@ -140,6 +149,8 @@ async def make_authenticated_client():
             email=email,
             permission_codes=permission_codes or [],
             is_superuser=is_superuser,
+            role_name=role_name,
+            team_leader_id=team_leader_id,
         )
         token = create_access_token(subject=str(user.id))
 

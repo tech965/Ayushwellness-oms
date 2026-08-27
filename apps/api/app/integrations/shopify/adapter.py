@@ -17,6 +17,7 @@ from app.integrations.shopify.config import ShopifyConfig
 from app.integrations.shopify.errors import ShopifyApiError
 from app.integrations.shopify.normalizer import ENTITY_NORMALIZERS
 from app.integrations.shopify.queries import ENTITY_QUERIES, SHOP_PING_QUERY, updated_since_filter
+from app.integrations.shopify.webhook_shapes import WEBHOOK_SHAPE_TRANSLATORS
 from app.models.integration import IntegrationCode
 
 
@@ -135,11 +136,23 @@ class ShopifyAdapter(IntegrationAdapter):
         )
 
     async def process_webhook(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Round 4 fix: a Shopify webhook delivers the REST Admin API
+        resource shape (snake_case, flat prices, plain integer ids) —
+        never the GraphQL node shape `ENTITY_NORMALIZERS` was built for
+        (see `webhook_shapes.py`'s module docstring for how this was
+        confirmed: a real orders/create payload crashed
+        `ShopifyOrderNormalizer.normalize()` before this translation
+        step existed). Translate first, then reuse the exact same,
+        unmodified normalizer the pull-sync path uses, so both paths
+        converge on identical OMS records for the same order.
+        """
         entity_type = event_type.split("/", 1)[0]
         normalizer = ENTITY_NORMALIZERS.get(entity_type)
         if normalizer is None:
             return {"entity_type": None, "normalized": None}
-        return {"entity_type": entity_type, "normalized": normalizer.normalize(payload)}
+        translate = WEBHOOK_SHAPE_TRANSLATORS.get(entity_type)
+        graphql_shaped = translate(payload) if translate else payload
+        return {"entity_type": entity_type, "normalized": normalizer.normalize(graphql_shaped)}
 
     def normalize(self, entity_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         normalizer = ENTITY_NORMALIZERS.get(entity_type)

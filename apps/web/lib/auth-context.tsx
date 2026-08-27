@@ -13,6 +13,13 @@ interface AuthContextValue {
   permissions: Set<string>
   isLoading: boolean
   hasPermission: (code: string) => boolean
+  /** Checks `user.roles` directly (unlike `hasPermission`, which resolves
+   * against the permission-code set) — used only for UI-level role
+   * branching (which nav/dashboard a Team Leader vs. Telecaller lands on).
+   * Never the actual access-control boundary: that's enforced server-side
+   * via permissions on every request, same as everywhere else in the app.
+   */
+  hasRole: (role: string) => boolean
   logout: () => void
 }
 
@@ -62,11 +69,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [permissions, query.data?.is_superuser]
   )
 
+  const hasRole = React.useCallback(
+    (role: string) => query.data?.roles?.includes(role) ?? false,
+    [query.data?.roles]
+  )
+
   const value: AuthContextValue = {
     user: query.data ?? null,
     permissions,
     isLoading: query.isPending,
     hasPermission,
+    hasRole,
     logout,
   }
 

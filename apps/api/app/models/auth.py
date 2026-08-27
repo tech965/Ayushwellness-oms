@@ -34,10 +34,19 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_superuser: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # Telecalling hierarchy: a Telecaller belongs to exactly one Team
+    # Leader. Self-referential rather than a separate `Team` table — "the
+    # team" *is* "the set of users where team_leader_id == this user's
+    # id." NULL for every user who isn't a Telecaller (including Team
+    # Leaders themselves, who aren't managed by another team leader).
+    team_leader_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     user_roles: Mapped[list[UserRole]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    team_leader: Mapped[User | None] = relationship(remote_side="User.id")
 
     @property
     def permission_codes(self) -> set[str]:

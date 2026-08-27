@@ -15,16 +15,24 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal, dispose_engine_sync
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import get_adapter
 from app.repositories.integration import IntegrationRepository
+from app.repositories.webhook_event import WebhookEventRepository
 from app.services.webhook_service import WebhookService
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
+
+# How long a WebhookEvent may legitimately sit at RECEIVED waiting for
+# its worker before `recover_stuck_webhook_events_task` treats it as
+# abandoned (its Celery enqueue call failed — see that task's docstring)
+# rather than just slow.
+STUCK_WEBHOOK_EVENT_THRESHOLD = timedelta(minutes=5)
 
 
 async def _process_webhook_event(webhook_event_id: str) -> None:
@@ -79,3 +87,40 @@ def process_webhook_event_task(self, webhook_event_id: str) -> None:
         raise self.retry(exc=exc, countdown=60 * (2**self.request.retries)) from exc
     finally:
         dispose_engine_sync()
+
+
+async def _recover_stuck_webhook_events() -> list[str]:
+    recovered: list[str] = []
+    async with AsyncSessionLocal() as session:
+        cutoff = datetime.now(UTC) - STUCK_WEBHOOK_EVENT_THRESHOLD
+        stuck = await WebhookEventRepository(session).get_stuck_received(received_before=cutoff)
+        for event in stuck:
+            recovered.append(str(event.id))
+    # Enqueue outside the session above — `.delay()` makes a network call
+    # to the broker and shouldn't hold a DB transaction open while it does.
+    for event_id in recovered:
+        process_webhook_event_task.delay(event_id)
+    return recovered
+
+
+@celery_app.task(name="webhooks.recover_stuck")
+def recover_stuck_webhook_events_task() -> list[str]:
+    """Scheduled backstop (Celery Beat, see `celery_app.py`) for the one
+    way a `WebhookEvent` can be silently lost: `receive_shopify_webhook`
+    persists it before calling `process_webhook_event_task.delay()`, and
+    deliberately doesn't fail the webhook ack if that enqueue call itself
+    raises (a broker outage, e.g. Redis unreachable at the exact moment
+    the webhook arrived) — so nothing was re-driving that event once the
+    broker recovered. This re-enqueues anything still sitting at
+    RECEIVED after `STUCK_WEBHOOK_EVENT_THRESHOLD`. A worker being briefly
+    down (as opposed to the broker) doesn't need this: Celery/Redis
+    itself retains a successfully-enqueued message until a worker is
+    available, so that case already recovers with no extra code.
+    """
+    try:
+        recovered = asyncio.run(_recover_stuck_webhook_events())
+    finally:
+        dispose_engine_sync()
+    if recovered:
+        logger.warning("stuck_webhook_events_recovered", count=len(recovered), event_ids=recovered)
+    return recovered

@@ -176,3 +176,37 @@ class ReconciliationStatus(StrEnum):
     MISMATCH = "mismatch"
     MISSING = "missing"
     ERROR = "error"
+
+
+class AssignmentStatus(StrEnum):
+    """An order has at most one ACTIVE `OrderAssignment` at a time — a
+    reassignment flips the old row to INACTIVE and inserts a new ACTIVE
+    row, never mutating history (see `TelecallingService.reassign_order`).
+    """
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+
+
+class TelecallingStatus(StrEnum):
+    """Telecaller-facing calling status — deliberately separate from
+    `OrderStatus` (the pack/ship operational workflow). Used both as
+    `OrderAssignment.current_status` (the order's latest calling state)
+    and `CallAttempt.outcome` (what happened on one specific call) — the
+    API layer never accepts NOT_CALLED as a loggable call outcome, it's
+    only ever a default/initial state.
+    """
+
+    NOT_CALLED = "not_called"
+    CALL_ATTEMPTED = "call_attempted"
+    CONNECTED = "connected"
+    NOT_RECEIVED = "not_received"
+    BUSY = "busy"
+    SWITCHED_OFF = "switched_off"
+    INVALID_NUMBER = "invalid_number"
+    CALL_BACK_REQUESTED = "call_back_requested"
+    INTERESTED = "interested"
+    NOT_INTERESTED = "not_interested"
+    FOLLOW_UP_REQUIRED = "follow_up_required"
+    CONFIRMED = "confirmed"
+    CANCELLED = "cancelled"

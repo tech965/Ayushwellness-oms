@@ -13,7 +13,7 @@ import pytest
 from app.integrations.registry import clear_adapters, register_adapter
 from app.integrations.shopify.adapter import ShopifyAdapter
 from app.models.customer import Customer
-from app.models.enums import IntegrationStatus, IntegrationType, SyncType
+from app.models.enums import IntegrationStatus, IntegrationType, SyncJobStatus, SyncType
 from app.models.integration import Integration, IntegrationCode
 from app.models.order import Order
 from app.models.product import Product
@@ -22,6 +22,7 @@ from app.repositories.integration import IntegrationRepository
 from app.repositories.order import OrderRepository
 from app.repositories.payment import PaymentRepository
 from app.repositories.product import ProductRepository
+from app.repositories.sync_job import SyncJobRepository
 from app.services.sync_service import SyncService
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -319,11 +320,20 @@ async def test_resyncing_the_same_order_does_not_duplicate(db_session: AsyncSess
 
 # 19. Partial sync failure
 async def test_one_bad_record_does_not_fail_the_whole_sync_job(db_session: AsyncSession) -> None:
-    """Two products in one page; the second reuses the first's SKU (a real
-    unique-constraint violation), so it fails while the first succeeds —
-    the job must land PARTIAL, not FAILED, per spec §23.
+    """Two products in one page; the second has a structurally malformed
+    `variants` field (a real-world "Shopify returned something the
+    normalizer didn't expect" scenario), so it fails while the first
+    succeeds — the job must land PARTIAL, not FAILED, per spec §23.
+
+    Round 4 note: this used to reuse the first product's SKU to trigger
+    the failure, but a duplicate SKU is no longer a hard failure (see
+    `ProductService._safe_sku` / `test_product_sync_duplicate_sku.py`) —
+    it's now handled gracefully by design, so it can no longer stand in
+    for "a record that genuinely can't be processed." Malformed
+    `variants` still can't be, and still exercises the same PARTIAL-job
+    code path this test is actually about.
     """
-    page = _products_response("30", "40", "DUP-SKU")
+    page = _products_response("30", "40", "ASH-60")
     page["products"]["edges"].append(
         {
             "node": {
@@ -335,23 +345,8 @@ async def test_one_bad_record_does_not_fail_the_whole_sync_job(db_session: Async
                 "tags": None,
                 "createdAt": "2026-01-01T00:00:00Z",
                 "updatedAt": "2026-01-02T00:00:00Z",
-                "variants": {
-                    "edges": [
-                        {
-                            "node": {
-                                "id": "gid://shopify/ProductVariant/41",
-                                "sku": "DUP-SKU",
-                                "title": None,
-                                "price": "1.00",
-                                "compareAtPrice": None,
-                                "inventoryQuantity": 0,
-                                "weight": None,
-                                "barcode": None,
-                                "selectedOptions": [],
-                            }
-                        }
-                    ]
-                },
+                # normalizer does `.get("variants", {}).get("edges")` -> AttributeError
+                "variants": None,
             }
         }
     )
@@ -375,14 +370,24 @@ async def test_one_bad_record_does_not_fail_the_whole_sync_job(db_session: Async
 
 
 # 25. Incremental sync
-async def test_incremental_sync_passes_last_successful_sync_at_as_filter(
+async def test_incremental_sync_passes_the_entity_types_own_last_successful_sync_as_filter(
     db_session: AsyncSession,
 ) -> None:
+    """`since` must come from this entity type's own sync-job history —
+    not from `Integration.last_successful_sync_at`, a single timestamp
+    shared across every entity type the integration syncs (see
+    `SyncService.execute_sync`'s docstring for why that's wrong).
+    """
     client = _StubClient([_customers_response("60")])
     register_adapter(ShopifyAdapter(client=client))
     integration = await _make_shopify_integration(db_session)
-    await IntegrationRepository(db_session).update(
-        integration, last_successful_sync_at=datetime(2026, 1, 1, tzinfo=UTC)
+
+    await SyncJobRepository(db_session).create(
+        integration_id=integration.id,
+        sync_type=SyncType.FULL,
+        entity_type="customers",
+        status=SyncJobStatus.COMPLETED,
+        completed_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     await db_session.commit()
 
@@ -394,6 +399,44 @@ async def test_incremental_sync_passes_last_successful_sync_at_as_filter(
 
     assert client.calls[0]["query"] is not None
     assert "updated_at" in client.calls[0]["query"]
+    assert "2026-01-01" in client.calls[0]["query"]
+
+
+async def test_incremental_sync_is_not_starved_by_a_different_entity_types_completed_sync(
+    db_session: AsyncSession,
+) -> None:
+    """Regression test for a real bug found via a live Shopify
+    reconciliation: completing an orders sync used to bump
+    `Integration.last_successful_sync_at`, which a customers sync run
+    immediately after (same integration, same cycle) then read as its
+    own `since` — even though customers had never itself synced before.
+    Confirmed live: a first-ever orders+customers+products sync pulled
+    every order correctly, but customers and products each fetched 0
+    records, purely because orders had *just* completed moments earlier.
+    """
+    orders_client = _StubClient(
+        [{"orders": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "edges": []}}]
+    )
+    register_adapter(ShopifyAdapter(client=orders_client))
+    integration = await _make_shopify_integration(db_session)
+
+    service = SyncService(db_session)
+    orders_job = await service.start_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="orders"
+    )
+    await service.execute_sync(orders_job.id)
+    assert orders_job.status == SyncJobStatus.COMPLETED  # sanity: orders really did complete
+
+    customers_client = _StubClient([_customers_response("62")])
+    register_adapter(ShopifyAdapter(client=customers_client))
+    customers_job = await service.start_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="customers"
+    )
+    await service.execute_sync(customers_job.id)
+
+    # customers has never synced before -> a full fetch (no `since`
+    # filter), not starved by orders' completion moments earlier.
+    assert customers_client.calls[0]["query"] is None
 
 
 async def test_full_sync_does_not_apply_an_incremental_filter(db_session: AsyncSession) -> None:

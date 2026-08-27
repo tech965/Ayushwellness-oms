@@ -79,14 +79,23 @@ def test_migration_chain_has_a_single_head_through_phase_2_1_through_2_4() -> No
     heads = script.get_heads()
     assert len(heads) == 1
 
-    head_revision = script.get_revision(heads[0])
-    assert head_revision is not None
-    assert head_revision.revision == "50337406e09a"
-    assert head_revision.down_revision == "1b440c092593"
+    # The phase 2.1-2.4 chain itself is a fixed, historical fact — assert
+    # those links directly rather than assuming phase 2.4 is still the
+    # current head, so this test doesn't need editing every time a later
+    # phase appends another migration on top (e.g. phase 3's Team
+    # Leader/Telecaller tables).
+    phase_2_4_revision = script.get_revision("50337406e09a")
+    assert phase_2_4_revision is not None
+    assert phase_2_4_revision.down_revision == "1b440c092593"
 
     phase_2_3_revision = script.get_revision("1b440c092593")
     assert phase_2_3_revision is not None
     assert phase_2_3_revision.down_revision == "54ebf7a087e2"
+
+    # ...and the current head must still descend from that chain (single
+    # linear history, nothing branched off phase 2.4 independently).
+    ancestry = {rev.revision for rev in script.iterate_revisions(heads[0], None)}
+    assert "50337406e09a" in ancestry
 
     phase_2_2_revision = script.get_revision("54ebf7a087e2")
     assert phase_2_2_revision is not None

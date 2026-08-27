@@ -25,14 +25,23 @@ from app.models.enums import FulfillmentStatus, PaymentStatus, PaymentType, Prod
 from app.models.mixins import SourceSystem
 
 
-def _gid_to_external_id(gid: str | None) -> str | None:
+def _gid_to_external_id(gid: str | int | None) -> str | None:
     """`"gid://shopify/Customer/123456"` -> `"123456"`. Falls back to the
     raw value unchanged if it isn't a GID (defensive against REST-shaped
     ids or a schema change), so a sync never crashes over id formatting.
+
+    Round 4 fix: the docstring above always claimed REST-shaped ids were
+    handled defensively, but a REST id is a plain `int` (Shopify webhook
+    payloads are REST-shaped, not GraphQL — see `webhook_shapes.py`), and
+    `"/" in gid` raises `TypeError` on an int rather than falling back.
+    Coercing to `str` first makes the existing docstring's claim actually
+    true; behavior for the GraphQL string ids this was already handling
+    is unchanged (`str` of a `str` is a no-op).
     """
     if not gid:
         return None
-    return gid.rsplit("/", 1)[-1] if "/" in gid else gid
+    gid_str = str(gid)
+    return gid_str.rsplit("/", 1)[-1] if "/" in gid_str else gid_str
 
 
 def _decimal(value: Any, default: str = "0") -> Decimal:
@@ -42,6 +51,28 @@ def _decimal(value: Any, default: str = "0") -> Decimal:
         return Decimal(str(value))
     except InvalidOperation:
         return Decimal(default)
+
+
+def _clean_text(value: Any, *, max_len: int | None = None) -> str | None:
+    """Round 4 fix: two real, confirmed failure modes from live Shopify
+    customer/address data, both raised straight out of the INSERT and
+    correctly (but permanently) dropped that one record every sync:
+
+    - a raw NUL byte (`\\x00`) in a text field — Postgres `text`/`varchar`
+      columns reject it outright (`UntranslatableCharacterError`), so it
+      must be stripped, not merely escaped.
+    - a value longer than its column (e.g. a 32-char `contact_phone`)
+      raising `StringDataRightTruncationError` instead of being silently
+      truncated by Postgres the way some other databases would.
+
+    Applied at the normalizer boundary so every caller gets a value
+    that's guaranteed insertable, without widening any column or
+    guessing at a merchant's data-entry mistake.
+    """
+    if value is None:
+        return None
+    cleaned = str(value).replace("\x00", "")
+    return cleaned[:max_len] if max_len is not None else cleaned
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -68,14 +99,16 @@ def normalize_address(raw: dict | None, *, is_default: bool = False) -> dict[str
         return None
     name = raw.get("name") or ""
     address: dict[str, Any] = {
-        "line1": raw.get("address1") or "—",
-        "line2": raw.get("address2"),
-        "city": raw.get("city") or "—",
-        "state": raw.get("province"),
-        "country": raw.get("country") or "India",
-        "pin_code": raw.get("zip") or "",
-        "contact_name": name or None,
-        "contact_phone": raw.get("phone"),
+        # max_len values match `CustomerAddress`'s actual column widths
+        # (app/models/customer.py) — see `_clean_text`'s docstring.
+        "line1": _clean_text(raw.get("address1"), max_len=255) or "—",
+        "line2": _clean_text(raw.get("address2"), max_len=255),
+        "city": _clean_text(raw.get("city"), max_len=120) or "—",
+        "state": _clean_text(raw.get("province"), max_len=120),
+        "country": _clean_text(raw.get("country"), max_len=120) or "India",
+        "pin_code": _clean_text(raw.get("zip"), max_len=16) or "",
+        "contact_name": _clean_text(name, max_len=255) or None,
+        "contact_phone": _clean_text(raw.get("phone"), max_len=32),
         "is_default": is_default,
     }
     # Only `Customer.addresses`/`defaultAddress` carry a stable Shopify id
@@ -92,9 +125,15 @@ def normalize_address(raw: dict | None, *, is_default: bool = False) -> dict[str
 
 class ShopifyCustomerNormalizer(CustomerNormalizer):
     def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
-        first_name = raw.get("firstName")
-        last_name = raw.get("lastName")
-        full_name = " ".join(filter(None, [first_name, last_name])) or None
+        # max_len values match `Customer`'s actual column widths
+        # (app/models/customer.py) — see `_clean_text`'s docstring; this
+        # is the customer-side half of the Round 4 null-byte/oversized-
+        # field fix (the address-side half is in `normalize_address`).
+        first_name = _clean_text(raw.get("firstName"), max_len=120)
+        last_name = _clean_text(raw.get("lastName"), max_len=120)
+        full_name = _clean_text(
+            " ".join(filter(None, [first_name, last_name])) or None, max_len=255
+        )
 
         default_raw = raw.get("defaultAddress") or {}
         addresses = [
@@ -113,8 +152,8 @@ class ShopifyCustomerNormalizer(CustomerNormalizer):
             "first_name": first_name,
             "last_name": last_name,
             "full_name": full_name,
-            "email": raw.get("email"),
-            "phone": raw.get("phone"),
+            "email": _clean_text(raw.get("email"), max_len=255),
+            "phone": _clean_text(raw.get("phone"), max_len=32),
             "is_active": raw.get("state") != "DISABLED",
             "external_created_at": _parse_datetime(raw.get("createdAt")),
             "external_updated_at": _parse_datetime(raw.get("updatedAt")),

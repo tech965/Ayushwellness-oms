@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import json
+from decimal import Decimal
 
 import pytest
 from app.core.config import settings
@@ -16,8 +17,9 @@ from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import clear_adapters, register_adapter
 from app.integrations.shopify.adapter import ShopifyAdapter
 from app.integrations.shopify.webhooks import verify_webhook_hmac
-from app.models.enums import IntegrationStatus, IntegrationType
+from app.models.enums import IntegrationStatus, IntegrationType, OrderStatus, PaymentStatus
 from app.models.integration import IntegrationCode, WebhookEvent
+from app.models.order import Order
 from app.repositories.customer import CustomerRepository
 from app.repositories.integration import IntegrationRepository
 from app.services.webhook_service import WebhookService
@@ -163,20 +165,27 @@ async def test_webhook_processing_persists_the_normalized_customer(
     directly against the test's session, since the Celery task itself
     opens its own production session factory and isn't unit-testable
     against an isolated in-memory database.
+
+    Payload is REST-shaped (snake_case, plain int id) — the actual shape
+    a Shopify webhook delivers, not the GraphQL node shape the pull-sync
+    adapter fetches. Round 4 found this distinction matters: the old
+    version of this test used a hand-crafted GraphQL-shaped payload,
+    which is why the REST-shape crash (see `webhook_shapes.py`) went
+    undetected until it was checked against a real webhook delivery.
     """
     register_adapter(ShopifyAdapter(client=None))
     integration = await _make_shopify_integration(db_session)
 
     payload = {
-        "id": "gid://shopify/Customer/500",
-        "firstName": "Sam",
-        "lastName": "Reyes",
+        "id": 500,
+        "first_name": "Sam",
+        "last_name": "Reyes",
         "email": "sam@example.com",
         "phone": None,
-        "state": "ENABLED",
-        "createdAt": "2026-01-01T00:00:00Z",
-        "updatedAt": "2026-01-02T00:00:00Z",
-        "defaultAddress": None,
+        "state": "enabled",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "default_address": None,
         "addresses": [],
     }
 
@@ -207,6 +216,160 @@ async def test_webhook_processing_persists_the_normalized_customer(
     refreshed_event = await webhook_service.get_event(event.id)
     assert refreshed_event.status == "processed"
     assert refreshed_event.processed_at is not None
+
+
+# Round 4 — full order lifecycle through the real webhook->processing
+# pipeline, using REST-shaped payloads (the real Shopify shape) end to
+# end: orders/create, orders/updated, orders/cancelled must all resolve
+# to the SAME OMS order (same external_id), never create a second one.
+async def test_order_webhook_lifecycle_create_update_cancel_touches_exactly_one_order(
+    db_session: AsyncSession,
+) -> None:
+    from app.repositories.order import OrderRepository
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+    adapter = ShopifyAdapter(client=None)
+
+    async def _deliver(topic: str, payload: dict, webhook_id: str) -> None:
+        webhook_service = WebhookService(db_session)
+        event, created = await webhook_service.ingest(
+            integration_id=integration.id,
+            event_type=topic,
+            payload=payload,
+            external_event_id=webhook_id,
+        )
+        assert created is True
+        await webhook_service.mark_processing(event.id)
+        result = await adapter.process_webhook(event.event_type, event.payload)
+        handler = ENTITY_UPSERT_HANDLERS[result["entity_type"]]
+        await handler(db_session, result["normalized"])
+        await webhook_service.mark_processed(event.id)
+
+    base_order = {
+        "id": 900123,
+        "name": "#WEBHOOK-LIFECYCLE-1",
+        "created_at": "2026-08-27T10:00:00+05:30",
+        "updated_at": "2026-08-27T10:00:00+05:30",
+        "cancelled_at": None,
+        "currency": "INR",
+        "financial_status": "pending",
+        "fulfillment_status": None,
+        "subtotal_price": "500.00",
+        "total_tax": "0.00",
+        "total_discounts": "0.00",
+        "total_price": "500.00",
+        "payment_gateway_names": ["cash on delivery (COD)"],
+        "customer": {},
+        "line_items": [
+            {"id": 1, "sku": "SKU-1", "title": "Item", "quantity": 1, "price": "500.00",
+             "total_discount": "0.00", "variant_id": None},
+        ],
+        "shipping_lines": [],
+        "shipping_address": None,
+        "billing_address": None,
+    }
+
+    # 1. orders/create
+    await _deliver("orders/create", base_order, "wh_lifecycle_create")
+    orders_repo = OrderRepository(db_session)
+    order = await orders_repo.get_by_source_external_id(
+        source_system="shopify", external_id="900123"
+    )
+    assert order is not None
+    assert order.total_amount == Decimal("500.00")
+    assert order.status != OrderStatus.CANCELLED
+    order_pk = order.id
+
+    total_after_create = await db_session.execute(
+        select(func.count()).select_from(Order).where(Order.external_id == "900123")
+    )
+    assert total_after_create.scalar_one() == 1
+
+    # 2. orders/updated — financial status changes, order count must NOT increase
+    updated_order = {
+        **base_order,
+        "financial_status": "paid",
+        "updated_at": "2026-08-27T10:05:00+05:30",
+    }
+    await _deliver("orders/updated", updated_order, "wh_lifecycle_update")
+
+    total_after_update = await db_session.execute(
+        select(func.count()).select_from(Order).where(Order.external_id == "900123")
+    )
+    assert total_after_update.scalar_one() == 1
+    order = await orders_repo.get_by_source_external_id(
+        source_system="shopify", external_id="900123"
+    )
+    assert order.id == order_pk  # same row, not a new one
+    assert order.payment_status == PaymentStatus.PAID
+
+    # 3. orders/cancelled — must update the SAME order, not create a second one
+    cancelled_order = {
+        **base_order,
+        "cancelled_at": "2026-08-27T10:10:00+05:30",
+        "updated_at": "2026-08-27T10:10:00+05:30",
+    }
+    await _deliver("orders/cancelled", cancelled_order, "wh_lifecycle_cancel")
+
+    total_after_cancel = await db_session.execute(
+        select(func.count()).select_from(Order).where(Order.external_id == "900123")
+    )
+    assert total_after_cancel.scalar_one() == 1
+    order = await orders_repo.get_by_source_external_id(
+        source_system="shopify", external_id="900123"
+    )
+    assert order.id == order_pk
+    assert order.status == OrderStatus.CANCELLED
+
+
+async def test_product_webhook_payload_normalizes_without_crashing(
+    db_session: AsyncSession,
+) -> None:
+    """REST-shaped `variants`/`options` (flat, `option1`/`option2`, not
+    `selectedOptions`) — the same shape gap that broke orders/customers.
+    """
+    from app.repositories.product import ProductRepository
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+    adapter = ShopifyAdapter(client=None)
+
+    payload = {
+        "id": 700555,
+        "title": "Herbal Masala",
+        "body_html": "<p>desc</p>",
+        "vendor": "Aayush",
+        "product_type": "Wellness",
+        "tags": "ayurveda, wellness",
+        "status": "active",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "options": [{"name": "Size", "position": 1, "values": ["60"]}],
+        "variants": [
+            {"id": 8001, "sku": "AW-HM-PN-60", "title": "60", "price": "649.00",
+             "compare_at_price": None, "inventory_quantity": 10, "weight": 0.5,
+             "barcode": None, "option1": "60"},
+        ],
+    }
+
+    webhook_service = WebhookService(db_session)
+    event, created = await webhook_service.ingest(
+        integration_id=integration.id,
+        event_type="products/create",
+        payload=payload,
+        external_event_id="wh_product_1",
+    )
+    assert created is True
+    result = await adapter.process_webhook(event.event_type, event.payload)
+    handler = ENTITY_UPSERT_HANDLERS[result["entity_type"]]
+    await handler(db_session, result["normalized"])
+
+    product = await ProductRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="700555"
+    )
+    assert product is not None
+    assert product.title == "Herbal Masala"
 
 
 async def test_webhook_events_endpoint_never_returns_raw_payload(

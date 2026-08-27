@@ -276,3 +276,53 @@ def test_payment_type_defaults_to_prepaid_for_a_known_online_gateway() -> None:
 def test_payment_type_with_no_gateway_is_other() -> None:
     assert normalize_payment_type([]) == PaymentType.OTHER
     assert normalize_payment_type(None) == PaymentType.OTHER
+
+
+# Round 4 — 3 real, confirmed sync-error root causes found by live-
+# verifying the customers/products backstop against the actual store.
+
+
+def test_customer_normalization_strips_null_bytes_instead_of_crashing_the_insert() -> None:
+    """Real error reproduced: `UntranslatableCharacterError` — Postgres
+    text columns reject a raw NUL byte outright.
+    """
+    raw = {
+        "id": "gid://shopify/Customer/7459254665405",
+        "firstName": "Asif\x00",
+        "lastName": "S\x00ayyed",
+        "email": "asif\x00@example.com",
+        "phone": None,
+        "state": "ENABLED",
+    }
+    normalized = ShopifyCustomerNormalizer().normalize(raw)
+    assert "\x00" not in normalized["first_name"]
+    assert "\x00" not in normalized["last_name"]
+    assert "\x00" not in normalized["full_name"]
+    assert "\x00" not in normalized["email"]
+
+
+def test_address_normalization_truncates_an_oversized_field_instead_of_crashing() -> None:
+    """Real error reproduced: `StringDataRightTruncationError` on
+    `customer_addresses.contact_phone`, which is `VARCHAR(32)`.
+    """
+    from app.integrations.shopify.normalizer import normalize_address
+
+    too_long_phone = "+91-9876543210 / +91-9876500000 (alt)"  # 38 chars
+    assert len(too_long_phone) > 32
+
+    address = normalize_address({"phone": too_long_phone, "address1": "1 MG Road", "city": "Pune"})
+    assert address is not None
+    assert len(address["contact_phone"]) <= 32
+    assert address["contact_phone"] == too_long_phone[:32]
+
+
+def test_address_normalization_strips_null_bytes_from_every_text_field() -> None:
+    from app.integrations.shopify.normalizer import normalize_address
+
+    address = normalize_address(
+        {"address1": "Gala\x00 5", "city": "Thane\x00", "phone": "+9175\x0007276437"}
+    )
+    assert address is not None
+    assert "\x00" not in address["line1"]
+    assert "\x00" not in address["city"]
+    assert "\x00" not in address["contact_phone"]

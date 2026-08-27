@@ -8,6 +8,8 @@ server-side only.
 
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -45,12 +47,20 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        # `exc.errors()` can contain a `ctx.error` entry that's the raw
+        # exception object (e.g. a `ValueError` raised inside a
+        # `@model_validator`), which `json.dumps`/`JSONResponse` can't
+        # serialize as-is. Round-tripping through `json.dumps(...,
+        # default=str)` stringifies exactly those non-serializable leaves
+        # (turning `ValueError("...")` into its message text) and is a
+        # no-op for every error shape that was already serializable.
+        safe_errors = json.loads(json.dumps(exc.errors(), default=str))
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content=_error_response(
                 code="validation_error",
                 message="Request validation failed",
-                details={"errors": exc.errors()},
+                details={"errors": safe_errors},
             ),
         )
 

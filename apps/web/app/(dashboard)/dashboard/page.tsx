@@ -36,6 +36,7 @@ import {
 } from "@/components/shared/date-range-picker"
 import { PageHeader } from "@/components/shared/page-header"
 import { Skeleton } from "@/components/ui/skeleton"
+import { useAuth } from "@/lib/auth-context"
 import { formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import {
@@ -85,6 +86,7 @@ export default function DashboardPage() {
 }
 
 function DashboardContent() {
+  const { hasRole } = useAuth()
   const { filters, setFilters } = useUrlFilters(FILTER_DEFAULTS)
   const [interval, setInterval] = React.useState<TimeseriesInterval>("day")
 
@@ -250,7 +252,14 @@ function DashboardContent() {
             icon={PackageX}
             kpi={summary?.unfulfilled_orders}
             format={count}
-            href={ordersHref({ fulfillment_status: "unfulfilled" })}
+            // A Team Leader lacks `orders.read` (so `/orders` would 403
+            // for them) — send them to the team-scoped equivalent
+            // instead. Admin/every other role keeps the existing link.
+            href={
+              hasRole("TEAM_LEADER")
+                ? "/team/orders/unfulfilled"
+                : ordersHref({ fulfillment_status: "unfulfilled" })
+            }
             accent="amber"
             invert
           />

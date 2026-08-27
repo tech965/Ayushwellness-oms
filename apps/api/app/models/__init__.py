@@ -23,6 +23,7 @@ from app.models.refund import Refund
 from app.models.returns import Return
 from app.models.rto import RTO
 from app.models.shipment import Shipment, ShipmentEvent
+from app.models.telecalling import CallAttempt, OrderAssignment
 
 __all__ = [
     "AuditLog",
@@ -54,4 +55,6 @@ __all__ = [
     "RTO",
     "Shipment",
     "ShipmentEvent",
+    "CallAttempt",
+    "OrderAssignment",
 ]

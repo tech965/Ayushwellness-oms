@@ -50,8 +50,23 @@ services:
     # jobs triggered via POST /api/v1/sync/{id}/trigger stay QUEUED
     # forever — the web service only enqueues them, it never executes
     # them itself.
+    #
+    # `-B` embeds Celery beat in this same process, so
+    # `sync.run_scheduled` (celery_app.py's `beat_schedule`) actually
+    # fires every 10 minutes in production — this is the automatic-sync
+    # backstop found missing during a live Shopify-vs-OMS reconciliation
+    # (no webhooks were registered and no schedule existed, so orders
+    # only ever reached the OMS via a manual "Trigger Sync" click).
+    # `-B` is only safe with exactly one worker process/instance (Celery
+    # docs: running it on more than one double/triple-schedules the same
+    # job) — if this service is ever scaled to multiple instances, move
+    # beat to its own single-instance service instead and drop `-B` here.
+    # NOTE: if the live Render service's Start Command was previously
+    # overridden in the dashboard (e.g. to add --concurrency=2), update
+    # that dashboard value directly — a dashboard override takes
+    # precedence over this file and won't pick up this change on its own.
     buildCommand: pip install --upgrade pip && pip install -r requirements-lock.txt
-    startCommand: celery -A app.workers.celery_app worker --loglevel=info
+    startCommand: celery -A app.workers.celery_app worker -B --loglevel=info
     envVars:
       # Same values as the web service above — set independently here
       # too, since Render services don't share env vars by default.

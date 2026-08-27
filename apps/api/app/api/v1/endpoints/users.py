@@ -54,6 +54,7 @@ async def create_user(
         phone=payload.phone,
         password=payload.password,
         role_ids=payload.role_ids,
+        team_leader_id=payload.team_leader_id,
     )
     return ApiResponse(data=_to_response(user), message="User created.")
 
@@ -81,6 +82,8 @@ async def update_user(
         phone=payload.phone,
         is_active=payload.is_active,
         role_ids=payload.role_ids,
+        team_leader_id=payload.team_leader_id,
+        clear_team_leader=payload.clear_team_leader,
     )
     return ApiResponse(data=_to_response(user), message="User updated.")
 

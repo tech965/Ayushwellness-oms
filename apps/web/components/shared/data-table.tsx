@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react"
 
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Table,
   TableBody,
@@ -22,6 +23,16 @@ export interface DataTableColumn<TRow> {
   sortKey?: string
 }
 
+export interface DataTableSelection {
+  selectedIds: Set<string>
+  onToggle: (id: string) => void
+  /** Called with every currently-rendered row's id — toggles select-all
+   * for the *current page* only (bulk-selecting beyond one page is an
+   * explicit "Select all N" affordance the caller can add separately).
+   */
+  onToggleAll: (ids: string[]) => void
+}
+
 interface DataTableProps<TRow> {
   columns: DataTableColumn<TRow>[]
   data: TRow[]
@@ -30,6 +41,11 @@ interface DataTableProps<TRow> {
   sortBy?: string
   sortOrder?: "asc" | "desc"
   onSortChange?: (sortKey: string) => void
+  /** Renders a leading checkbox column when provided — every existing
+   * caller omits this and is unaffected (bulk-assignment UI is the only
+   * consumer today).
+   */
+  selection?: DataTableSelection
 }
 
 /**
@@ -48,12 +64,27 @@ export function DataTable<TRow>({
   sortBy,
   sortOrder,
   onSortChange,
+  selection,
 }: DataTableProps<TRow>) {
+  const rowIds = data.map(rowKey)
+  const allSelected =
+    rowIds.length > 0 && rowIds.every((id) => selection?.selectedIds.has(id))
+  const someSelected = !allSelected && rowIds.some((id) => selection?.selectedIds.has(id))
+
   return (
     <div className="overflow-x-auto rounded-lg border">
       <Table>
         <TableHeader className="bg-muted/40">
           <TableRow className="hover:bg-transparent">
+            {selection && (
+              <TableHead className="w-10">
+                <Checkbox
+                  checked={allSelected ? true : someSelected ? "indeterminate" : false}
+                  onCheckedChange={() => selection.onToggleAll(rowIds)}
+                  aria-label="Select all rows on this page"
+                />
+              </TableHead>
+            )}
             {columns.map((column) => {
               const isSortable = Boolean(column.sortKey && onSortChange)
               const isActive = isSortable && column.sortKey === sortBy
@@ -104,6 +135,15 @@ export function DataTable<TRow>({
               onClick={() => onRowClick?.(row)}
               className={cn(onRowClick && "hover:bg-accent/60 cursor-pointer")}
             >
+              {selection && (
+                <TableCell onClick={(event) => event.stopPropagation()}>
+                  <Checkbox
+                    checked={selection.selectedIds.has(rowKey(row))}
+                    onCheckedChange={() => selection.onToggle(rowKey(row))}
+                    aria-label="Select row"
+                  />
+                </TableCell>
+              )}
               {columns.map((column) => (
                 <TableCell key={column.id} className={column.className}>
                   {column.cell(row)}

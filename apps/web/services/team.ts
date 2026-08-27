@@ -1,0 +1,182 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+
+import { apiClient } from "@/lib/api-client"
+import type { ApiResponse, PaginatedResponse } from "@/types/api"
+import type {
+  AssignedOrder,
+  AssignOrdersInput,
+  CallAttempt,
+  OrderAssignment,
+  ReassignOrderInput,
+  TelecallerPerformance,
+  TelecallingSummary,
+} from "@/types/telecalling"
+
+interface UnfulfilledOrdersParams {
+  page: number
+  pageSize: number
+  call_status?: string
+  telecaller_id?: string
+  date_from?: string
+  date_to?: string
+}
+
+async function fetchUnfulfilledTeamOrders(
+  params: UnfulfilledOrdersParams
+): Promise<PaginatedResponse<AssignedOrder>> {
+  const response = await apiClient.get<PaginatedResponse<AssignedOrder>>(
+    "/team/orders/unfulfilled",
+    {
+      params: {
+        page: params.page,
+        page_size: params.pageSize,
+        call_status: params.call_status || undefined,
+        telecaller_id: params.telecaller_id || undefined,
+        date_from: params.date_from || undefined,
+        date_to: params.date_to || undefined,
+      },
+    }
+  )
+  return response.data
+}
+
+/** The Team Leader's "Unfulfilled Orders" browsing surface — includes
+ * both unassigned (available to grab) and already-assigned-within-team
+ * orders, per `GET /team/orders/unfulfilled`'s pool semantics.
+ */
+export function useUnfulfilledTeamOrders(params: UnfulfilledOrdersParams) {
+  return useQuery({
+    queryKey: ["team", "orders", "unfulfilled", params],
+    queryFn: () => fetchUnfulfilledTeamOrders(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchTeamOrder(orderId: string): Promise<AssignedOrder> {
+  const response = await apiClient.get<ApiResponse<AssignedOrder>>(
+    `/team/orders/${orderId}`
+  )
+  if (!response.data.data) throw new Error("Order not found.")
+  return response.data.data
+}
+
+export function useTeamOrder(orderId: string) {
+  return useQuery({
+    queryKey: ["team", "orders", orderId],
+    queryFn: () => fetchTeamOrder(orderId),
+    enabled: Boolean(orderId),
+  })
+}
+
+async function fetchTeamOrderCallHistory(orderId: string): Promise<CallAttempt[]> {
+  const response = await apiClient.get<ApiResponse<CallAttempt[]>>(
+    `/team/orders/${orderId}/calls`
+  )
+  return response.data.data ?? []
+}
+
+/** Read-only for a Team Leader reviewing one of their team's orders. */
+export function useTeamOrderCallHistory(orderId: string) {
+  return useQuery({
+    queryKey: ["team", "orders", orderId, "calls"],
+    queryFn: () => fetchTeamOrderCallHistory(orderId),
+    enabled: Boolean(orderId),
+  })
+}
+
+async function fetchTeamTelecallers(): Promise<TelecallerPerformance[]> {
+  const response =
+    await apiClient.get<ApiResponse<TelecallerPerformance[]>>("/team/telecallers")
+  return response.data.data ?? []
+}
+
+export function useTeamTelecallers() {
+  return useQuery({
+    queryKey: ["team", "telecallers"],
+    queryFn: fetchTeamTelecallers,
+  })
+}
+
+interface TelecallerOrdersParams {
+  page: number
+  pageSize: number
+  call_status?: string
+}
+
+async function fetchTelecallerOrders(
+  telecallerId: string,
+  params: TelecallerOrdersParams
+): Promise<PaginatedResponse<AssignedOrder>> {
+  const response = await apiClient.get<PaginatedResponse<AssignedOrder>>(
+    `/team/telecallers/${telecallerId}/orders`,
+    {
+      params: {
+        page: params.page,
+        page_size: params.pageSize,
+        call_status: params.call_status || undefined,
+      },
+    }
+  )
+  return response.data
+}
+
+export function useTelecallerOrders(
+  telecallerId: string,
+  params: TelecallerOrdersParams
+) {
+  return useQuery({
+    queryKey: ["team", "telecallers", telecallerId, "orders", params],
+    queryFn: () => fetchTelecallerOrders(telecallerId, params),
+    enabled: Boolean(telecallerId),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchTeamSummary(): Promise<TelecallingSummary> {
+  const response = await apiClient.get<ApiResponse<TelecallingSummary>>("/team/summary")
+  if (!response.data.data) throw new Error("Summary not available.")
+  return response.data.data
+}
+
+export function useTeamSummary() {
+  return useQuery({
+    queryKey: ["team", "summary"],
+    queryFn: fetchTeamSummary,
+  })
+}
+
+/** Bulk (or single-order) assignment — Manual mode assigns every
+ * `order_ids` entry to one `telecaller_id`; Equal mode round-robins
+ * across `telecaller_ids`, matching the backend's exact distribution.
+ */
+export function useAssignOrders() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: AssignOrdersInput) => {
+      const response = await apiClient.post<ApiResponse<OrderAssignment[]>>(
+        "/team/orders/assign",
+        input
+      )
+      return response.data.data ?? []
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["team"] })
+    },
+  })
+}
+
+export function useReassignOrder() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: ReassignOrderInput) => {
+      const response = await apiClient.post<ApiResponse<OrderAssignment>>(
+        "/team/orders/reassign",
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["team"] })
+    },
+  })
+}

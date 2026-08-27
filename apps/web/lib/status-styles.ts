@@ -161,6 +161,22 @@ const RECONCILIATION_RUN_STATUS_TONES: Record<string, StatusTone> = {
   failed: "danger",
 }
 
+const TELECALLING_STATUS_TONES: Record<string, StatusTone> = {
+  not_called: "neutral",
+  call_attempted: "info",
+  connected: "info",
+  not_received: "warning",
+  busy: "warning",
+  switched_off: "warning",
+  invalid_number: "warning",
+  call_back_requested: "warning",
+  interested: "info",
+  not_interested: "danger",
+  follow_up_required: "warning",
+  confirmed: "success",
+  cancelled: "danger",
+}
+
 const RECONCILIATION_RESULT_STATUS_TONES: Record<string, StatusTone> = {
   reconciled: "success",
   mismatch: "warning",
@@ -184,6 +200,7 @@ export type StatusDomain =
   | "webhook_event"
   | "reconciliation_run"
   | "reconciliation_result"
+  | "telecalling"
 
 const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   order: ORDER_STATUS_TONES,
@@ -201,6 +218,7 @@ const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   webhook_event: WEBHOOK_EVENT_STATUS_TONES,
   reconciliation_run: RECONCILIATION_RUN_STATUS_TONES,
   reconciliation_result: RECONCILIATION_RESULT_STATUS_TONES,
+  telecalling: TELECALLING_STATUS_TONES,
 }
 
 export function getStatusTone(domain: StatusDomain, status: string): StatusTone {

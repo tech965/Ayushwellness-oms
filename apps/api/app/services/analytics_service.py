@@ -39,6 +39,7 @@ from decimal import Decimal
 from sqlalchemy import Numeric, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.timezone import to_ist
 from app.models.courier import Courier
 from app.models.customer import Customer
 from app.models.enums import (
@@ -128,10 +129,7 @@ class AnalyticsService:
         return AnalyticsSummaryResponse(
             date_from=current.date_from,
             date_to=current.date_to,
-            **{
-                key: _kpi(current_counts[key], previous_counts[key])
-                for key in current_counts
-            },
+            **{key: _kpi(current_counts[key], previous_counts[key]) for key in current_counts},
         )
 
     async def _summary_counts(self, r: DateRange) -> dict[str, Decimal]:
@@ -399,13 +397,21 @@ class AnalyticsService:
 
         ndr_rto = [
             RecentNdrRto(
-                id=n.id, order_id=n.order_id, kind="ndr", status=n.status.value, reason=n.reason,
+                id=n.id,
+                order_id=n.order_id,
+                kind="ndr",
+                status=n.status.value,
+                reason=n.reason,
                 created_at=n.created_at,
             )
             for n in ndrs
         ] + [
             RecentNdrRto(
-                id=r.id, order_id=r.order_id, kind="rto", status=r.status.value, reason=r.reason,
+                id=r.id,
+                order_id=r.order_id,
+                kind="rto",
+                status=r.status.value,
+                reason=r.reason,
                 created_at=r.created_at,
             )
             for r in rtos
@@ -415,14 +421,20 @@ class AnalyticsService:
         return RecentActivityResponse(
             recent_orders=[
                 RecentOrder(
-                    id=o.id, order_number=o.order_number, total_amount=o.total_amount,
-                    status=o.status.value, created_at=o.created_at,
+                    id=o.id,
+                    order_number=o.order_number,
+                    total_amount=o.total_amount,
+                    status=o.status.value,
+                    created_at=o.created_at,
                 )
                 for o in orders
             ],
             recent_shipments=[
                 RecentShipment(
-                    id=s.id, order_id=s.order_id, awb=s.awb, current_status=s.current_status.value,
+                    id=s.id,
+                    order_id=s.order_id,
+                    awb=s.awb,
+                    current_status=s.current_status.value,
                     updated_at=s.updated_at,
                 )
                 for s in shipments
@@ -430,7 +442,10 @@ class AnalyticsService:
             recent_ndr_rto=ndr_rto[:limit],
             recent_payments=[
                 RecentPayment(
-                    id=p.id, order_id=p.order_id, amount=p.amount, status=p.status.value,
+                    id=p.id,
+                    order_id=p.order_id,
+                    amount=p.amount,
+                    status=p.status.value,
                     created_at=p.created_at,
                 )
                 for p in payments
@@ -452,20 +467,12 @@ class AnalyticsService:
 # controlled repro: the same IST calendar day reported three different
 # order counts depending on which surrounding date range it was queried
 # through, purely because of where the UTC/IST day boundary fell.
-_IST_OFFSET = timedelta(hours=5, minutes=30)
-
-
-def _to_ist_naive(value: datetime) -> datetime:
-    """Shifts a UTC-aware datetime to the IST wall-clock moment, keeping it
-    tz-aware (still stamped UTC) — sufficient for reading off calendar-date
-    components, without needing a timezone database dependency for a fixed
-    (no-DST) offset like IST.
-    """
-    return value.astimezone(UTC) + _IST_OFFSET
-
-
+#
+# `to_ist` lives in `app.core.timezone` (shared with the Telecalling
+# follow-up "today/overdue/upcoming" filtering) so this bucketing and that
+# filtering can never independently drift back into the bug above.
 def _bucket_key(value: datetime, interval: str) -> str:
-    ist_value = _to_ist_naive(value)
+    ist_value = to_ist(value)
     if interval == "week":
         start_of_week = ist_value.date() - timedelta(days=ist_value.weekday())
         return start_of_week.isoformat()
