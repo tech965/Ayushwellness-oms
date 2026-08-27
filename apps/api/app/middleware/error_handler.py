@@ -9,11 +9,14 @@ server-side only.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from app.core.exceptions import OMSError
 from app.core.logging import get_logger
@@ -27,6 +30,55 @@ def _error_response(*, code: str, message: str, details: dict | None = None) -> 
         "error": {"code": code, "message": message, "details": details or {}},
         "meta": {},
     }
+
+
+class UnhandledExceptionMiddleware(BaseHTTPMiddleware):
+    """Round 6 production incident: a login request that hit an
+    unhandled exception (an `UndefinedColumnError` from a missing
+    migration — see the auth incident report) returned a real HTTP 500
+    with a real JSON body, but the browser reported it to the frontend
+    as a plain "Network Error" with no body visible at all — confirmed
+    live: the 500 response was completely missing
+    `Access-Control-Allow-Origin`, while every 200/422/OPTIONS response
+    from the same deployment had it.
+
+    Root cause (a documented Starlette/FastAPI behavior, not a bug in
+    this app's CORS config): `@app.exception_handler(Exception)`
+    (`unhandled_exception_handler` below) is wired into Starlette's
+    `ServerErrorMiddleware`, which sits *outside* every middleware added
+    via `app.add_middleware(...)` — including `CORSMiddleware` —
+    regardless of the order those `add_middleware` calls are made in. A
+    response built by that handler never passes back through
+    `CORSMiddleware`, so it can never carry CORS headers. A browser then
+    blocks the frontend's JS from reading the (CORS-less) response
+    entirely, which is what axios reports as "Network Error" — the
+    frontend was never actually receiving a network failure, just a
+    real error response it wasn't allowed to see.
+
+    Fix: catch the exception *inside* ordinary middleware instead, added
+    innermost (see `main.py` — before `CORSMiddleware`) so the JSON
+    response it returns is a normal middleware return value that DOES
+    flow back out through `CORSMiddleware` like any other response. This
+    now handles the common case (an exception raised by route/service
+    code); `unhandled_exception_handler` stays registered as a last-
+    resort backstop for anything raised by middleware itself, outside
+    what this class wraps.
+    """
+
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        try:
+            return await call_next(request)
+        except Exception:
+            logger.error("unhandled_exception", path=request.url.path, exc_info=True)
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content=_error_response(
+                    code="internal_error",
+                    message="An unexpected error occurred. Please try again later.",
+                ),
+            )
 
 
 def register_exception_handlers(app: FastAPI) -> None:

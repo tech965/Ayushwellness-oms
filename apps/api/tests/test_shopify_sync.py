@@ -453,6 +453,43 @@ async def test_full_sync_does_not_apply_an_incremental_filter(db_session: AsyncS
     assert client.calls[0]["query"] is None
 
 
+# Round 5 — Task 9: an HTTP 200 with a GraphQL-level error must not be
+# mistaken for a successful page. `ShopifyClient.execute` already raises
+# `ShopifyApiError` for this (see `test_shopify_client.py::
+# test_client_classifies_graphql_throttled_error` for that half); this
+# proves it propagates all the way through the real sync pipeline: the
+# job lands FAILED (not COMPLETED, not silently 0 records), with a
+# recorded SyncError explaining why.
+async def test_a_graphql_error_mid_page_fails_the_job_with_a_recorded_error(
+    db_session: AsyncSession,
+) -> None:
+    from app.integrations.shopify.errors import ShopifyApiError
+    from app.models.integration import SyncError
+
+    client = _StubClient(
+        [ShopifyApiError("Shopify GraphQL access denied.", error_type="authorization_error")]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    service = SyncService(db_session)
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    assert job.status == SyncJobStatus.FAILED
+    assert job.records_received == 0
+    assert job.error_count == 1
+
+    error_count = await db_session.execute(
+        select(func.count()).select_from(SyncError).where(SyncError.sync_job_id == job.id)
+    )
+    assert error_count.scalar_one() == 1  # the page-level failure was recorded, not swallowed
+
+    total_orders = await db_session.execute(select(func.count()).select_from(Order))
+    assert total_orders.scalar_one() == 0  # nothing was ever inserted from the failed page
+
+
 # 26. RBAC
 async def test_sync_jobs_and_integrations_endpoints_are_permission_gated(
     db_session: AsyncSession, make_authenticated_client

@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import IntegrationError, NotFoundError
+from app.core.logging import get_logger
 from app.integrations.base import IntegrationAdapter
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS, UpsertHandler
 from app.integrations.registry import get_adapter
@@ -23,6 +24,8 @@ from app.repositories.integration import IntegrationRepository
 from app.repositories.sync_error import SyncErrorRepository
 from app.repositories.sync_job import SyncJobRepository
 from app.services.audit_service import AuditService
+
+logger = get_logger(__name__)
 
 
 class SyncService:
@@ -146,6 +149,18 @@ class SyncService:
 
         await self.sync_jobs.update(job, status=status, completed_at=now)
 
+        logger.info(
+            "sync_completed",
+            sync_job_id=str(job.id),
+            entity_type=job.entity_type,
+            status=status.value,
+            records_received=job.records_received,
+            records_created=job.records_created,
+            records_updated=job.records_updated,
+            records_failed=job.records_failed,
+            error_count=job.error_count,
+        )
+
         integration = await self.integrations.get_by_id(job.integration_id)
         if integration is not None:
             await self._update_integration_health(integration, status=status, now=now)
@@ -234,6 +249,20 @@ class SyncService:
             else None
         )
         since = last_job_for_entity.completed_at if last_job_for_entity else None
+
+        # Round 5: sync_service.py had zero structured logging, making
+        # "is the scheduled sync actually running against real data, or
+        # just returning HTTP 200 with nothing to show for it" impossible
+        # to answer from Render logs alone. Never logs the raw payload,
+        # tokens, or PII -- just which entity/job/boundary is running.
+        logger.info(
+            "sync_started",
+            sync_job_id=str(job_id),
+            integration=integration_code,
+            entity_type=entity_type,
+            sync_type=sync_type.value,
+            since=since.isoformat() if since else None,
+        )
 
         if adapter is None:
             await self.record_error(
@@ -344,6 +373,21 @@ class SyncService:
                 created=created_count,
                 updated=updated_count,
                 failed=failed_count,
+            )
+            # A Shopify GraphQL call returning HTTP 200 only proves the
+            # request succeeded -- it says nothing about how many nodes
+            # came back or what happened when upserting them. Log the
+            # real per-page outcome so a Render log line can answer that
+            # without needing DB access.
+            logger.info(
+                "sync_page_processed",
+                sync_job_id=str(job_id),
+                entity_type=entity_type,
+                nodes_received=len(page.nodes),
+                created=created_count,
+                updated=updated_count,
+                failed=failed_count,
+                has_more=page.has_more,
             )
 
             if not page.has_more:

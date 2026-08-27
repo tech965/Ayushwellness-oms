@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { AxiosAdapter, AxiosResponse } from "axios"
 
+import { AxiosError } from "axios"
+
 import {
   apiClient,
+  getApiErrorMessage,
   getStoredAccessToken,
   setStoredAccessToken,
   setStoredRefreshToken,
@@ -146,5 +149,50 @@ describe("apiClient 401 refresh-and-retry", () => {
     expect(authMeCalls).toBe(1)
     expect(refreshCalls).toBe(1)
     expect(getStoredAccessToken()).toBeNull()
+  })
+})
+
+/**
+ * Regression test for the "Network Error" production incident: a real
+ * HTTP 500 with a real JSON error body was showing up in the browser as
+ * a generic "Network Error" instead of the server's actual message. The
+ * root cause was backend-side (the 500 response was missing CORS
+ * headers, so the browser blocked the frontend from ever reading the
+ * body — fixed in `apps/api/app/middleware/error_handler.py`'s
+ * `UnhandledExceptionMiddleware`). This locks in the frontend half:
+ * `getApiErrorMessage` must surface the server's real message whenever
+ * a response body is actually present, and only fall back to axios's
+ * generic message ("Network Error") for a genuine network-level
+ * failure with no response at all.
+ */
+describe("getApiErrorMessage", () => {
+  it("surfaces the server's real error message for a 500 with a JSON body", () => {
+    const error = new AxiosError("Request failed with status code 500")
+    error.response = {
+      data: {
+        success: false,
+        error: {
+          code: "internal_error",
+          message: "An unexpected error occurred. Please try again later.",
+        },
+      },
+      status: 500,
+      statusText: "Internal Server Error",
+      headers: {},
+      config: {} as never,
+    }
+
+    expect(getApiErrorMessage(error)).toBe(
+      "An unexpected error occurred. Please try again later."
+    )
+    expect(getApiErrorMessage(error)).not.toBe("Network Error")
+  })
+
+  it("falls back to the generic axios message only when there is truly no response", () => {
+    const error = new AxiosError("Network Error")
+    // No `.response` set — this is what a genuine network-level failure
+    // (DNS, connection refused, CORS-blocked) looks like to axios.
+
+    expect(getApiErrorMessage(error)).toBe("Network Error")
   })
 })

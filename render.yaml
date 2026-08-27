@@ -14,6 +14,17 @@ services:
     # already proven to work (the same requirements-lock.txt is used for
     # the Docker image build).
     buildCommand: pip install --upgrade pip && pip install -r requirements-lock.txt
+    # Round 6 production incident: a migration (3d3a46f414e3, adding
+    # `users.team_leader_id` for the Team Leader/Telecaller feature) was
+    # merged and deployed, but nothing ever ran it against the production
+    # database — every request touching the `User` model, including
+    # login, then failed with a real (but CORS-header-less, see the
+    # error_handler.py fix) HTTP 500. `preDeployCommand` runs once,
+    # before this service's new code starts receiving traffic, so the
+    # schema is always caught up first. `alembic upgrade head` only ever
+    # moves forward and is safe to run on every deploy, including when
+    # there's nothing new to apply.
+    preDeployCommand: alembic upgrade head
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       # Values are never stored here (sync: false) — set each of these

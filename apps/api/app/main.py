@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.core.rate_limit import limiter
 from app.integrations.bootstrap import register_all_adapters
-from app.middleware.error_handler import register_exception_handlers
+from app.middleware.error_handler import UnhandledExceptionMiddleware, register_exception_handlers
 from app.middleware.request_logging import RequestContextMiddleware, SecurityHeadersMiddleware
 
 configure_logging()
@@ -48,6 +48,12 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
+    # UnhandledExceptionMiddleware must be added *before* CORSMiddleware
+    # (Starlette builds the stack so the middleware added last wraps
+    # everything added before it) so CORSMiddleware ends up wrapping it
+    # and can add CORS headers to the JSON error response it returns —
+    # see UnhandledExceptionMiddleware's docstring for the full "why".
+    app.add_middleware(UnhandledExceptionMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
