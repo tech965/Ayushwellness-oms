@@ -93,6 +93,7 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
       <PopoverTrigger asChild>
         <Button
           variant="outline"
+          data-testid="date-range-trigger"
           className={cn(
             "gap-2 font-normal",
             !value.from && !value.to && "text-muted-foreground",

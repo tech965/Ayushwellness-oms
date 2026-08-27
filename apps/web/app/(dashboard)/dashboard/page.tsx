@@ -16,7 +16,7 @@ import {
   Users,
   Wallet,
 } from "lucide-react"
-import { startOfDay, subDays } from "date-fns"
+import { endOfDay, startOfDay, subDays } from "date-fns"
 
 import { CourierPerformanceCard } from "@/components/dashboard/courier-performance-card"
 import { KpiCard } from "@/components/dashboard/kpi-card"
@@ -76,14 +76,28 @@ function DashboardContent() {
   const { filters, setFilters } = useUrlFilters(FILTER_DEFAULTS)
   const [interval, setInterval] = React.useState<TimeseriesInterval>("day")
 
-  const displayRange: DateRangeValue = {
-    from: filters.date_from ? new Date(filters.date_from) : startOfDay(subDays(new Date(), 29)),
-    to: filters.date_to ? new Date(filters.date_to) : new Date(),
-  }
+  // Resolved to concrete Dates (never left undefined) so every KPI/chart
+  // request AND every drill-down link below is built from the exact same
+  // range the picker displays — including when no filter has been picked
+  // yet. Leaving date_from/date_to unset here used to mean "let the
+  // backend default to its own last-30-days-from-this-instant window,"
+  // which the Orders page's *own* filters knew nothing about: a
+  // drill-down link with no date params landed on Orders with no date
+  // filter at all (i.e. all-time), silently mismatching whatever count
+  // the dashboard had just shown — the "Dashboard says 4, Orders shows 7"
+  // class of bug. `endOfDay` (not `new Date()`) as the default upper
+  // bound also matches the Orders page's own "Last 30 Days" preset
+  // (`components/shared/date-range-picker.tsx`'s `endOfToday()`), so the
+  // two pages agree even when a user separately re-picks the same preset
+  // on Orders instead of following a drill-down link.
+  const resolvedFrom = filters.date_from ? new Date(filters.date_from) : startOfDay(subDays(new Date(), 29))
+  const resolvedTo = filters.date_to ? new Date(filters.date_to) : endOfDay(new Date())
+
+  const displayRange: DateRangeValue = { from: resolvedFrom, to: resolvedTo }
 
   const dateParams = {
-    date_from: filters.date_from || undefined,
-    date_to: filters.date_to || undefined,
+    date_from: resolvedFrom.toISOString(),
+    date_to: resolvedTo.toISOString(),
   }
 
   const summaryQuery = useAnalyticsSummary(dateParams)
@@ -93,9 +107,7 @@ function DashboardContent() {
   const courierQuery = useCourierPerformance(dateParams)
   const recentActivityQuery = useRecentActivity()
 
-  const orderQueryString = new URLSearchParams(
-    Object.entries(dateParams).filter((entry): entry is [string, string] => Boolean(entry[1]))
-  ).toString()
+  const orderQueryString = new URLSearchParams(dateParams).toString()
 
   function ordersHref(extra: Record<string, string>): string {
     const params = new URLSearchParams(orderQueryString)

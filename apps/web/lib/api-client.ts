@@ -82,17 +82,35 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
+// Only these two endpoints must be excluded from the refresh-and-retry
+// flow below — retrying `/auth/login` or `/auth/refresh` itself on a 401
+// would recurse into refreshing a refresh call. This used to be
+// `url?.includes("/auth/")`, which also matched `/auth/me` (and would
+// have matched `/auth/logout` too): every `/auth/me` call made with an
+// expired access token skipped the retry entirely and failed outright,
+// which `AuthProvider`'s effect treated as "not logged in" and redirected
+// to `/login` — even though a perfectly valid `refresh_token` was sitting
+// right there in storage. Since `/login` in turn redirects straight back
+// to `/dashboard` whenever ANY token is present (it never checks
+// validity), the token was never cleared either way, so the two pages
+// just kept bouncing off each other, firing a fresh `/auth/me` call (and
+// 401) on every hop — this is exactly what made "refresh the page after
+// the 15-minute access token expires" look like a hard logout.
+const NON_RETRIABLE_AUTH_ENDPOINTS = ["/auth/login", "/auth/refresh"]
+
 apiClient.interceptors.response.use(
   (response) => response,
   async (error: AxiosError<ApiErrorResponse>) => {
     const originalRequest = error.config as RetriableRequestConfig | undefined
-    const isAuthEndpoint = originalRequest?.url?.includes("/auth/") ?? false
+    const isNonRetriableAuthEndpoint = NON_RETRIABLE_AUTH_ENDPOINTS.some((endpoint) =>
+      originalRequest?.url?.endsWith(endpoint)
+    )
 
     if (
       error.response?.status === 401 &&
       originalRequest &&
       !originalRequest._retried &&
-      !isAuthEndpoint
+      !isNonRetriableAuthEndpoint
     ) {
       originalRequest._retried = true
       refreshInFlight ??= refreshAccessToken().finally(() => {
