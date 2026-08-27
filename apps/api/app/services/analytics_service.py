@@ -438,10 +438,37 @@ class AnalyticsService:
         )
 
 
+# The OMS's business calendar day is IST, not UTC (spec: "this OMS operates
+# in India"), and the frontend's date-range presets (Today/Yesterday/Last 7
+# Days/...) are all computed against IST midnight boundaries. `order_datetime`
+# is stored UTC. Bucketing by the UTC calendar date instead of the IST one
+# is a real, confirmed bug: any order placed 00:00-05:29 IST has a UTC
+# timestamp still dated the *previous* day, so `value.date()` on the raw
+# UTC value silently mis-buckets ~23% of a day's orders into the wrong
+# bucket — and, worse, into a bucket that may fall entirely outside the
+# caller's requested IST range (e.g. a "Last 7 Days" request starting at
+# IST day-6's 00:00 will UTC-bucket that day's early-morning orders under
+# a spurious extra day *before* the requested range). Confirmed via a
+# controlled repro: the same IST calendar day reported three different
+# order counts depending on which surrounding date range it was queried
+# through, purely because of where the UTC/IST day boundary fell.
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _to_ist_naive(value: datetime) -> datetime:
+    """Shifts a UTC-aware datetime to the IST wall-clock moment, keeping it
+    tz-aware (still stamped UTC) — sufficient for reading off calendar-date
+    components, without needing a timezone database dependency for a fixed
+    (no-DST) offset like IST.
+    """
+    return value.astimezone(UTC) + _IST_OFFSET
+
+
 def _bucket_key(value: datetime, interval: str) -> str:
+    ist_value = _to_ist_naive(value)
     if interval == "week":
-        start_of_week = value.date() - timedelta(days=value.weekday())
+        start_of_week = ist_value.date() - timedelta(days=ist_value.weekday())
         return start_of_week.isoformat()
     if interval == "month":
-        return value.date().replace(day=1).isoformat()
-    return value.date().isoformat()
+        return ist_value.date().replace(day=1).isoformat()
+    return ist_value.date().isoformat()

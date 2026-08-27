@@ -7,7 +7,6 @@ import {
   format,
   startOfDay,
   startOfMonth,
-  startOfYear,
   subDays,
   subMonths,
 } from "date-fns"
@@ -63,10 +62,6 @@ const PRESETS: Preset[] = [
       return { from: startOfMonth(lastMonth), to: endOfMonth(lastMonth) }
     },
   },
-  {
-    label: "This Year",
-    range: () => ({ from: startOfYear(new Date()), to: endOfToday() }),
-  },
 ]
 
 interface DateRangePickerProps {
@@ -75,59 +70,73 @@ interface DateRangePickerProps {
   className?: string
 }
 
+/** Timestamps drift by at most a couple of seconds between when a preset
+ * was clicked (`new Date()` at click time) and when it's compared back on
+ * render, so treat "same day, same clock-second bucket" as a match rather
+ * than requiring exact millisecond equality.
+ */
+function sameInstant(a: Date | undefined, b: Date | undefined): boolean {
+  if (!a || !b) return a === b
+  return Math.abs(a.getTime() - b.getTime()) < 2000
+}
+
 /** Global date-range selector with the presets every date-scoped screen
- * needs (spec: dashboard + orders), plus a custom range calendar.
- * Generalizes the inline picker in `FilterBar` into a standalone,
- * reusable component.
+ * needs (spec: dashboard + orders): a horizontal preset toolbar where the
+ * active range is filled/highlighted, plus a "Custom Range" popover
+ * calendar for anything else. Generalizes the inline picker in `FilterBar`
+ * into a standalone, reusable component.
  */
 export function DateRangePicker({ value, onChange, className }: DateRangePickerProps) {
   const [open, setOpen] = React.useState(false)
 
-  const label =
-    value.from && value.to
+  const activePreset = PRESETS.find((preset) => {
+    const range = preset.range()
+    return sameInstant(range.from, value.from) && sameInstant(range.to, value.to)
+  })
+
+  const customLabel =
+    !activePreset && value.from && value.to
       ? `${format(value.from, "d MMM yyyy")} – ${format(value.to, "d MMM yyyy")}`
-      : "Select date range"
+      : "Custom Range"
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
+    <div className={cn("flex flex-wrap items-center gap-1.5", className)}>
+      {PRESETS.map((preset) => (
         <Button
-          variant="outline"
-          data-testid="date-range-trigger"
-          className={cn(
-            "gap-2 font-normal",
-            !value.from && !value.to && "text-muted-foreground",
-            className
-          )}
+          key={preset.label}
+          variant={preset.label === activePreset?.label ? "default" : "outline"}
+          size="sm"
+          onClick={() => onChange(preset.range())}
+          aria-pressed={preset.label === activePreset?.label}
         >
-          <CalendarIcon className="size-4" />
-          {label}
+          {preset.label}
         </Button>
-      </PopoverTrigger>
-      <PopoverContent className="flex w-auto gap-0 p-0" align="start">
-        <div className="flex flex-col gap-0.5 border-r p-2">
-          {PRESETS.map((preset) => (
-            <Button
-              key={preset.label}
-              variant="ghost"
-              size="sm"
-              className="justify-start font-normal"
-              onClick={() => {
-                onChange(preset.range())
-                setOpen(false)
-              }}
-            >
-              {preset.label}
-            </Button>
-          ))}
-        </div>
-        <Calendar
-          mode="range"
-          selected={{ from: value.from, to: value.to }}
-          onSelect={(range) => onChange({ from: range?.from, to: range?.to })}
-          numberOfMonths={2}
-        />
-      </PopoverContent>
-    </Popover>
+      ))}
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant={!activePreset && value.from && value.to ? "default" : "outline"}
+            size="sm"
+            data-testid="date-range-trigger"
+            className="gap-1.5 font-normal"
+            aria-pressed={!activePreset && Boolean(value.from && value.to)}
+          >
+            <CalendarIcon className="size-3.5" />
+            {customLabel}
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-auto p-0" align="end">
+          <Calendar
+            mode="range"
+            selected={{ from: value.from, to: value.to }}
+            onSelect={(range) => {
+              onChange({ from: range?.from, to: range?.to })
+              if (range?.from && range?.to) setOpen(false)
+            }}
+            numberOfMonths={2}
+          />
+        </PopoverContent>
+      </Popover>
+    </div>
   )
 }

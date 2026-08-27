@@ -49,23 +49,37 @@ describe("apiClient 401 refresh-and-retry", () => {
       const url = config.url ?? ""
       if (url.endsWith("/auth/me")) {
         authMeCalls += 1
-        const token = config.headers?.get?.("Authorization") ?? config.headers?.Authorization
+        const token =
+          config.headers?.get?.("Authorization") ?? config.headers?.Authorization
         if (token === "Bearer new-access-token") {
           return jsonResponse(
             { success: true, data: { id: "1", permissions: [], is_superuser: false } },
             200
           )
         }
-        const error = new Error("Unauthorized") as Error & { config: unknown; response: unknown; isAxiosError: boolean }
+        const error = new Error("Unauthorized") as Error & {
+          config: unknown
+          response: unknown
+          isAxiosError: boolean
+        }
         error.config = config
-        error.response = jsonResponse({ success: false, error: { code: "unauthorized", message: "Unauthorized" } }, 401)
+        error.response = jsonResponse(
+          { success: false, error: { code: "unauthorized", message: "Unauthorized" } },
+          401
+        )
         error.isAxiosError = true
         throw error
       }
       if (url.endsWith("/auth/refresh")) {
         refreshCalls += 1
         return jsonResponse(
-          { success: true, data: { access_token: "new-access-token", refresh_token: "new-refresh-token" } },
+          {
+            success: true,
+            data: {
+              access_token: "new-access-token",
+              refresh_token: "new-refresh-token",
+            },
+          },
           200
         )
       }
@@ -94,17 +108,31 @@ describe("apiClient 401 refresh-and-retry", () => {
       const url = config.url ?? ""
       if (url.endsWith("/auth/me")) {
         authMeCalls += 1
-        const error = new Error("Unauthorized") as Error & { config: unknown; response: unknown; isAxiosError: boolean }
+        const error = new Error("Unauthorized") as Error & {
+          config: unknown
+          response: unknown
+          isAxiosError: boolean
+        }
         error.config = config
-        error.response = jsonResponse({ success: false, error: { code: "unauthorized", message: "Unauthorized" } }, 401)
+        error.response = jsonResponse(
+          { success: false, error: { code: "unauthorized", message: "Unauthorized" } },
+          401
+        )
         error.isAxiosError = true
         throw error
       }
       if (url.endsWith("/auth/refresh")) {
         refreshCalls += 1
-        const error = new Error("Unauthorized") as Error & { config: unknown; response: unknown; isAxiosError: boolean }
+        const error = new Error("Unauthorized") as Error & {
+          config: unknown
+          response: unknown
+          isAxiosError: boolean
+        }
         error.config = config
-        error.response = jsonResponse({ success: false, error: { code: "unauthorized", message: "Unauthorized" } }, 401)
+        error.response = jsonResponse(
+          { success: false, error: { code: "unauthorized", message: "Unauthorized" } },
+          401
+        )
         error.isAxiosError = true
         throw error
       }

@@ -40,6 +40,7 @@ interface FilterBarProps {
   dateRange?: DateRangeValue
   onDateRangeChange?: (range: DateRangeValue) => void
   extra?: React.ReactNode
+  className?: string
 }
 
 /** Composable search + status + date-range filter row, shared across
@@ -56,6 +57,7 @@ export function FilterBar({
   dateRange,
   onDateRangeChange,
   extra,
+  className,
 }: FilterBarProps) {
   const hasActiveFilters = Boolean(
     searchValue || statusValue || dateRange?.from || dateRange?.to
@@ -68,7 +70,12 @@ export function FilterBar({
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div
+      className={cn(
+        "bg-card border-border flex flex-wrap items-center gap-2 rounded-lg border p-3",
+        className
+      )}
+    >
       {onSearchChange && (
         <div className="relative w-full max-w-xs">
           <Search className="text-muted-foreground absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />

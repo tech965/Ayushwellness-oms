@@ -257,6 +257,48 @@ async def test_list_orders_filters_by_payment_type(
         assert data[0]["order_number"] == "OMS-COD-1"
 
 
+async def test_list_orders_filters_by_fulfillment_status(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Regression test: Fulfilled/Unfulfilled dashboard KPI drill-downs
+    depend on this filter existing — it used to not exist at all, so those
+    two tiles had nowhere correct to link to.
+    """
+    repo = OrderRepository(db_session)
+    from datetime import UTC, datetime
+
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="ff-1",
+        order_number="OMS-FULFILLED-1",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+        fulfillment_status="fulfilled",
+    )
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="ff-2",
+        order_number="OMS-UNFULFILLED-1",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+        fulfillment_status="unfulfilled",
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        fulfilled = await auth_client.get(
+            "/api/v1/orders", params={"fulfillment_status": "fulfilled"}
+        )
+        assert [o["order_number"] for o in fulfilled.json()["data"]] == ["OMS-FULFILLED-1"]
+
+        unfulfilled = await auth_client.get(
+            "/api/v1/orders", params={"fulfillment_status": "unfulfilled"}
+        )
+        assert [o["order_number"] for o in unfulfilled.json()["data"]] == ["OMS-UNFULFILLED-1"]
+
+
 async def test_list_orders_filters_by_amount_range(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:

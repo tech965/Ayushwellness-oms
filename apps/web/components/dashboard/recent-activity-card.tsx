@@ -46,15 +46,23 @@ export function RecentActivityCard({
       <CardContent className="grid gap-6 sm:grid-cols-2">
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
-            <h4 className="text-muted-foreground text-xs font-semibold uppercase">Recent Orders</h4>
+            <h4 className="text-muted-foreground text-xs font-semibold uppercase">
+              Recent Orders
+            </h4>
             <ViewAll href="/orders" />
           </div>
           {data.recent_orders.length === 0 && <EmptyRow />}
           {data.recent_orders.map((order) => (
-            <Link key={order.id} href={`/orders/${order.id}`} className="hover:bg-accent -mx-2 rounded-md px-2 py-1">
+            <Link
+              key={order.id}
+              href={`/orders/${order.id}`}
+              className="hover:bg-accent -mx-2 rounded-md px-2 py-1"
+            >
               <Row>
                 <span className="font-medium">{order.order_number}</span>
-                <span className="text-muted-foreground">{formatMoney(order.total_amount)}</span>
+                <span className="text-muted-foreground">
+                  {formatMoney(order.total_amount)}
+                </span>
               </Row>
             </Link>
           ))}

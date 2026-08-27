@@ -14,7 +14,7 @@ describe("getStatusTone", () => {
     expect(getStatusTone("order", "delivered")).toBe("success")
     expect(getStatusTone("order", "cancelled")).toBe("danger")
     expect(getStatusTone("shipment_delay", "on_time")).toBe("success")
-    expect(getStatusTone("shipment_delay", "delayed")).toBe("danger")
+    expect(getStatusTone("shipment_delay", "delayed")).toBe("warning")
   })
 
   it("falls back to neutral for an unrecognized status", () => {

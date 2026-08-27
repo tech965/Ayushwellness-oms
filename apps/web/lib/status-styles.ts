@@ -1,11 +1,14 @@
-export type StatusTone = "neutral" | "info" | "success" | "warning" | "danger"
+export type StatusTone =
+  "neutral" | "info" | "success" | "warning" | "danger" | "purple" | "orange"
 
 export const STATUS_TONE_CLASSES: Record<StatusTone, string> = {
   neutral: "bg-muted text-muted-foreground",
-  info: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
-  success: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400",
-  warning: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
-  danger: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+  info: "bg-blue-100 text-blue-800 dark:bg-blue-500/15 dark:text-blue-400",
+  success: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-400",
+  warning: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400",
+  danger: "bg-red-100 text-red-800 dark:bg-red-500/15 dark:text-red-400",
+  purple: "bg-purple-100 text-purple-800 dark:bg-purple-500/15 dark:text-purple-400",
+  orange: "bg-orange-100 text-orange-800 dark:bg-orange-500/15 dark:text-orange-400",
 }
 
 export function formatStatusLabel(status: string): string {
@@ -52,25 +55,31 @@ const PAYMENT_STATUS_TONES: Record<string, StatusTone> = {
   pending: "neutral",
   authorized: "info",
   paid: "success",
+  unpaid: "danger",
   failed: "danger",
   refunded: "warning",
   partially_refunded: "warning",
+  // payment_type values share this same tone map (both breakdowns are
+  // rendered with domain="payment") — cod/prepaid keys are disjoint from
+  // the payment_status keys above, so this is a safe additive mapping.
+  cod: "warning",
+  prepaid: "info",
 }
 
 const SHIPMENT_STATUS_TONES: Record<string, StatusTone> = {
   pending: "neutral",
   picked_up: "info",
   in_transit: "info",
-  out_for_delivery: "info",
+  out_for_delivery: "purple",
   delivered: "success",
-  ndr: "warning",
+  ndr: "orange",
   rto_initiated: "warning",
   rto_delivered: "danger",
   cancelled: "danger",
 }
 
 const NDR_STATUS_TONES: Record<string, StatusTone> = {
-  open: "warning",
+  open: "orange",
   customer_contacted: "info",
   reattempt_scheduled: "info",
   resolved: "success",
@@ -109,7 +118,7 @@ const PRODUCT_STATUS_TONES: Record<string, StatusTone> = {
 }
 
 const FULFILLMENT_STATUS_TONES: Record<string, StatusTone> = {
-  unfulfilled: "neutral",
+  unfulfilled: "warning",
   partial: "warning",
   fulfilled: "success",
 }
@@ -117,7 +126,7 @@ const FULFILLMENT_STATUS_TONES: Record<string, StatusTone> = {
 const SHIPMENT_DELAY_TONES: Record<string, StatusTone> = {
   on_time: "success",
   at_risk: "warning",
-  delayed: "danger",
+  delayed: "warning",
   unknown: "neutral",
 }
 

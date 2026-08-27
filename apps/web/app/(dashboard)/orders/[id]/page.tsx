@@ -126,7 +126,7 @@ function OrderDetailContent() {
         {(order) => (
           <div className="flex flex-col gap-4">
             <Card>
-              <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
+              <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 border-b">
                 <div className="flex items-center gap-2">
                   <StatusBadge domain="order" status={order.status} />
                   <StatusBadge domain="payment" status={order.payment_status} />
@@ -169,7 +169,10 @@ function OrderDetailContent() {
                   label="Discount"
                   value={formatMoney(order.discount_amount, order.currency)}
                 />
-                <SummaryStat label="Tax" value={formatMoney(order.tax_amount, order.currency)} />
+                <SummaryStat
+                  label="Tax"
+                  value={formatMoney(order.tax_amount, order.currency)}
+                />
                 <SummaryStat
                   label="Shipping"
                   value={formatMoney(order.shipping_charge, order.currency)}
@@ -179,11 +182,19 @@ function OrderDetailContent() {
                   value={formatMoney(order.total_amount, order.currency)}
                   emphasize
                 />
-                <SummaryStat label="Payment type" value={order.payment_type.toUpperCase()} />
-                <SummaryStat label="Order date" value={formatDateTime(order.order_datetime)} />
+                <SummaryStat
+                  label="Payment type"
+                  value={order.payment_type.toUpperCase()}
+                />
+                <SummaryStat
+                  label="Order date"
+                  value={formatDateTime(order.order_datetime)}
+                />
                 <SummaryStat
                   label="Fulfillment"
-                  value={<StatusBadge domain="fulfillment" status={order.fulfillment_status} />}
+                  value={
+                    <StatusBadge domain="fulfillment" status={order.fulfillment_status} />
+                  }
                 />
               </CardContent>
             </Card>
@@ -299,7 +310,10 @@ function OrderDetailContent() {
                 <CardContent className="flex flex-col gap-3">
                   {paymentsQuery.data?.length ? (
                     paymentsQuery.data.map((payment) => (
-                      <div key={payment.id} className="flex flex-col gap-1 border-b pb-2 last:border-0 last:pb-0">
+                      <div
+                        key={payment.id}
+                        className="flex flex-col gap-1 border-b pb-2 last:border-0 last:pb-0"
+                      >
                         <div className="flex items-center justify-between text-sm">
                           <span className="font-medium">
                             {formatMoney(payment.amount, payment.currency)}
@@ -309,9 +323,13 @@ function OrderDetailContent() {
                         <div className="text-muted-foreground flex flex-wrap gap-x-3 text-xs">
                           {payment.provider && <span>{payment.provider}</span>}
                           {payment.external_transaction_id && (
-                            <span className="font-mono">{payment.external_transaction_id}</span>
+                            <span className="font-mono">
+                              {payment.external_transaction_id}
+                            </span>
                           )}
-                          {payment.paid_at && <span>Paid {formatDateTime(payment.paid_at)}</span>}
+                          {payment.paid_at && (
+                            <span>Paid {formatDateTime(payment.paid_at)}</span>
+                          )}
                         </div>
                       </div>
                     ))
@@ -331,22 +349,33 @@ function OrderDetailContent() {
                       disabled={shipViaShiprocket.isPending}
                       onClick={() => {
                         shipViaShiprocket.mutate(undefined, {
-                          onSuccess: () => toast.success("Shipment created via Shiprocket."),
+                          onSuccess: () =>
+                            toast.success("Shipment created via Shiprocket."),
                           onError: (error) => toast.error(getApiErrorMessage(error)),
                         })
                       }}
                     >
-                      {shipViaShiprocket.isPending ? "Shipping..." : "Ship via Shiprocket"}
+                      {shipViaShiprocket.isPending
+                        ? "Shipping..."
+                        : "Ship via Shiprocket"}
                     </Button>
                   )}
                 </CardHeader>
                 <CardContent className="flex flex-col gap-3">
                   {shipmentsQuery.data?.length ? (
                     shipmentsQuery.data.map((shipment) => (
-                      <div key={shipment.id} className="flex flex-col gap-1.5 border-b pb-3 last:border-0 last:pb-0">
+                      <div
+                        key={shipment.id}
+                        className="flex flex-col gap-1.5 border-b pb-3 last:border-0 last:pb-0"
+                      >
                         <div className="flex items-center justify-between">
-                          <span className="font-mono text-sm">{shipment.awb ?? "No AWB yet"}</span>
-                          <StatusBadge domain="shipment" status={shipment.current_status} />
+                          <span className="font-mono text-sm">
+                            {shipment.awb ?? "No AWB yet"}
+                          </span>
+                          <StatusBadge
+                            domain="shipment"
+                            status={shipment.current_status}
+                          />
                         </div>
                         <div className="text-muted-foreground flex flex-wrap gap-x-3 text-xs">
                           {shipment.expected_delivery_date && (
@@ -383,7 +412,10 @@ function OrderDetailContent() {
                 <CardContent className="flex flex-col gap-2">
                   {returnsQuery.data?.length ? (
                     returnsQuery.data.map((ret) => (
-                      <div key={ret.id} className="flex items-center justify-between text-sm">
+                      <div
+                        key={ret.id}
+                        className="flex items-center justify-between text-sm"
+                      >
                         <span>{ret.reason ?? "No reason given"}</span>
                         <StatusBadge domain="return" status={ret.status} />
                       </div>
@@ -401,7 +433,10 @@ function OrderDetailContent() {
                 <CardContent className="flex flex-col gap-2">
                   {refundsQuery.data?.length ? (
                     refundsQuery.data.map((refund) => (
-                      <div key={refund.id} className="flex items-center justify-between text-sm">
+                      <div
+                        key={refund.id}
+                        className="flex items-center justify-between text-sm"
+                      >
                         <span>{formatMoney(refund.amount, order.currency)}</span>
                         <StatusBadge domain="refund" status={refund.status} />
                       </div>
@@ -428,9 +463,11 @@ function OrderDetailContent() {
                   emptyTitle="No timeline events yet"
                 >
                   {(events) => (
-                    <ol className="flex flex-col gap-3">
+                    <ol className="flex flex-col gap-4">
                       {events.map((event) => (
-                        <li key={event.id} className="border-border flex gap-3 border-l-2 pl-3">
+                        <li key={event.id} className="relative flex gap-3 pl-4">
+                          <span className="bg-primary absolute top-1.5 left-0 size-1.5 rounded-full" />
+                          <span className="border-border absolute top-3 bottom-[-1rem] left-[3px] w-px border-l last:hidden" />
                           <div className="flex flex-col">
                             <span className="text-sm font-medium">
                               {event.description ?? event.event_type}
@@ -464,8 +501,18 @@ function SummaryStat({
 }) {
   return (
     <div>
-      <p className="text-muted-foreground text-xs">{label}</p>
-      <p className={emphasize ? "text-base font-semibold" : "text-sm font-medium"}>{value}</p>
+      <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+        {label}
+      </p>
+      <p
+        className={
+          emphasize
+            ? "text-primary text-base font-semibold tabular-nums"
+            : "text-sm font-medium tabular-nums"
+        }
+      >
+        {value}
+      </p>
     </div>
   )
 }

@@ -16,9 +16,12 @@ import type {
 async function fetchAnalyticsSummary(
   params: AnalyticsDateRangeParams
 ): Promise<AnalyticsSummary> {
-  const response = await apiClient.get<ApiResponse<AnalyticsSummary>>("/analytics/summary", {
-    params,
-  })
+  const response = await apiClient.get<ApiResponse<AnalyticsSummary>>(
+    "/analytics/summary",
+    {
+      params,
+    }
+  )
   if (!response.data.data) throw new Error("Analytics summary not available.")
   return response.data.data
 }
@@ -71,9 +74,12 @@ export function useBreakdowns(params: AnalyticsDateRangeParams) {
 async function fetchTopProducts(
   params: AnalyticsDateRangeParams & { limit?: number }
 ): Promise<TopProduct[]> {
-  const response = await apiClient.get<ApiResponse<TopProduct[]>>("/analytics/top-products", {
-    params,
-  })
+  const response = await apiClient.get<ApiResponse<TopProduct[]>>(
+    "/analytics/top-products",
+    {
+      params,
+    }
+  )
   return response.data.data ?? []
 }
 

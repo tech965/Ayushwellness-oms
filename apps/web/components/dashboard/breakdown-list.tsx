@@ -22,6 +22,8 @@ const BAR_TONE_BG: Record<string, string> = {
   success: "bg-emerald-500",
   warning: "bg-amber-500",
   danger: "bg-red-500",
+  purple: "bg-purple-500",
+  orange: "bg-orange-500",
 }
 
 /** Reused for every status distribution on the dashboard (order status,
@@ -29,16 +31,22 @@ const BAR_TONE_BG: Record<string, string> = {
  * convention as everywhere else (`lib/status-styles.ts`), each row
  * clickable through to the matching filtered Orders view.
  */
-export function BreakdownList({ title, domain, data, isLoading, hrefFor }: BreakdownListProps) {
+export function BreakdownList({
+  title,
+  domain,
+  data,
+  isLoading,
+  hrefFor,
+}: BreakdownListProps) {
   const rows = data ?? []
   const total = rows.reduce((sum, row) => sum + row.count, 0)
 
   return (
-    <Card>
+    <Card className="shadow-[var(--shadow-soft)]">
       <CardHeader>
         <CardTitle>{title}</CardTitle>
       </CardHeader>
-      <CardContent className="flex flex-col gap-3">
+      <CardContent className="flex flex-col gap-2">
         {isLoading ? (
           <div className="bg-muted h-32 w-full animate-pulse rounded-md" />
         ) : rows.length === 0 ? (
@@ -53,17 +61,18 @@ export function BreakdownList({ title, domain, data, isLoading, hrefFor }: Break
                 <Link
                   key={row.status}
                   href={hrefFor(row.status)}
-                  className="hover:bg-accent -mx-2 flex flex-col gap-1 rounded-md px-2 py-1.5"
+                  className="hover:bg-accent -mx-2 flex flex-col gap-1.5 rounded-md px-2 py-2 transition-colors"
                 >
                   <div className="flex items-center justify-between text-sm">
                     <StatusBadge domain={domain} status={row.status} />
                     <span className="tabular-nums">
-                      {row.count} <span className="text-muted-foreground">({pct.toFixed(0)}%)</span>
+                      {row.count}{" "}
+                      <span className="text-muted-foreground">({pct.toFixed(0)}%)</span>
                     </span>
                   </div>
                   <div className="bg-muted h-1.5 w-full overflow-hidden rounded-full">
                     <div
-                      className={`h-full rounded-full ${BAR_TONE_BG[tone]}`}
+                      className={`h-full rounded-full transition-[width] ${BAR_TONE_BG[tone]}`}
                       style={{ width: `${pct}%` }}
                     />
                   </div>

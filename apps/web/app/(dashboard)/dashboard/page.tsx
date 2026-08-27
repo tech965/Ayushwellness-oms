@@ -22,9 +22,18 @@ import { CourierPerformanceCard } from "@/components/dashboard/courier-performan
 import { KpiCard } from "@/components/dashboard/kpi-card"
 import { BreakdownList } from "@/components/dashboard/breakdown-list"
 import { OrdersRevenueChart } from "@/components/dashboard/orders-revenue-chart"
+import { PaymentBreakdownCard } from "@/components/dashboard/payment-breakdown-card"
 import { RecentActivityCard } from "@/components/dashboard/recent-activity-card"
+import {
+  ShipmentOverviewStrip,
+  type ShipmentOverviewItem,
+} from "@/components/dashboard/shipment-overview-strip"
+import { StatusDonutCard } from "@/components/dashboard/status-donut-card"
 import { TopProductsCard } from "@/components/dashboard/top-products-card"
-import { DateRangePicker, type DateRangeValue } from "@/components/shared/date-range-picker"
+import {
+  DateRangePicker,
+  type DateRangeValue,
+} from "@/components/shared/date-range-picker"
 import { PageHeader } from "@/components/shared/page-header"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatMoney } from "@/lib/format"
@@ -51,7 +60,10 @@ function count(value: string): string {
 function DashboardSkeleton() {
   return (
     <>
-      <PageHeader title="Dashboard" description="Real-time operations overview from the OMS database." />
+      <PageHeader
+        title="Dashboard"
+        description="Live operational overview of your OMS."
+      />
       <div className="flex flex-col gap-6">
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -90,7 +102,9 @@ function DashboardContent() {
   // (`components/shared/date-range-picker.tsx`'s `endOfToday()`), so the
   // two pages agree even when a user separately re-picks the same preset
   // on Orders instead of following a drill-down link.
-  const resolvedFrom = filters.date_from ? new Date(filters.date_from) : startOfDay(subDays(new Date(), 29))
+  const resolvedFrom = filters.date_from
+    ? new Date(filters.date_from)
+    : startOfDay(subDays(new Date(), 29))
   const resolvedTo = filters.date_to ? new Date(filters.date_to) : endOfDay(new Date())
 
   const displayRange: DateRangeValue = { from: resolvedFrom, to: resolvedTo }
@@ -117,11 +131,62 @@ function DashboardContent() {
 
   const summary = summaryQuery.data
 
+  const shipmentOverviewItems: ShipmentOverviewItem[] = [
+    {
+      key: "delivered",
+      label: "Delivered",
+      icon: PackageCheck,
+      kpi: summary?.delivered_shipments,
+      tone: "success",
+      href: ordersHref({ shipment_status: "delivered" }),
+    },
+    {
+      key: "in_transit",
+      label: "In Transit",
+      icon: Truck,
+      kpi: summary?.in_transit_shipments,
+      tone: "info",
+      href: ordersHref({ shipment_status: "in_transit" }),
+    },
+    {
+      key: "out_for_delivery",
+      label: "Out for Delivery",
+      icon: Truck,
+      kpi: summary?.out_for_delivery_shipments,
+      tone: "purple",
+      href: ordersHref({ shipment_status: "out_for_delivery" }),
+    },
+    {
+      key: "delayed",
+      label: "Delayed",
+      icon: AlertTriangle,
+      kpi: summary?.delayed_shipments,
+      tone: "warning",
+      href: "/shipments",
+    },
+    {
+      key: "ndr",
+      label: "NDR",
+      icon: Clock3,
+      kpi: summary?.open_ndr,
+      tone: "orange",
+      href: "/ndr",
+    },
+    {
+      key: "rto",
+      label: "RTO",
+      icon: RotateCcw,
+      kpi: summary?.open_rto,
+      tone: "danger",
+      href: "/rto",
+    },
+  ]
+
   return (
     <>
       <PageHeader
         title="Dashboard"
-        description="Real-time operations overview from the OMS database."
+        description="Live operational overview of your OMS."
         actions={
           <DateRangePicker
             value={displayRange}
@@ -143,6 +208,7 @@ function DashboardContent() {
             kpi={summary?.total_orders}
             format={count}
             href={ordersHref({})}
+            accent="blue"
           />
           <KpiCard
             label="Total Revenue"
@@ -150,23 +216,42 @@ function DashboardContent() {
             kpi={summary?.total_revenue}
             format={money}
             href={ordersHref({})}
+            accent="emerald"
           />
-          <KpiCard label="New Customers" icon={Users} kpi={summary?.total_customers} format={count} href="/customers" />
-          <KpiCard label="New Products" icon={Boxes} kpi={summary?.total_products} format={count} href="/products" />
+          <KpiCard
+            label="Total Customers"
+            icon={Users}
+            kpi={summary?.total_customers}
+            format={count}
+            href="/customers"
+            accent="violet"
+          />
+          <KpiCard
+            label="Total Products"
+            icon={Boxes}
+            kpi={summary?.total_products}
+            format={count}
+            href="/products"
+            accent="amber"
+          />
         </section>
 
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
           <KpiCard
             label="Fulfilled Orders"
             icon={PackageCheck}
             kpi={summary?.fulfilled_orders}
             format={count}
+            href={ordersHref({ fulfillment_status: "fulfilled" })}
+            accent="emerald"
           />
           <KpiCard
             label="Unfulfilled Orders"
             icon={PackageX}
             kpi={summary?.unfulfilled_orders}
             format={count}
+            href={ordersHref({ fulfillment_status: "unfulfilled" })}
+            accent="amber"
             invert
           />
           <KpiCard
@@ -175,6 +260,7 @@ function DashboardContent() {
             kpi={summary?.cod_orders}
             format={count}
             href={ordersHref({ payment_type: "cod" })}
+            accent="amber"
           />
           <KpiCard
             label="Prepaid Orders"
@@ -182,43 +268,24 @@ function DashboardContent() {
             kpi={summary?.prepaid_orders}
             format={count}
             href={ordersHref({ payment_type: "prepaid" })}
-          />
-        </section>
-
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          <KpiCard
-            label="Delivered Shipments"
-            icon={PackageCheck}
-            kpi={summary?.delivered_shipments}
-            format={count}
-            href={ordersHref({ shipment_status: "delivered" })}
+            accent="blue"
           />
           <KpiCard
-            label="In Transit"
-            icon={Truck}
-            kpi={summary?.in_transit_shipments}
+            label="Returns"
+            icon={Undo2}
+            kpi={summary?.returns}
             format={count}
-            href={ordersHref({ shipment_status: "in_transit" })}
+            href="/returns"
+            accent="slate"
           />
           <KpiCard
-            label="Out for Delivery"
-            icon={Truck}
-            kpi={summary?.out_for_delivery_shipments}
+            label="Refunds"
+            icon={RefreshCcw}
+            kpi={summary?.refunds}
             format={count}
-            href={ordersHref({ shipment_status: "out_for_delivery" })}
+            href="/refunds"
+            accent="slate"
           />
-          <KpiCard
-            label="Delayed Shipments"
-            icon={AlertTriangle}
-            kpi={summary?.delayed_shipments}
-            format={count}
-            href="/shipments"
-            invert
-          />
-          <KpiCard label="Open NDR" icon={Clock3} kpi={summary?.open_ndr} format={count} href="/ndr" invert />
-          <KpiCard label="Open RTO" icon={RotateCcw} kpi={summary?.open_rto} format={count} href="/rto" invert />
-          <KpiCard label="Returns" icon={Undo2} kpi={summary?.returns} format={count} href="/returns" />
-          <KpiCard label="Refunds" icon={RefreshCcw} kpi={summary?.refunds} format={count} href="/refunds" />
         </section>
 
         <OrdersRevenueChart
@@ -228,27 +295,36 @@ function DashboardContent() {
           isLoading={timeseriesQuery.isLoading}
         />
 
-        <section className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
+        <section className="grid gap-4 lg:grid-cols-2">
+          <StatusDonutCard
+            title="Fulfillment Status"
+            domain="fulfillment"
+            data={breakdownsQuery.data?.fulfillment_status}
+            isLoading={breakdownsQuery.isLoading}
+            hrefFor={(status) => ordersHref({ fulfillment_status: status })}
+            centerLabel="Total Orders"
+          />
+          <PaymentBreakdownCard
+            paymentType={breakdownsQuery.data?.payment_type}
+            paymentStatus={breakdownsQuery.data?.payment_status}
+            isLoading={breakdownsQuery.isLoading}
+            hrefForType={(status) => ordersHref({ payment_type: status })}
+            hrefForStatus={(status) => ordersHref({ payment_status: status })}
+          />
+        </section>
+
+        <ShipmentOverviewStrip
+          items={shipmentOverviewItems}
+          isLoading={summaryQuery.isLoading}
+        />
+
+        <section className="grid gap-4 lg:grid-cols-2">
           <BreakdownList
             title="Order Status"
             domain="order"
             data={breakdownsQuery.data?.order_status}
             isLoading={breakdownsQuery.isLoading}
             hrefFor={(status) => ordersHref({ status })}
-          />
-          <BreakdownList
-            title="Payment Type"
-            domain="payment"
-            data={breakdownsQuery.data?.payment_type}
-            isLoading={breakdownsQuery.isLoading}
-            hrefFor={(status) => ordersHref({ payment_type: status })}
-          />
-          <BreakdownList
-            title="Payment Status"
-            domain="payment"
-            data={breakdownsQuery.data?.payment_status}
-            isLoading={breakdownsQuery.isLoading}
-            hrefFor={(status) => ordersHref({ payment_status: status })}
           />
           <BreakdownList
             title="Shipment Pipeline"
@@ -260,11 +336,20 @@ function DashboardContent() {
         </section>
 
         <section className="grid gap-4 lg:grid-cols-2">
-          <TopProductsCard data={topProductsQuery.data} isLoading={topProductsQuery.isLoading} />
-          <CourierPerformanceCard data={courierQuery.data} isLoading={courierQuery.isLoading} />
+          <TopProductsCard
+            data={topProductsQuery.data}
+            isLoading={topProductsQuery.isLoading}
+          />
+          <CourierPerformanceCard
+            data={courierQuery.data}
+            isLoading={courierQuery.isLoading}
+          />
         </section>
 
-        <RecentActivityCard data={recentActivityQuery.data} isLoading={recentActivityQuery.isLoading} />
+        <RecentActivityCard
+          data={recentActivityQuery.data}
+          isLoading={recentActivityQuery.isLoading}
+        />
       </div>
     </>
   )

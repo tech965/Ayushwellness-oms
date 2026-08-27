@@ -28,7 +28,9 @@ export function TopProductsCard({
         {isLoading ? (
           <div className="bg-muted h-40 w-full animate-pulse rounded-md" />
         ) : !data?.length ? (
-          <p className="text-muted-foreground text-sm">No product sales in the selected range.</p>
+          <p className="text-muted-foreground text-sm">
+            No product sales in the selected range.
+          </p>
         ) : (
           <Table>
             <TableHeader>
@@ -47,11 +49,15 @@ export function TopProductsCard({
                       className="hover:text-primary flex flex-col px-4 py-2"
                     >
                       <span className="font-medium">{product.title}</span>
-                      <span className="text-muted-foreground font-mono text-xs">{product.sku}</span>
+                      <span className="text-muted-foreground font-mono text-xs">
+                        {product.sku}
+                      </span>
                     </Link>
                   </TableCell>
                   <TableCell className="text-right">{product.units_sold}</TableCell>
-                  <TableCell className="text-right">{formatMoney(product.revenue)}</TableCell>
+                  <TableCell className="text-right">
+                    {formatMoney(product.revenue)}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

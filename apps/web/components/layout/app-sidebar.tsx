@@ -38,11 +38,13 @@ export function AppSidebar() {
     >
       <div className="border-sidebar-border flex h-14 items-center gap-2 border-b px-4">
         <Link href="/dashboard" className="flex items-center gap-2 font-semibold">
-          <span className="bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-md text-sm">
+          <span className="bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-lg text-sm font-bold">
             A
           </span>
           {!collapsed && (
-            <span className="text-sidebar-foreground text-sm">AyushWellness OMS</span>
+            <span className="text-sidebar-foreground text-sm font-semibold tracking-tight">
+              AyushWellness OMS
+            </span>
           )}
         </Link>
       </div>

@@ -41,7 +41,9 @@ export function CourierPerformanceCard({
         {isLoading ? (
           <div className="bg-muted h-40 w-full animate-pulse rounded-md" />
         ) : !data?.length ? (
-          <p className="text-muted-foreground text-sm">No shipments in the selected range.</p>
+          <p className="text-muted-foreground text-sm">
+            No shipments in the selected range.
+          </p>
         ) : (
           <Table>
             <TableHeader>

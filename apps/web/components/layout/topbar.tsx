@@ -42,7 +42,7 @@ export function Topbar() {
   const sectionLabel = useCurrentSectionLabel()
 
   return (
-    <header className="border-border bg-background flex h-14 shrink-0 items-center justify-between gap-3 border-b px-4">
+    <header className="border-border bg-header flex h-14 shrink-0 items-center justify-between gap-3 border-b px-4">
       <div className="flex min-w-0 items-center gap-2">
         <Sheet>
           <SheetTrigger asChild>
@@ -69,14 +69,30 @@ export function Topbar() {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" className="gap-2 px-2">
-              <Avatar className="size-7">
-                <AvatarFallback className="text-xs">{initials(displayName)}</AvatarFallback>
+              <Avatar className="ring-border ring-offset-background size-7 ring-1 ring-offset-1">
+                <AvatarFallback className="bg-secondary text-secondary-foreground text-xs font-semibold">
+                  {initials(displayName)}
+                </AvatarFallback>
               </Avatar>
-              <span className="hidden text-sm font-medium sm:inline">{displayName}</span>
+              <span className="hidden text-left sm:flex sm:flex-col sm:leading-tight">
+                <span className="text-sm font-medium">{displayName}</span>
+                {user?.roles?.[0] && (
+                  <span className="text-muted-foreground text-[0.6875rem] capitalize">
+                    {user.roles[0]}
+                  </span>
+                )}
+              </span>
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-52">
-            <DropdownMenuLabel>My Account</DropdownMenuLabel>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuLabel className="flex flex-col gap-0.5">
+              <span className="text-sm font-medium">{displayName}</span>
+              {user?.email && (
+                <span className="text-muted-foreground text-xs font-normal">
+                  {user.email}
+                </span>
+              )}
+            </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem asChild>
               <Link href="/settings">

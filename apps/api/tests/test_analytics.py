@@ -96,3 +96,50 @@ async def test_analytics_top_products_and_recent_activity_smoke(
         couriers = await auth_client.get("/api/v1/analytics/couriers")
         assert couriers.status_code == 200
         assert couriers.json()["data"] == []
+
+
+async def test_orders_timeseries_buckets_by_ist_calendar_day_not_utc(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Regression test: an order placed at 1 AM IST on 15 March is stored
+    as 2026-03-14T19:30:00Z (still 14 March in UTC). Bucketing by the raw
+    UTC date used to put it in a "2026-03-14" bucket — wrong, since the
+    OMS's business calendar day is IST (spec: "this OMS operates in
+    India"). It must appear under "2026-03-15", matching every other
+    date-scoped feature (dashboard KPIs, Orders page filters) which are
+    all computed against IST midnight boundaries by the frontend and
+    filtered as such by the backend's plain `order_datetime` range checks.
+    """
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ANALYTICS_PERMS
+    ) as auth_client:
+        payload = {
+            "order_number": "OMS-IST-BOUNDARY",
+            "payment_type": "prepaid",
+            "shipping_charge": "0",
+            "order_datetime": "2026-03-14T19:30:00Z",  # == 2026-03-15T01:00:00+05:30
+            "items": [
+                {
+                    "sku": "SKU-1",
+                    "product_name": "Ashwagandha 60ct",
+                    "quantity": 1,
+                    "unit_price": "649.00",
+                }
+            ],
+        }
+        created = await auth_client.post("/api/v1/orders", json=payload)
+        assert created.status_code == 201
+
+        response = await auth_client.get(
+            "/api/v1/analytics/orders-timeseries",
+            params={
+                "date_from": "2026-03-14T00:00:00Z",
+                "date_to": "2026-03-16T00:00:00Z",
+                "interval": "day",
+            },
+        )
+
+        assert response.status_code == 200
+        points = {p["bucket"]: p["order_count"] for p in response.json()["data"]["points"]}
+        assert points.get("2026-03-15") == 1
+        assert "2026-03-14" not in points

@@ -55,7 +55,10 @@ export function OrdersRevenueChart({
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-2">
         <CardTitle>Orders &amp; Revenue</CardTitle>
-        <Select value={interval} onValueChange={(v) => onIntervalChange(v as TimeseriesInterval)}>
+        <Select
+          value={interval}
+          onValueChange={(v) => onIntervalChange(v as TimeseriesInterval)}
+        >
           <SelectTrigger className="w-[110px]" size="sm">
             <SelectValue />
           </SelectTrigger>
@@ -67,6 +70,22 @@ export function OrdersRevenueChart({
         </Select>
       </CardHeader>
       <CardContent>
+        <div className="text-muted-foreground mb-3 flex items-center gap-4 text-xs">
+          <span className="flex items-center gap-1.5">
+            <span
+              className="size-2.5 rounded-sm"
+              style={{ backgroundColor: "var(--chart-1)" }}
+            />
+            Orders
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="size-2.5 rounded-full"
+              style={{ backgroundColor: "var(--chart-2)" }}
+            />
+            Revenue (₹)
+          </span>
+        </div>
         {isLoading ? (
           <div className="bg-muted h-[300px] w-full animate-pulse rounded-md" />
         ) : chartData.length === 0 ? (
@@ -75,8 +94,15 @@ export function OrdersRevenueChart({
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={300}>
-            <ComposedChart data={chartData} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+            <ComposedChart
+              data={chartData}
+              margin={{ left: 0, right: 8, top: 8, bottom: 0 }}
+            >
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke="var(--border)"
+                vertical={false}
+              />
               <XAxis
                 dataKey="bucket"
                 tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
@@ -89,6 +115,7 @@ export function OrdersRevenueChart({
                 axisLine={false}
                 tickLine={false}
                 width={36}
+                allowDecimals={false}
               />
               <YAxis
                 yAxisId="revenue"
@@ -100,17 +127,25 @@ export function OrdersRevenueChart({
                 tickFormatter={(value: number) => formatMoney(value).replace(".00", "")}
               />
               <Tooltip
+                cursor={{ fill: "var(--muted)", opacity: 0.5 }}
                 contentStyle={{
                   backgroundColor: "var(--popover)",
                   color: "var(--popover-foreground)",
                   border: "1px solid var(--border)",
                   borderRadius: "var(--radius-md)",
+                  boxShadow: "var(--shadow-soft)",
                   fontSize: 12,
+                  padding: "8px 12px",
+                }}
+                labelStyle={{
+                  color: "var(--foreground)",
+                  fontWeight: 600,
+                  marginBottom: 4,
                 }}
                 formatter={(value, name) =>
                   name === "revenue"
                     ? [formatMoney(Number(value)), "Revenue"]
-                    : [String(value), "Orders"]
+                    : [Number(value).toLocaleString("en-IN"), "Orders"]
                 }
               />
               <Bar
@@ -124,9 +159,10 @@ export function OrdersRevenueChart({
                 yAxisId="revenue"
                 dataKey="revenue"
                 type="monotone"
-                stroke="var(--primary)"
-                strokeWidth={2}
+                stroke="var(--chart-2)"
+                strokeWidth={2.5}
                 dot={false}
+                activeDot={{ r: 5, stroke: "var(--card)", strokeWidth: 2 }}
               />
             </ComposedChart>
           </ResponsiveContainer>

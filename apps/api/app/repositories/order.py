@@ -48,6 +48,7 @@ class OrderRepository(BaseRepository[Order]):
         status: str | None = None,
         payment_status: str | None = None,
         payment_type: str | None = None,
+        fulfillment_status: str | None = None,
         shipment_status: str | None = None,
         courier_id: uuid.UUID | None = None,
         sku: str | None = None,
@@ -94,6 +95,8 @@ class OrderRepository(BaseRepository[Order]):
             stmt = stmt.where(Order.payment_status == payment_status)
         if payment_type:
             stmt = stmt.where(Order.payment_type == payment_type)
+        if fulfillment_status:
+            stmt = stmt.where(Order.fulfillment_status == fulfillment_status)
         if customer_id:
             stmt = stmt.where(Order.customer_id == customer_id)
         if date_from:

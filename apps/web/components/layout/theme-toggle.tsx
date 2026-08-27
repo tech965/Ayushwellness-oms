@@ -11,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useMounted } from "@/lib/use-mounted"
+import { cn } from "@/lib/utils"
 
 const OPTIONS = [
   { value: "light", label: "Light", icon: Sun },
@@ -38,7 +39,13 @@ export function ThemeToggle() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-36">
         {OPTIONS.map((option) => (
-          <DropdownMenuItem key={option.value} onSelect={() => setTheme(option.value)}>
+          <DropdownMenuItem
+            key={option.value}
+            onSelect={() => setTheme(option.value)}
+            className={cn(
+              mounted && option.value === theme && "text-primary font-medium"
+            )}
+          >
             <option.icon className="size-4" />
             {option.label}
           </DropdownMenuItem>

@@ -100,6 +100,7 @@ export interface OrderListFilters {
   status?: OrderStatus
   payment_status?: PaymentStatus
   payment_type?: PaymentType
+  fulfillment_status?: FulfillmentStatus
   shipment_status?: string
   courier_id?: string
   sku?: string
@@ -113,6 +114,12 @@ export const PAYMENT_TYPE_OPTIONS: { label: string; value: PaymentType }[] = [
   { label: "COD", value: "cod" },
   { label: "Prepaid", value: "prepaid" },
   { label: "Other", value: "other" },
+]
+
+export const FULFILLMENT_STATUS_OPTIONS: { label: string; value: FulfillmentStatus }[] = [
+  { label: "Fulfilled", value: "fulfilled" },
+  { label: "Unfulfilled", value: "unfulfilled" },
+  { label: "Partial", value: "partial" },
 ]
 
 export const PAYMENT_STATUS_OPTIONS: { label: string; value: PaymentStatus }[] = [

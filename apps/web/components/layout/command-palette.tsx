@@ -63,7 +63,10 @@ export function CommandPalette() {
       </button>
 
       <Dialog open={open} onOpenChange={handleOpenChange}>
-        <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-md" showCloseButton={false}>
+        <DialogContent
+          className="gap-0 overflow-hidden p-0 sm:max-w-md"
+          showCloseButton={false}
+        >
           <DialogTitle className="sr-only">Search pages</DialogTitle>
           <div className="flex items-center gap-2 border-b px-3">
             <Search className="text-muted-foreground size-4 shrink-0" />

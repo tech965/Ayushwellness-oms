@@ -26,7 +26,10 @@ export function useUrlFilters<T extends FilterRecord>(defaults: T) {
       const raw = searchParams.get(String(key))
       if (raw === null || raw === "") continue
       const defaultValue = defaults[key]
-      result[key] = (typeof defaultValue === "number" ? (Number(raw) as T[keyof T]) : (raw as T[keyof T]))
+      result[key] =
+        typeof defaultValue === "number"
+          ? (Number(raw) as T[keyof T])
+          : (raw as T[keyof T])
     }
     return result
   }, [searchParams, defaults])

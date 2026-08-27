@@ -6,7 +6,10 @@ import { Columns3, Download } from "lucide-react"
 import { toast } from "sonner"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
-import { DateRangePicker, type DateRangeValue } from "@/components/shared/date-range-picker"
+import {
+  DateRangePicker,
+  type DateRangeValue,
+} from "@/components/shared/date-range-picker"
 import { FilterBar } from "@/components/shared/filter-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
@@ -22,6 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
+import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Select,
@@ -37,9 +41,11 @@ import { useUrlFilters } from "@/lib/use-url-filters"
 import { useCouriers } from "@/services/couriers"
 import { useExportOrders, useOrders } from "@/services/orders"
 import {
+  FULFILLMENT_STATUS_OPTIONS,
   ORDER_STATUS_OPTIONS,
   PAYMENT_STATUS_OPTIONS,
   PAYMENT_TYPE_OPTIONS,
+  type FulfillmentStatus,
   type Order,
   type OrderStatus,
   type PaymentStatus,
@@ -52,6 +58,7 @@ const FILTER_DEFAULTS = {
   status: "",
   payment_status: "",
   payment_type: "",
+  fulfillment_status: "",
   shipment_status: "",
   courier_id: "",
   sku: "",
@@ -109,7 +116,11 @@ const ALL_COLUMNS: ColumnDef[] = [
     id: "customer_phone",
     label: "Phone",
     defaultVisible: false,
-    column: { id: "customer_phone", header: "Phone", cell: (o) => o.customer_phone ?? "—" },
+    column: {
+      id: "customer_phone",
+      header: "Phone",
+      cell: (o) => o.customer_phone ?? "—",
+    },
   },
   {
     id: "item_summary",
@@ -118,7 +129,9 @@ const ALL_COLUMNS: ColumnDef[] = [
     column: {
       id: "item_summary",
       header: "Product",
-      cell: (o) => <span className="max-w-[220px] truncate">{o.item_summary ?? "—"}</span>,
+      cell: (o) => (
+        <span className="max-w-[220px] truncate">{o.item_summary ?? "—"}</span>
+      ),
     },
   },
   {
@@ -175,13 +188,28 @@ const ALL_COLUMNS: ColumnDef[] = [
     },
   },
   {
+    id: "fulfillment_status",
+    label: "Fulfillment",
+    defaultVisible: false,
+    column: {
+      id: "fulfillment_status",
+      header: "Fulfillment",
+      cell: (o) => <StatusBadge domain="fulfillment" status={o.fulfillment_status} />,
+    },
+  },
+  {
     id: "shipment_status",
     label: "Shipment Status",
     defaultVisible: true,
     column: {
       id: "shipment_status",
       header: "Shipment Status",
-      cell: (o) => (o.shipment_status ? <StatusBadge domain="shipment" status={o.shipment_status} /> : "—"),
+      cell: (o) =>
+        o.shipment_status ? (
+          <StatusBadge domain="shipment" status={o.shipment_status} />
+        ) : (
+          "—"
+        ),
     },
   },
   {
@@ -214,7 +242,9 @@ const ALL_COLUMNS: ColumnDef[] = [
 ]
 
 const COLUMN_STORAGE_KEY = "oms_orders_visible_columns"
-const DEFAULT_VISIBLE_COLUMN_IDS = ALL_COLUMNS.filter((c) => c.defaultVisible).map((c) => c.id)
+const DEFAULT_VISIBLE_COLUMN_IDS = ALL_COLUMNS.filter((c) => c.defaultVisible).map(
+  (c) => c.id
+)
 
 function useVisibleColumns(): [Set<string>, (id: string) => void] {
   const [visibleIds, setVisibleIds] = useLocalStorageState<string[]>(
@@ -251,7 +281,10 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 function OrdersSkeleton() {
   return (
     <>
-      <PageHeader title="Orders" description="Search, filter, and drill into any order." />
+      <PageHeader
+        title="Orders"
+        description="Search, filter, and drill into any order."
+      />
       <div className="flex flex-col gap-3">
         <Skeleton className="h-10 w-full max-w-2xl" />
         {Array.from({ length: 6 }).map((_, i) => (
@@ -272,7 +305,8 @@ export default function OrdersPage() {
 
 function OrdersPageContent() {
   const router = useRouter()
-  const { filters, setFilters, clearFilters, queryString } = useUrlFilters(FILTER_DEFAULTS)
+  const { filters, setFilters, clearFilters, queryString } =
+    useUrlFilters(FILTER_DEFAULTS)
   const [visibleColumns, toggleColumn] = useVisibleColumns()
   const couriersQuery = useCouriers()
   const exportMutation = useExportOrders()
@@ -313,6 +347,8 @@ function OrdersPageContent() {
     status: (filters.status || undefined) as OrderStatus | undefined,
     payment_status: (filters.payment_status || undefined) as PaymentStatus | undefined,
     payment_type: (filters.payment_type || undefined) as PaymentType | undefined,
+    fulfillment_status: (filters.fulfillment_status || undefined) as
+      FulfillmentStatus | undefined,
     shipment_status: filters.shipment_status || undefined,
     courier_id: filters.courier_id || undefined,
     sku: filters.sku || undefined,
@@ -359,32 +395,12 @@ function OrdersPageContent() {
       <PageHeader
         title="Orders"
         description={
-          query.data ? `${query.data.meta.total_items} orders match the current filters.` : "Search, filter, and drill into any order."
+          query.data
+            ? `${query.data.meta.total_items} orders match the current filters.`
+            : "Search, filter, and drill into any order."
         }
-      />
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <FilterBar
-            searchValue={searchInput}
-            onSearchChange={setSearchInput}
-            searchPlaceholder="Search by order #, customer, phone, email, tracking..."
-            statusValue={filters.status || undefined}
-            onStatusChange={(value) => setFilters({ status: value ?? "" })}
-            statusOptions={ORDER_STATUS_OPTIONS}
-            statusLabel="Order Status"
-            extra={
-              <DateRangePicker
-                value={dateRange}
-                onChange={(range) =>
-                  setFilters({
-                    date_from: range.from ? range.from.toISOString() : "",
-                    date_to: range.to ? range.to.toISOString() : "",
-                  })
-                }
-              />
-            }
-          />
-          <div className="flex items-center gap-2">
+        actions={
+          <>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="sm">
@@ -416,102 +432,152 @@ function OrdersPageContent() {
               <Download className="size-4" />
               {exportMutation.isPending ? "Exporting..." : "Export"}
             </Button>
+          </>
+        }
+      />
+      <div className="flex flex-col gap-4">
+        <div className="bg-card border-border flex flex-col gap-3 rounded-lg border p-3">
+          <FilterBar
+            className="border-none p-0"
+            searchValue={searchInput}
+            onSearchChange={setSearchInput}
+            searchPlaceholder="Search by order #, customer, phone, email, tracking..."
+            statusValue={filters.status || undefined}
+            onStatusChange={(value) => setFilters({ status: value ?? "" })}
+            statusOptions={ORDER_STATUS_OPTIONS}
+            statusLabel="Order Status"
+            extra={
+              <DateRangePicker
+                value={dateRange}
+                onChange={(range) =>
+                  setFilters({
+                    date_from: range.from ? range.from.toISOString() : "",
+                    date_to: range.to ? range.to.toISOString() : "",
+                  })
+                }
+              />
+            }
+          />
+          <Separator />
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              value={filters.payment_type || "__all__"}
+              onValueChange={(v) =>
+                setFilters({ payment_type: v === "__all__" ? "" : v })
+              }
+            >
+              <SelectTrigger className="w-[150px]">
+                <SelectValue placeholder="Payment Type" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All payment types</SelectItem>
+                {PAYMENT_TYPE_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select
+              value={filters.payment_status || "__all__"}
+              onValueChange={(v) =>
+                setFilters({ payment_status: v === "__all__" ? "" : v })
+              }
+            >
+              <SelectTrigger className="w-[170px]">
+                <SelectValue placeholder="Payment Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All payment statuses</SelectItem>
+                {PAYMENT_STATUS_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select
+              value={filters.fulfillment_status || "__all__"}
+              onValueChange={(v) =>
+                setFilters({ fulfillment_status: v === "__all__" ? "" : v })
+              }
+            >
+              <SelectTrigger className="w-[160px]">
+                <SelectValue placeholder="Fulfillment" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All fulfillment</SelectItem>
+                {FULFILLMENT_STATUS_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select
+              value={filters.shipment_status || "__all__"}
+              onValueChange={(v) =>
+                setFilters({ shipment_status: v === "__all__" ? "" : v })
+              }
+            >
+              <SelectTrigger className="w-[170px]">
+                <SelectValue placeholder="Shipment Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All shipment statuses</SelectItem>
+                {SHIPMENT_STATUS_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select
+              value={filters.courier_id || "__all__"}
+              onValueChange={(v) => setFilters({ courier_id: v === "__all__" ? "" : v })}
+            >
+              <SelectTrigger className="w-[160px]">
+                <SelectValue placeholder="Courier" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All couriers</SelectItem>
+                {couriersQuery.data?.map((courier) => (
+                  <SelectItem key={courier.id} value={courier.id}>
+                    {courier.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Input
+              value={skuInput}
+              onChange={(e) => setSkuInput(e.target.value)}
+              placeholder="SKU / Product"
+              className="w-[140px]"
+            />
+            <Input
+              value={amountMinInput}
+              onChange={(e) => setAmountMinInput(e.target.value)}
+              placeholder="Min amount"
+              type="number"
+              className="w-[110px]"
+            />
+            <Input
+              value={amountMaxInput}
+              onChange={(e) => setAmountMaxInput(e.target.value)}
+              placeholder="Max amount"
+              type="number"
+              className="w-[110px]"
+            />
+
+            <Button variant="ghost" size="sm" onClick={handleClear}>
+              Clear filters
+            </Button>
           </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Select
-            value={filters.payment_type || "__all__"}
-            onValueChange={(v) => setFilters({ payment_type: v === "__all__" ? "" : v })}
-          >
-            <SelectTrigger className="w-[150px]">
-              <SelectValue placeholder="Payment Type" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All payment types</SelectItem>
-              {PAYMENT_TYPE_OPTIONS.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select
-            value={filters.payment_status || "__all__"}
-            onValueChange={(v) => setFilters({ payment_status: v === "__all__" ? "" : v })}
-          >
-            <SelectTrigger className="w-[170px]">
-              <SelectValue placeholder="Payment Status" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All payment statuses</SelectItem>
-              {PAYMENT_STATUS_OPTIONS.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select
-            value={filters.shipment_status || "__all__"}
-            onValueChange={(v) => setFilters({ shipment_status: v === "__all__" ? "" : v })}
-          >
-            <SelectTrigger className="w-[170px]">
-              <SelectValue placeholder="Shipment Status" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All shipment statuses</SelectItem>
-              {SHIPMENT_STATUS_OPTIONS.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Select
-            value={filters.courier_id || "__all__"}
-            onValueChange={(v) => setFilters({ courier_id: v === "__all__" ? "" : v })}
-          >
-            <SelectTrigger className="w-[160px]">
-              <SelectValue placeholder="Courier" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All couriers</SelectItem>
-              {couriersQuery.data?.map((courier) => (
-                <SelectItem key={courier.id} value={courier.id}>
-                  {courier.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <Input
-            value={skuInput}
-            onChange={(e) => setSkuInput(e.target.value)}
-            placeholder="SKU / Product"
-            className="w-[140px]"
-          />
-          <Input
-            value={amountMinInput}
-            onChange={(e) => setAmountMinInput(e.target.value)}
-            placeholder="Min amount"
-            type="number"
-            className="w-[110px]"
-          />
-          <Input
-            value={amountMaxInput}
-            onChange={(e) => setAmountMaxInput(e.target.value)}
-            placeholder="Max amount"
-            type="number"
-            className="w-[110px]"
-          />
-
-          <Button variant="ghost" size="sm" onClick={handleClear}>
-            Clear filters
-          </Button>
         </div>
 
         <QueryStates
@@ -536,7 +602,9 @@ function OrdersPageContent() {
                   )
                 }
                 sortBy={filters.sort_by || undefined}
-                sortOrder={(filters.sort_order || undefined) as "asc" | "desc" | undefined}
+                sortOrder={
+                  (filters.sort_order || undefined) as "asc" | "desc" | undefined
+                }
                 onSortChange={handleSortChange}
               />
               <PaginationBar

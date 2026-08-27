@@ -23,7 +23,11 @@ export function StatusBadge({ domain, status, className }: StatusBadgeProps) {
   return (
     <Badge
       variant="outline"
-      className={cn("border-transparent", STATUS_TONE_CLASSES[tone], className)}
+      className={cn(
+        "rounded-md border-transparent font-semibold",
+        STATUS_TONE_CLASSES[tone],
+        className
+      )}
     >
       {label}
     </Badge>

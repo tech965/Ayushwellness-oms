@@ -24,6 +24,7 @@ function toOrderQueryParams(params: OrderListFilters) {
     status: params.status,
     payment_status: params.payment_status,
     payment_type: params.payment_type,
+    fulfillment_status: params.fulfillment_status,
     shipment_status: params.shipment_status,
     courier_id: params.courier_id,
     sku: params.sku,

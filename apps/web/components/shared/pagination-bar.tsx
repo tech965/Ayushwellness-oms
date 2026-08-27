@@ -34,12 +34,27 @@ export function PaginationBar({
 
   const canPrev = meta.page > 1
   const canNext = meta.page < meta.total_pages
+  const rangeStart = meta.total_items === 0 ? 0 : (meta.page - 1) * meta.page_size + 1
+  const rangeEnd = Math.min(meta.page * meta.page_size, meta.total_items)
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
       <div className="flex items-center gap-3">
         <p className="text-muted-foreground text-sm">
-          Page {meta.page} of {Math.max(meta.total_pages, 1)} &middot; {meta.total_items} total
+          {meta.total_items === 0 ? (
+            "No results"
+          ) : (
+            <>
+              Showing{" "}
+              <span className="text-foreground font-medium tabular-nums">
+                {rangeStart}–{rangeEnd}
+              </span>{" "}
+              of{" "}
+              <span className="text-foreground font-medium tabular-nums">
+                {meta.total_items}
+              </span>
+            </>
+          )}
         </p>
         {showPageSize && (
           <Select

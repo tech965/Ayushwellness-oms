@@ -50,28 +50,44 @@ export function DataTable<TRow>({
   onSortChange,
 }: DataTableProps<TRow>) {
   return (
-    <div className="overflow-x-auto rounded-md border">
+    <div className="overflow-x-auto rounded-lg border">
       <Table>
-        <TableHeader>
-          <TableRow>
+        <TableHeader className="bg-muted/40">
+          <TableRow className="hover:bg-transparent">
             {columns.map((column) => {
               const isSortable = Boolean(column.sortKey && onSortChange)
               const isActive = isSortable && column.sortKey === sortBy
-              const Icon = isActive ? (sortOrder === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
+              const Icon = isActive
+                ? sortOrder === "asc"
+                  ? ArrowUp
+                  : ArrowDown
+                : ArrowUpDown
 
               return (
-                <TableHead key={column.id} className={column.className}>
+                <TableHead
+                  key={column.id}
+                  className={cn(
+                    "text-muted-foreground text-xs font-semibold tracking-wide uppercase",
+                    column.className
+                  )}
+                >
                   {isSortable ? (
                     <button
                       type="button"
                       onClick={() => onSortChange?.(column.sortKey!)}
                       className={cn(
-                        "hover:text-foreground -mx-1 flex items-center gap-1 rounded px-1 py-0.5",
-                        column.className?.includes("text-right") && "ml-auto flex-row-reverse"
+                        "hover:text-primary -mx-1 flex items-center gap-1 rounded px-1 py-0.5 transition-colors",
+                        column.className?.includes("text-right") &&
+                          "ml-auto flex-row-reverse"
                       )}
                     >
                       {column.header}
-                      <Icon className={cn("size-3.5", !isActive && "opacity-40")} />
+                      <Icon
+                        className={cn(
+                          "size-3.5",
+                          isActive ? "text-primary" : "opacity-40"
+                        )}
+                      />
                     </button>
                   ) : (
                     column.header
@@ -86,7 +102,7 @@ export function DataTable<TRow>({
             <TableRow
               key={rowKey(row)}
               onClick={() => onRowClick?.(row)}
-              className={cn(onRowClick && "cursor-pointer")}
+              className={cn(onRowClick && "hover:bg-accent/60 cursor-pointer")}
             >
               {columns.map((column) => (
                 <TableCell key={column.id} className={column.className}>
