@@ -37,3 +37,34 @@ def verify_webhook_hmac(*, raw_body: bytes, signature_header: str | None, secret
         hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).digest()
     ).decode("utf-8")
     return hmac.compare_digest(computed, signature_header)
+
+
+def webhook_hmac_debug_info(
+    *, raw_body: bytes, signature_header: str | None, secret: str
+) -> dict[str, int | bool]:
+    """Safe-to-log snapshot of a verification attempt — lengths and
+    booleans only, NEVER the secret, the header, or the computed digest
+    itself. `verify_webhook_hmac` alone gives no visibility into *why* a
+    webhook was rejected (missing header vs. missing secret vs. a real
+    mismatch); this exists so a production log line can distinguish those
+    cases without ever risking a credential or signature value leaking
+    into structured logs.
+    """
+    computed_length = 0
+    if secret:
+        computed = base64.b64encode(
+            hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).digest()
+        ).decode("utf-8")
+        computed_length = len(computed)
+
+    return {
+        "hmac_header_present": signature_header is not None,
+        "hmac_header_length": len(signature_header) if signature_header else 0,
+        "raw_body_length": len(raw_body),
+        "webhook_secret_configured": bool(secret),
+        "webhook_secret_length": len(secret),
+        "computed_hmac_length": computed_length,
+        "hmac_valid": verify_webhook_hmac(
+            raw_body=raw_body, signature_header=signature_header, secret=secret
+        ),
+    }

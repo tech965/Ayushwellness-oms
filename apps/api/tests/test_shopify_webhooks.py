@@ -16,7 +16,7 @@ from app.core.config import settings
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import clear_adapters, register_adapter
 from app.integrations.shopify.adapter import ShopifyAdapter
-from app.integrations.shopify.webhooks import verify_webhook_hmac
+from app.integrations.shopify.webhooks import verify_webhook_hmac, webhook_hmac_debug_info
 from app.models.enums import IntegrationStatus, IntegrationType, OrderStatus, PaymentStatus
 from app.models.integration import IntegrationCode, WebhookEvent
 from app.models.order import Order
@@ -120,6 +120,64 @@ async def test_invalid_webhook_signature_is_rejected(
 
     total = await db_session.execute(select(func.count()).select_from(WebhookEvent))
     assert total.scalar_one() == 0
+
+
+async def test_trailing_whitespace_on_configured_secret_still_verifies(
+    db_session: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards the fix for a real production bug: a `SHOPIFY_WEBHOOK_SECRET`
+    env var containing an accidental trailing newline/space (a common
+    copy-paste artifact in Render's dashboard) must not break verification
+    of an otherwise-correct signature — the raw env value is stripped
+    before it's used as the HMAC key. Shopify itself signs with the clean
+    secret (`_SECRET`), exactly as it would in production.
+    """
+    monkeypatch.setattr(settings, "SHOPIFY_WEBHOOK_SECRET", f"{_SECRET}\n")
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 42}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "orders/create",
+            "X-Shopify-Hmac-Sha256": _sign(body, secret=_SECRET),
+        },
+    )
+    assert response.status_code == 200
+
+
+async def test_webhook_hmac_debug_info_never_exposes_secret_or_digest() -> None:
+    body = b'{"id": 1}'
+    signature = _sign(body)
+
+    info = webhook_hmac_debug_info(raw_body=body, signature_header=signature, secret=_SECRET)
+
+    assert info == {
+        "hmac_header_present": True,
+        "hmac_header_length": len(signature),
+        "raw_body_length": len(body),
+        "webhook_secret_configured": True,
+        "webhook_secret_length": len(_SECRET),
+        "computed_hmac_length": len(signature),
+        "hmac_valid": True,
+    }
+    for value in info.values():
+        assert _SECRET not in str(value)
+        assert signature not in str(value)
+
+
+async def test_webhook_hmac_debug_info_reports_missing_header_and_secret() -> None:
+    body = b'{"id": 1}'
+
+    missing_header = webhook_hmac_debug_info(raw_body=body, signature_header=None, secret=_SECRET)
+    assert missing_header["hmac_header_present"] is False
+    assert missing_header["hmac_valid"] is False
+
+    missing_secret = webhook_hmac_debug_info(raw_body=body, signature_header=_sign(body), secret="")
+    assert missing_secret["webhook_secret_configured"] is False
+    assert missing_secret["computed_hmac_length"] == 0
+    assert missing_secret["hmac_valid"] is False
 
 
 async def test_missing_signature_header_is_rejected(
@@ -262,8 +320,15 @@ async def test_order_webhook_lifecycle_create_update_cancel_touches_exactly_one_
         "payment_gateway_names": ["cash on delivery (COD)"],
         "customer": {},
         "line_items": [
-            {"id": 1, "sku": "SKU-1", "title": "Item", "quantity": 1, "price": "500.00",
-             "total_discount": "0.00", "variant_id": None},
+            {
+                "id": 1,
+                "sku": "SKU-1",
+                "title": "Item",
+                "quantity": 1,
+                "price": "500.00",
+                "total_discount": "0.00",
+                "variant_id": None,
+            },
         ],
         "shipping_lines": [],
         "shipping_address": None,
@@ -347,9 +412,17 @@ async def test_product_webhook_payload_normalizes_without_crashing(
         "updated_at": "2026-01-02T00:00:00Z",
         "options": [{"name": "Size", "position": 1, "values": ["60"]}],
         "variants": [
-            {"id": 8001, "sku": "AW-HM-PN-60", "title": "60", "price": "649.00",
-             "compare_at_price": None, "inventory_quantity": 10, "weight": 0.5,
-             "barcode": None, "option1": "60"},
+            {
+                "id": 8001,
+                "sku": "AW-HM-PN-60",
+                "title": "60",
+                "price": "649.00",
+                "compare_at_price": None,
+                "inventory_quantity": 10,
+                "weight": 0.5,
+                "barcode": None,
+                "option1": "60",
+            },
         ],
     }
 

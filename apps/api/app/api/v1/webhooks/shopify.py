@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
-from app.integrations.shopify.webhooks import verify_webhook_hmac
+from app.integrations.shopify.webhooks import webhook_hmac_debug_info
 from app.models.integration import IntegrationCode
 from app.repositories.integration import IntegrationRepository
 from app.services.audit_service import AuditService
@@ -46,11 +46,19 @@ async def receive_shopify_webhook(
 ) -> dict:
     raw_body = await request.body()
 
-    if not verify_webhook_hmac(
-        raw_body=raw_body,
-        signature_header=x_shopify_hmac_sha256,
-        secret=settings.SHOPIFY_WEBHOOK_SECRET or "",
-    ):
+    # .strip(): a secret pasted into Render's dashboard (or any env var
+    # UI) can silently pick up a trailing newline/space that's invisible
+    # when eyeballing the value against the Shopify dashboard but changes
+    # the byte sequence HMAC is keyed with — stripping incidental
+    # whitespace here does not weaken verification (Shopify secrets never
+    # intentionally contain leading/trailing whitespace).
+    secret = (settings.SHOPIFY_WEBHOOK_SECRET or "").strip()
+    diagnostics = webhook_hmac_debug_info(
+        raw_body=raw_body, signature_header=x_shopify_hmac_sha256, secret=secret
+    )
+    logger.info("shopify_webhook_hmac_check", topic=x_shopify_topic, **diagnostics)
+
+    if not diagnostics["hmac_valid"]:
         logger.warning("shopify_webhook_rejected", topic=x_shopify_topic, reason="invalid_hmac")
         raise HTTPException(status_code=401, detail="Invalid webhook signature.")
 
