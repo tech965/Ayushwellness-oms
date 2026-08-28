@@ -110,6 +110,47 @@ class ShiprocketTrackingNormalizer:
 TRACKING_NORMALIZER = ShiprocketTrackingNormalizer()
 
 
+# --- Shipments (pull) --------------------------------------------------
+
+
+class ShiprocketShipmentNormalizer:
+    """One raw item from `GET /shipments` -> the kwargs
+    `app.integrations.entity_sync._upsert_shipment` expects — a superset
+    of what `ShipmentService.upsert_synced_shipment` takes, plus
+    `channel_order_id` (popped by the handler, never passed through to
+    the service), since matching to an OMS `Order` is provider-specific
+    logic that doesn't belong inside a generic shipment upsert.
+
+    Field names: `channel_order_id` is confirmed live (identical field,
+    same "merchant's own order number" meaning, seen on the NDR listing
+    — see `ShiprocketNDRNormalizer`). `awb`/`status`/`courier_name` are
+    Shiprocket's commonly documented `/shipments` field names, not yet
+    re-verified against a live account for this specific endpoint (NDR
+    was; this wasn't) — see docs/integrations/shiprocket.md. Read
+    defensively with the same alternate-field-name fallbacks already
+    established elsewhere in this file, so a real but differently-shaped
+    response degrades to a missing field rather than a crash.
+    """
+
+    def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
+        external_id = str(raw.get("id") or raw.get("shipment_id") or "")
+        raw_status = raw.get("status") or raw.get("status_code") or raw.get("current_status")
+        return {
+            "source_system": SourceSystem.SHIPROCKET,
+            "external_id": external_id,
+            "shiprocket_shipment_id": external_id or None,
+            "channel_order_id": (
+                str(raw["channel_order_id"]) if raw.get("channel_order_id") is not None else None
+            ),
+            "awb": raw.get("awb") or raw.get("awb_code"),
+            "current_status": normalize_shipment_status(raw_status),
+            "raw_external_payload": raw,
+        }
+
+
+SHIPMENT_NORMALIZER = ShiprocketShipmentNormalizer()
+
+
 # --- NDR (pull) -------------------------------------------------------
 
 

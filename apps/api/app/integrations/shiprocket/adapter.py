@@ -19,7 +19,11 @@ from app.integrations.base import FetchPage, HealthCheckResult, IntegrationAdapt
 from app.integrations.shiprocket.client import ShiprocketClient
 from app.integrations.shiprocket.config import ShiprocketConfig
 from app.integrations.shiprocket.errors import ShiprocketApiError
-from app.integrations.shiprocket.normalizer import NDR_NORMALIZER, ORDER_PUSH_NORMALIZER
+from app.integrations.shiprocket.normalizer import (
+    NDR_NORMALIZER,
+    ORDER_PUSH_NORMALIZER,
+    SHIPMENT_NORMALIZER,
+)
 from app.models.integration import IntegrationCode
 
 logger = get_logger(__name__)
@@ -94,26 +98,39 @@ class ShiprocketAdapter(IntegrationAdapter):
             connected=True, response_time_ms=(time.perf_counter() - started) * 1000
         )
 
+    # entity_type -> (HTTP path, response-body keys that might hold the
+    # node list). Both endpoints share the same `data`/`meta.pagination.
+    # total_pages` envelope shape Shiprocket documents for its list
+    # endpoints.
+    _FETCH_ROUTES: dict[str, tuple[str, tuple[str, ...]]] = {
+        "ndr": ("/ndr/all", ("data", "ndr")),
+        "shipments": ("/shipments", ("data", "shipments")),
+    }
+
     async def fetch(
         self, entity_type: str, *, cursor: str | None = None, limit: int = 50
     ) -> FetchPage:
-        if entity_type != "ndr":
+        route = self._FETCH_ROUTES.get(entity_type)
+        if route is None:
             raise IntegrationError(
-                f"Shiprocket adapter's generic fetch() only supports 'ndr' "
-                f"(got '{entity_type}') — tracking is OMS-shipment-driven, "
-                "see app.integrations.shiprocket.sync.",
+                f"Shiprocket adapter's generic fetch() only supports "
+                f"{sorted(self._FETCH_ROUTES)} (got '{entity_type}') — tracking "
+                "is OMS-shipment-driven, see app.integrations.shiprocket.sync.",
                 details={"error_type": "validation_error"},
             )
+        path, node_keys = route
         page_number = int(cursor) if cursor else 1
         client = self._get_client()
         try:
             data = await client.request(
-                "GET", "/ndr/all", params={"page": page_number, "per_page": limit}
+                "GET", path, params={"page": page_number, "per_page": limit}
             )
         except ShiprocketApiError as exc:
             raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
 
-        nodes = data.get("data") or data.get("ndr") or []
+        nodes: list[dict[str, Any]] = next(
+            (data[key] for key in node_keys if data.get(key)), []
+        )
         meta = (
             data.get("meta", {}).get("pagination", {}) if isinstance(data.get("meta"), dict) else {}
         )
@@ -129,9 +146,10 @@ class ShiprocketAdapter(IntegrationAdapter):
     async def fetch_incremental(
         self, entity_type: str, *, since: datetime, cursor: str | None = None, limit: int = 50
     ) -> FetchPage:
-        # Shiprocket's NDR listing has no documented "changed since" filter
-        # — incremental sync degrades to a full pull, same as a full sync.
-        # Re-verify against a live account; until then this is intentionally
+        # Neither Shiprocket list endpoint this adapter supports (NDR,
+        # shipments) has a documented "changed since" filter — incremental
+        # sync degrades to a full pull, same as a full sync. Re-verify
+        # against a live account; until then this is intentionally
         # conservative rather than silently missing updates.
         return await self.fetch(entity_type, cursor=cursor, limit=limit)
 
@@ -144,6 +162,8 @@ class ShiprocketAdapter(IntegrationAdapter):
     def normalize(self, entity_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         if entity_type == "ndr":
             return NDR_NORMALIZER.normalize(raw)
+        if entity_type == "shipments":
+            return SHIPMENT_NORMALIZER.normalize(raw)
         raise IntegrationError(
             f"Shiprocket adapter does not support entity_type '{entity_type}'.",
             details={"error_type": "validation_error"},

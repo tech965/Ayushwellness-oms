@@ -134,12 +134,52 @@ async def test_fetch_incremental_degrades_to_full_pull() -> None:
     assert len(page.nodes) == 1
 
 
+def _shipments_page(*, ids: list[str], total_pages: int) -> dict:
+    return {
+        "data": [
+            {"id": i, "channel_order_id": f"AWL{i}", "awb": f"AWB{i}", "status": "In Transit"}
+            for i in ids
+        ],
+        "meta": {"pagination": {"total_pages": total_pages}},
+    }
+
+
+async def test_fetch_shipments_paginates() -> None:
+    client = _StubClient([_shipments_page(ids=["1", "2"], total_pages=2)])
+    adapter = ShiprocketAdapter(client=client)
+
+    page = await adapter.fetch("shipments", cursor=None, limit=50)
+
+    assert page.has_more is True
+    assert page.next_cursor == "2"
+    assert len(page.nodes) == 2
+    assert client.calls[0] == ("GET", "/shipments", {"page": 1, "per_page": 50})
+
+
+async def test_fetch_shipments_last_page_has_no_next_cursor() -> None:
+    client = _StubClient([_shipments_page(ids=["3"], total_pages=1)])
+    adapter = ShiprocketAdapter(client=client)
+
+    page = await adapter.fetch("shipments", cursor="1", limit=50)
+
+    assert page.has_more is False
+    assert page.next_cursor is None
+
+
 # normalize dispatch
 async def test_normalize_dispatches_ndr() -> None:
     adapter = ShiprocketAdapter(client=_StubClient([]))
     raw = {"id": "1", "awb": "AWB1", "order_id": "ord_1", "reason": "Door locked"}
     normalized = adapter.normalize("ndr", raw)
     assert normalized["awb"] == "AWB1"
+
+
+async def test_normalize_dispatches_shipments() -> None:
+    adapter = ShiprocketAdapter(client=_StubClient([]))
+    raw = {"id": "1", "channel_order_id": "AWL1", "awb": "AWB1", "status": "In Transit"}
+    normalized = adapter.normalize("shipments", raw)
+    assert normalized["awb"] == "AWB1"
+    assert normalized["channel_order_id"] == "AWL1"
 
 
 async def test_normalize_unsupported_entity_type_raises() -> None:

@@ -21,16 +21,27 @@ logger = get_logger(__name__)
 
 # Which entity types each provider's adapter actually supports syncing
 # generically (matches what `ShopifyAdapter`/`ShiprocketAdapter.fetch()`
-# accept — Shiprocket's generic `fetch()` only ever supported "ndr";
-# tracking refresh runs through its own dedicated task, not this path).
-# A provider with no adapter registered (Blue Dart/Delhivery/Ecom
-# Express/WhatsApp/Meta/Instagram — no real adapter exists for any of
-# them yet) is intentionally absent here, not just filtered out at
+# accept — tracking refresh runs through its own dedicated task, not
+# this path). A provider with no adapter registered (Blue Dart/Delhivery/
+# Ecom Express/WhatsApp/Meta/Instagram — no real adapter exists for any
+# of them yet) is intentionally absent here, not just filtered out at
 # runtime, so adding one is a one-line change instead of a silent
 # behavior change to what already runs.
+#
+# "shipments" is listed before "ndr" deliberately: an NDR is only
+# matchable to an OMS shipment once that shipment has actually been
+# pulled in (see `app.integrations.entity_sync._upsert_shipment` — a
+# real, previously-diagnosed production incident: 102/102 real NDR
+# records failed with "No OMS shipment found" because nothing had ever
+# imported Shiprocket's existing shipments, only the reverse push flow
+# from `ShiprocketOperationsService.create_shipment_for_order` created
+# any). Each entity type still runs as its own separate `SyncJob`/task,
+# so this ordering is a same-cycle best-effort, not a hard transactional
+# guarantee — an NDR for a shipment that arrives moments later in the
+# same store will simply be picked up on the next scheduled cycle.
 _SCHEDULED_SYNC_ENTITIES: dict[str, list[str]] = {
     IntegrationCode.SHOPIFY: ["orders", "customers", "products"],
-    IntegrationCode.SHIPROCKET: ["ndr"],
+    IntegrationCode.SHIPROCKET: ["shipments", "ndr"],
 }
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 from app.integrations.registry import clear_adapters, register_adapter
+from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shopify.adapter import ShopifyAdapter
 from app.models.enums import IntegrationStatus, IntegrationType, SyncType
 from app.models.integration import Integration, IntegrationCode
@@ -70,6 +71,41 @@ async def test_scheduled_sync_enqueues_only_entities_a_registered_adapter_suppor
         (str(shopify_integration.id), SyncType.INCREMENTAL.value, "orders"),
         (str(shopify_integration.id), SyncType.INCREMENTAL.value, "customers"),
         (str(shopify_integration.id), SyncType.INCREMENTAL.value, "products"),
+    ]
+
+
+async def test_scheduled_sync_enqueues_shiprocket_shipments_before_ndr(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`shipments` must be enqueued ahead of `ndr` — an NDR is only
+    matchable to an OMS shipment the shipment sync has already imported
+    (see `app.integrations.entity_sync._upsert_shipment`). Same-cycle
+    ordering, not a hard guarantee (each runs as its own `SyncJob`), but
+    the enqueue order should still reflect the intended data-flow
+    dependency.
+    """
+    shiprocket_integration = await _make_integration(db_session, IntegrationCode.SHIPROCKET)
+    register_adapter(ShiprocketAdapter(client=object()))
+
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        sync_tasks.run_sync_task,
+        "delay",
+        lambda integration_id, sync_type, entity_type: calls.append(
+            (integration_id, sync_type, entity_type)
+        ),
+    )
+    monkeypatch.setattr(sync_tasks, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+
+    enqueued = await sync_tasks._run_scheduled_sync()
+
+    assert enqueued == [
+        (IntegrationCode.SHIPROCKET, "shipments"),
+        (IntegrationCode.SHIPROCKET, "ndr"),
+    ]
+    assert calls == [
+        (str(shiprocket_integration.id), SyncType.INCREMENTAL.value, "shipments"),
+        (str(shiprocket_integration.id), SyncType.INCREMENTAL.value, "ndr"),
     ]
 
 

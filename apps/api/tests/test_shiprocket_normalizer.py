@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from app.integrations.shiprocket.normalizer import (
     NDR_NORMALIZER,
+    SHIPMENT_NORMALIZER,
     TRACKING_NORMALIZER,
     ShiprocketOrderPushNormalizer,
     normalize_payment_method,
@@ -134,6 +135,61 @@ def test_ndr_normalization_maps_the_live_response_shape() -> None:
     assert data["courier_name"] == "Bluedart Surface - Select 500gm"
     assert data["external_created_at"] == datetime(2026, 8, 28, 15, 19, 49)
     assert data["raw_external_payload"] == _LIVE_NDR_RESPONSE
+
+
+# Shipment normalization (pull) — added to fix the "No OMS shipment
+# found for Shiprocket NDR" production incident: 102/102 real NDR
+# records couldn't be linked because nothing had ever imported
+# Shiprocket's existing shipments into the OMS. `channel_order_id` is
+# confirmed against a live NDR response and carries the identical
+# meaning here (the merchant's own order number); `awb`/`status` are
+# Shiprocket's commonly documented `/shipments` field names, not yet
+# independently re-verified against a live account for this specific
+# endpoint.
+def test_shipment_normalization_maps_core_fields() -> None:
+    raw = {
+        "id": 555,
+        "channel_order_id": "AWL91535",
+        "awb": "77931116852",
+        "status": "In Transit",
+    }
+    data = SHIPMENT_NORMALIZER.normalize(raw)
+
+    assert data["source_system"] == "shiprocket"
+    assert data["external_id"] == "555"
+    assert data["shiprocket_shipment_id"] == "555"
+    assert data["channel_order_id"] == "AWL91535"
+    assert data["awb"] == "77931116852"
+    assert data["current_status"] == ShipmentStatus.IN_TRANSIT
+    assert data["raw_external_payload"] == raw
+
+
+def test_shipment_normalization_falls_back_to_shipment_id_and_awb_code() -> None:
+    """A second, differently-shaped Shiprocket response variant (e.g. a
+    different API version) using `shipment_id`/`awb_code` instead of
+    `id`/`awb` — the same defensive-fallback pattern already used for
+    NDR — must still normalize correctly.
+    """
+    data = SHIPMENT_NORMALIZER.normalize(
+        {"shipment_id": 777, "channel_order_id": "AWL91600", "awb_code": "99988877766"}
+    )
+
+    assert data["external_id"] == "777"
+    assert data["awb"] == "99988877766"
+
+
+def test_shipment_normalization_with_no_channel_order_id_leaves_it_none() -> None:
+    """The upsert handler treats a missing `channel_order_id` as an
+    unmatchable shipment (spec: never invent an OMS order id) — the
+    normalizer's only job is to pass that absence through honestly.
+    """
+    data = SHIPMENT_NORMALIZER.normalize({"id": 1, "awb": "AWB1"})
+    assert data["channel_order_id"] is None
+
+
+def test_shipment_normalization_with_unknown_status_does_not_guess() -> None:
+    data = SHIPMENT_NORMALIZER.normalize({"id": 1, "awb": "AWB1", "status": "some-new-status"})
+    assert data["current_status"] is None
 
 
 # 9. Courier mapping (payment-method + generic value mapping pattern)

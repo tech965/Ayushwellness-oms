@@ -193,6 +193,222 @@ async def test_ndr_sync_fails_gracefully_when_no_matching_shipment(
     assert job.error_count == 1
 
 
+# --- Shipment sync (fixes the production incident: 102/102 real NDR
+# records failed with "No OMS shipment found" because nothing had ever
+# imported Shiprocket's existing shipments into the OMS) ------------
+
+
+def _shipments_page(*, records: list[dict], total_pages: int = 1) -> dict:
+    return {"data": records, "meta": {"pagination": {"total_pages": total_pages}}}
+
+
+async def _make_bare_order(session: AsyncSession, *, order_number: str):
+    return await OrderService(session).create_order(
+        actor=None,
+        order_number=order_number,
+        customer_id=None,
+        order_datetime=datetime.now(UTC),
+        currency="INR",
+        payment_type=PaymentType.PREPAID,
+        shipping_charge=0,
+        notes=None,
+        items=[],
+    )
+
+
+async def test_shipment_sync_maps_to_an_existing_order_by_channel_order_id(
+    db_session: AsyncSession,
+) -> None:
+    order = await _make_bare_order(db_session, order_number="AWL91535")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1536426985,
+                        "channel_order_id": "AWL91535",
+                        "awb": "77931116852",
+                        "status": "In Transit",
+                    }
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    service = SyncService(db_session)
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert job.records_created == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_awb("77931116852")
+    assert shipment is not None
+    assert shipment.order_id == order.id
+    assert shipment.shiprocket_shipment_id == "1536426985"
+    assert shipment.current_status == ShipmentStatus.IN_TRANSIT
+
+
+async def test_shipment_sync_is_idempotent_on_rerun(db_session: AsyncSession) -> None:
+    await _make_bare_order(db_session, order_number="AWL91600")
+    record = {"id": 42, "channel_order_id": "AWL91600", "awb": "AWB-IDEMPOTENT", "status": "New"}
+    client = _StubClient(
+        [_shipments_page(records=[record]), _shipments_page(records=[record])]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+    job2 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job1.records_created == 1
+    assert job2.records_created == 0
+    assert job2.records_updated == 1
+
+    from app.models.shipment import Shipment
+
+    total = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total.scalar_one() == 1
+
+
+async def test_shipment_sync_records_a_sync_error_for_an_unmatched_order_without_fabricating(
+    db_session: AsyncSession,
+) -> None:
+    """Do not invent an OMS order id: a shipment whose `channel_order_id`
+    matches no real OMS order must be recorded as a `SyncError`, and must
+    never result in a `Shipment` row (fabricated or otherwise).
+    """
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 1, "channel_order_id": "AWL-DOES-NOT-EXIST", "awb": "AWB-ORPHAN"}
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    service = SyncService(db_session)
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.error_count == 1
+    assert job.records_created == 0
+
+    from app.models.shipment import Shipment
+
+    total = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total.scalar_one() == 0
+
+
+async def test_shipment_sync_partial_failure_does_not_abort_other_records(
+    db_session: AsyncSession,
+) -> None:
+    await _make_bare_order(db_session, order_number="AWL-GOOD")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 1, "channel_order_id": "AWL-GOOD", "awb": "AWB-GOOD"},
+                    {"id": 2, "channel_order_id": "AWL-MISSING", "awb": "AWB-BAD"},
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    service = SyncService(db_session)
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.records_created == 1
+    assert job.records_failed == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_awb("AWB-GOOD")
+    assert shipment is not None
+
+
+async def test_ndr_sync_succeeds_once_the_shipment_sync_has_imported_the_matching_shipment(
+    db_session: AsyncSession,
+) -> None:
+    """The actual fix, proven end to end: an NDR for an AWB the OMS had
+    never seen used to fail every time (see `test_ndr_sync_fails_
+    gracefully_when_no_matching_shipment`). Once the shipment sync has
+    pulled that shipment in — using only real data Shiprocket returned,
+    nothing fabricated — the exact same NDR now succeeds, without the
+    "No OMS shipment found" validation in `NDRService.upsert_synced_ndr`
+    having been touched at all.
+    """
+    await _make_bare_order(db_session, order_number="AWL91535")
+    shipment_client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1536426985,
+                        "channel_order_id": "AWL91535",
+                        "awb": "77931116852",
+                    }
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=shipment_client))
+    integration = await _make_shiprocket_integration(db_session)
+    service = SyncService(db_session)
+
+    shipment_job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+    assert shipment_job.status == "completed"
+
+    ndr_client = _StubClient(
+        [
+            {
+                "data": [
+                    {
+                        "id": 1540207132,
+                        "shipment_id": 1536426985,
+                        "channel_order_id": "AWL91535",
+                        "reason": "Customer Not Available",
+                        "attempts": 1,
+                        "courier": "Bluedart Surface - Select 500gm",
+                        "awb_code": "77931116852",
+                    }
+                ],
+                "meta": {"pagination": {"total_pages": 1}},
+            }
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=ndr_client))
+
+    ndr_job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="ndr"
+    )
+
+    assert ndr_job.status == "completed"
+    assert ndr_job.records_created == 1
+    assert ndr_job.error_count == 0
+
+    total = await db_session.execute(select(func.count()).select_from(NDR))
+    assert total.scalar_one() == 1
+
+
 # 21. Partial sync (tracking)
 async def test_tracking_refresh_partial_failure_does_not_abort_other_shipments(
     db_session: AsyncSession,
