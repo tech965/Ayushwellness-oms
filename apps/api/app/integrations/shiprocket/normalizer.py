@@ -115,26 +115,39 @@ TRACKING_NORMALIZER = ShiprocketTrackingNormalizer()
 
 class ShiprocketNDRNormalizer:
     """One raw NDR-list-item dict -> the kwargs `NDRService.upsert_synced_ndr`
-    expects. Field names follow the commonly documented Shiprocket NDR
-    shape (`awb`, `order_id`, `nsl_code`/`reason`, `courier_name`,
-    `attempts`) — re-verify against a live account.
+    expects.
+
+    Field names confirmed against a LIVE `GET /ndr/all` response (see the
+    normalizer test file for the exact captured shape): `awb_code` (not
+    `awb`) and `courier` (not `courier_name`) — the previous guesses,
+    documented as unverified, were wrong for these two, which is a load-
+    bearing bug: `NDRService.upsert_synced_ndr` resolves the owning
+    `Shipment` via `awb` and raises `NotFoundError` when it's `None`
+    (spec §16, "Do not invent NDR data" — it refuses to guess a
+    shipment instead of silently dropping the AWB check), so every real
+    NDR record failed to sync at all, not just displayed blank. `reason`,
+    `attempts`, and `id` already matched the live shape and are
+    unchanged. The old guessed names are kept as a second fallback in
+    case another Shiprocket response variant (a different endpoint/API
+    version) still uses them.
     """
 
     def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
-        external_id = str(raw.get("id") or raw.get("ndr_id") or raw.get("awb") or "")
+        external_id = str(raw.get("id") or raw.get("ndr_id") or raw.get("awb_code") or "")
+        reason = raw.get("reason") or raw.get("nsl_code")
         return {
             "source_system": SourceSystem.SHIPROCKET,
             "external_id": external_id,
-            "awb": raw.get("awb"),
+            "awb": raw.get("awb_code") or raw.get("awb"),
             "shiprocket_order_id": (
                 str(raw["order_id"]) if raw.get("order_id") is not None else None
             ),
-            "reason": raw.get("reason") or raw.get("nsl_code"),
-            "external_reason": raw.get("reason") or raw.get("nsl_code"),
+            "reason": reason,
+            "external_reason": reason,
             "attempt_number": int(raw.get("attempts") or raw.get("attempt") or 1),
-            "courier_name": raw.get("courier_name"),
+            "courier_name": raw.get("courier") or raw.get("courier_name"),
             "external_created_at": _parse_datetime(
-                raw.get("created_at") or raw.get("ndr_raised_date")
+                raw.get("ndr_raised_at") or raw.get("created_at") or raw.get("ndr_raised_date")
             ),
             "external_updated_at": _parse_datetime(raw.get("updated_at")),
             "raw_external_payload": raw,

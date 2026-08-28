@@ -104,6 +104,38 @@ def test_ndr_normalization_defaults_attempt_number_to_one() -> None:
     assert data["attempt_number"] == 1
 
 
+# Exact shape captured from a LIVE `GET /ndr/all` response (2026-08-28) —
+# `awb_code`/`courier` (not `awb`/`courier_name`) is the real field
+# naming, unlike the previously-guessed, unverified shape the two tests
+# above still exercise (kept passing via a fallback, not because that
+# shape is what Shiprocket actually sends).
+_LIVE_NDR_RESPONSE = {
+    "id": 1540207132,
+    "shipment_id": 1536426985,
+    "channel_order_id": "AWL91535",
+    "customer_name": "Vijay Kamble",
+    "reason": "Customer Not Available",
+    "attempts": 1,
+    "ndr_raised_at": "2026-08-28 15:19:49",
+    "courier": "Bluedart Surface - Select 500gm",
+    "awb_code": "77931116852",
+}
+
+
+def test_ndr_normalization_maps_the_live_response_shape() -> None:
+    data = NDR_NORMALIZER.normalize(_LIVE_NDR_RESPONSE)
+
+    assert data["source_system"] == "shiprocket"
+    assert data["external_id"] == "1540207132"
+    assert data["awb"] == "77931116852"
+    assert data["reason"] == "Customer Not Available"
+    assert data["external_reason"] == "Customer Not Available"
+    assert data["attempt_number"] == 1
+    assert data["courier_name"] == "Bluedart Surface - Select 500gm"
+    assert data["external_created_at"] == datetime(2026, 8, 28, 15, 19, 49)
+    assert data["raw_external_payload"] == _LIVE_NDR_RESPONSE
+
+
 # 9. Courier mapping (payment-method + generic value mapping pattern)
 @pytest.mark.parametrize(
     ("payment_type", "expected"),
