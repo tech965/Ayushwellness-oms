@@ -17,6 +17,7 @@ from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import clear_adapters, register_adapter
 from app.integrations.shopify.adapter import ShopifyAdapter
 from app.integrations.shopify.webhooks import (
+    content_length_matches_body,
     verify_webhook_hmac,
     webhook_hmac_debug_info,
     webhook_secret_fingerprint,
@@ -207,6 +208,67 @@ async def test_webhook_secret_fingerprint_is_stable_and_distinguishes_values() -
     assert _SECRET not in fingerprint
 
     assert webhook_secret_fingerprint("") is None
+
+
+async def test_content_length_matches_body_true_when_lengths_agree() -> None:
+    assert content_length_matches_body("9", 9) is True
+
+
+async def test_content_length_matches_body_false_on_mismatch_or_malformed_header() -> None:
+    # Proxy/edge truncation or alteration in transit: declared length
+    # disagrees with what we actually received.
+    assert content_length_matches_body("100", 9) is False
+    # Missing header entirely.
+    assert content_length_matches_body(None, 9) is False
+    # Not a valid integer (should never happen for a real HTTP request,
+    # but must not raise or produce a false positive).
+    assert content_length_matches_body("not-a-number", 9) is False
+
+
+async def test_webhook_endpoint_logs_content_length_and_body_hash_diagnostics(
+    db_session: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guards the new transit-integrity diagnostics: on every webhook
+    attempt, the endpoint must log whether the declared Content-Length
+    matches the bytes actually read, plus a non-reversible hash of those
+    exact bytes — the two signals needed to prove or rule out a
+    proxy/edge layer altering the body before it reaches HMAC
+    verification, a class of bug no in-process test can otherwise catch.
+    """
+    from app.api.v1.webhooks import shopify as shopify_endpoint
+
+    logged_calls: list[dict] = []
+    original_info = shopify_endpoint.logger.info
+
+    def _capture_info(event, **kwargs):  # noqa: ANN001, ANN002
+        logged_calls.append({"event": event, **kwargs})
+        return original_info(event, **kwargs)
+
+    monkeypatch.setattr(shopify_endpoint.logger, "info", _capture_info)
+
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 777, "email": "loggedtest@example.com"}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "customers/update",
+            "X-Shopify-Hmac-Sha256": _sign(body),
+            "X-Shopify-Webhook-Id": "wh_logged_1",
+        },
+    )
+    assert response.status_code == 200
+
+    hmac_check_calls = [c for c in logged_calls if c["event"] == "shopify_webhook_hmac_check"]
+    assert len(hmac_check_calls) == 1
+    entry = hmac_check_calls[0]
+
+    assert entry["content_length_matches_body"] is True
+    assert entry["content_length_header"] == str(len(body))
+    assert entry["raw_body_sha256"] == hashlib.sha256(body).hexdigest()
+    # The logged hash must never equal (or trivially reveal) the payload.
+    assert b"loggedtest@example.com" not in bytes.fromhex(entry["raw_body_sha256"])
 
 
 async def test_missing_signature_header_is_rejected(

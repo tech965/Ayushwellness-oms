@@ -17,6 +17,7 @@ Shopify never retries a webhook this endpoint already understood.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -25,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
-from app.integrations.shopify.webhooks import webhook_hmac_debug_info
+from app.integrations.shopify.webhooks import content_length_matches_body, webhook_hmac_debug_info
 from app.models.integration import IntegrationCode
 from app.repositories.integration import IntegrationRepository
 from app.services.audit_service import AuditService
@@ -46,6 +47,22 @@ async def receive_shopify_webhook(
 ) -> dict:
     raw_body = await request.body()
 
+    # Cross-checks the body FastAPI/Starlette actually handed us against
+    # what Shopify's request declared it was sending. Neither this nor
+    # `verify_webhook_hmac` can be fooled by a proxy/edge layer silently
+    # truncating or otherwise altering the body in transit (a class of
+    # bug no in-process test can ever exercise, since the test client
+    # never goes over a real network hop) — a mismatch here is direct
+    # proof the bytes we're hashing aren't the bytes Shopify sent, with
+    # zero reliance on the secret or signature.
+    content_length_header = request.headers.get("content-length")
+    length_matches = content_length_matches_body(content_length_header, len(raw_body))
+    # A safe, non-reversible fingerprint of the exact bytes hashed for
+    # this attempt — reveals nothing about the payload content, but lets
+    # a body captured independently (e.g. via a temporary request-catcher
+    # URL) be hashed the same way and compared against this log line.
+    raw_body_sha256 = hashlib.sha256(raw_body).hexdigest()
+
     # .strip(): a secret pasted into Render's dashboard (or any env var
     # UI) can silently pick up a trailing newline/space that's invisible
     # when eyeballing the value against the Shopify dashboard but changes
@@ -56,7 +73,14 @@ async def receive_shopify_webhook(
     diagnostics = webhook_hmac_debug_info(
         raw_body=raw_body, signature_header=x_shopify_hmac_sha256, secret=secret
     )
-    logger.info("shopify_webhook_hmac_check", topic=x_shopify_topic, **diagnostics)
+    logger.info(
+        "shopify_webhook_hmac_check",
+        topic=x_shopify_topic,
+        content_length_header=content_length_header,
+        content_length_matches_body=length_matches,
+        raw_body_sha256=raw_body_sha256,
+        **diagnostics,
+    )
 
     if not diagnostics["hmac_valid"]:
         logger.warning("shopify_webhook_rejected", topic=x_shopify_topic, reason="invalid_hmac")

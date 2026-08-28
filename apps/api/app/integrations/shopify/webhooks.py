@@ -45,6 +45,24 @@ def verify_webhook_hmac(*, raw_body: bytes, signature_header: str | None, secret
     return hmac.compare_digest(computed, signature_header)
 
 
+def content_length_matches_body(content_length_header: str | None, raw_body_length: int) -> bool:
+    """True only when the `Content-Length` Shopify's request declared
+    matches the number of bytes we actually read for that request.
+
+    A mismatch is direct, unambiguous proof that something between
+    Shopify and this endpoint (a proxy, an edge/CDN layer, ...) altered
+    the body before it reached `request.body()` — a category of bug that
+    no in-process test (this app's included — every existing test drives
+    the FastAPI app directly via `ASGITransport`, never over a real
+    network hop) can ever exercise or catch on its own.
+    """
+    return (
+        content_length_header is not None
+        and content_length_header.isdigit()
+        and int(content_length_header) == raw_body_length
+    )
+
+
 def webhook_secret_fingerprint(secret: str) -> str | None:
     """A short, non-reversible fingerprint of a secret value — SHA-256,
     truncated to `_FINGERPRINT_HEX_LENGTH` hex characters. Cannot be used
