@@ -195,3 +195,84 @@ async def test_process_webhook_is_a_documented_no_op() -> None:
     adapter = ShiprocketAdapter(client=_StubClient([]))
     result = await adapter.process_webhook("tracking-updated", {"awb": "AWB1"})
     assert result == {"entity_type": None, "normalized": None}
+
+
+# Round 10 — diagnostic logging added to identify the real `/shipments`
+# field carrying the merchant's order number (150/150 real shipments
+# failed with `channel_order_id=None`, proving `ShiprocketShipment
+# Normalizer`'s field-name guess for it was wrong). These tests prove
+# the diagnostic itself is safe to run against real data, independent
+# of whatever the real field names turn out to be.
+def test_safe_scalar_values_excludes_denylisted_keys_at_any_nesting_level() -> None:
+    from app.integrations.shiprocket.adapter import _safe_scalar_values
+
+    raw = {
+        "id": 1,
+        "awb": "AWB1",
+        "customer_email": "should-not-appear@example.com",
+        "customer": {
+            "name": "Should Not Appear",
+            "phone": "9999999999",
+            "email": "also-should-not-appear@example.com",
+        },
+        "billing_address": "123 Should Not Appear Street",
+        "channel_order_id": "AWL91535",
+    }
+
+    safe = _safe_scalar_values(raw)
+    dumped = str(safe)
+
+    assert "should-not-appear" not in dumped
+    assert "also-should-not-appear" not in dumped
+    assert "Should Not Appear" not in dumped
+    assert "9999999999" not in dumped
+    assert "customer_email" not in safe
+    assert "billing_address" not in safe
+    # "customer" itself isn't a denylisted key name, so it's recursed into
+    # (not dropped outright) -- but every key inside it was denylisted, so
+    # it comes back empty, not with any of the PII values inside it.
+    assert safe["customer"] == {}
+    assert safe["channel_order_id"] == "AWL91535"
+    assert safe["id"] == 1
+
+
+def test_safe_scalar_values_reports_nested_non_pii_dicts_and_list_lengths_only() -> None:
+    from app.integrations.shiprocket.adapter import _safe_scalar_values
+
+    raw = {
+        "order": {"channel_order_id": "AWL91535", "status": "NEW"},
+        "line_items": [{"sku": "A"}, {"sku": "B"}],
+    }
+
+    safe = _safe_scalar_values(raw)
+
+    assert safe["order"] == {"channel_order_id": "AWL91535", "status": "NEW"}
+    assert safe["line_items"] == "<list, 2 item(s)>"
+
+
+async def test_fetch_shipments_logs_the_first_record_shape(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    client = _StubClient(
+        [
+            {
+                "data": [
+                    {"id": 1, "channel_order_id": "AWL1", "awb": "AWB1"},
+                    {"id": 2, "channel_order_id": "AWL2", "awb": "AWB2"},
+                ],
+                "meta": {"pagination": {"total_pages": 1}},
+            }
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    with caplog.at_level(logging.INFO):
+        await adapter.fetch("shipments", cursor=None, limit=50)
+
+    assert any("shiprocket_shipment_raw_shape" in record.message for record in caplog.records)
+    # Only the first record is logged per page -- not all 150 in a real run.
+    assert (
+        sum("shiprocket_shipment_raw_shape" in r.message for r in caplog.records) == 1
+    )

@@ -28,6 +28,62 @@ from app.models.integration import IntegrationCode
 
 logger = get_logger(__name__)
 
+# Round 10 diagnostic (temporary, until a real /shipments payload has
+# been confirmed and this logging is no longer needed): 150/150 real
+# shipments failed with "channel_order_id=None" — `ShiprocketShipment
+# Normalizer` was written against Shiprocket's commonly *documented*
+# `/shipments` shape (never verified live, unlike NDR, which was fixed
+# against a real captured payload the same way this diagnostic exists
+# to enable now). Denylist-first, not allowlist-first: anything whose
+# key name suggests PII is never logged, and only a value survives that
+# check *and* looks like a plain id/status/date-shaped scalar (never a
+# nested object/list, which could hide an address or name inside).
+_NEVER_LOG_KEY_SUBSTRINGS = (
+    "phone",
+    "mobile",
+    "email",
+    "address",
+    "name",
+    "pincode",
+    "pin_code",
+    "zip",
+    "gstin",
+    "pan",
+    "password",
+    "token",
+    "secret",
+    "auth",
+)
+
+
+def _safe_scalar_values(obj: dict[str, Any]) -> dict[str, Any]:
+    """Same key-denylist, applied to one dict level — scalars only pass
+    through; a nested dict is recursed into once (one level is enough to
+    find a field like `order.channel_order_id` without risking an
+    unbounded walk into something like line items or an address block);
+    a nested list is reported only as its length, never its contents.
+    """
+    safe: dict[str, Any] = {}
+    for key, value in obj.items():
+        lowered = key.lower()
+        if any(bad in lowered for bad in _NEVER_LOG_KEY_SUBSTRINGS):
+            continue
+        if isinstance(value, dict):
+            safe[key] = _safe_scalar_values(value)
+        elif isinstance(value, list):
+            safe[key] = f"<list, {len(value)} item(s)>"
+        else:
+            safe[key] = value
+    return safe
+
+
+def _log_first_shipment_shape(raw: dict[str, Any]) -> None:
+    logger.info(
+        "shiprocket_shipment_raw_shape",
+        all_top_level_keys=sorted(raw.keys()),
+        safe_values=_safe_scalar_values(raw),
+    )
+
 
 class ShiprocketAdapter(IntegrationAdapter):
     code = IntegrationCode.SHIPROCKET
@@ -131,6 +187,8 @@ class ShiprocketAdapter(IntegrationAdapter):
         nodes: list[dict[str, Any]] = next(
             (data[key] for key in node_keys if data.get(key)), []
         )
+        if entity_type == "shipments" and nodes:
+            _log_first_shipment_shape(nodes[0])
         meta = (
             data.get("meta", {}).get("pagination", {}) if isinstance(data.get("meta"), dict) else {}
         )
