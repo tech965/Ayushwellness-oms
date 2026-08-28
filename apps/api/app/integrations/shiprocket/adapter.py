@@ -56,32 +56,90 @@ _NEVER_LOG_KEY_SUBSTRINGS = (
 )
 
 
-def _safe_scalar_values(obj: dict[str, Any]) -> dict[str, Any]:
-    """Same key-denylist, applied to one dict level — scalars only pass
-    through; a nested dict is recursed into once (one level is enough to
-    find a field like `order.channel_order_id` without risking an
-    unbounded walk into something like line items or an address block);
-    a nested list is reported only as its length, never its contents.
+# Round 11: the first diagnostic (a single `if entity_type == "shipments"
+# and nodes: ...` call, gated on this adapter's own node-extraction
+# already having succeeded) didn't show up in production logs. Most
+# likely a deploy-timing gap (the same class of issue found repeatedly
+# this engagement — see the git history), but there's a real second
+# possibility worth structurally ruling out at the same time: if the
+# top-level key guess this adapter's own `fetch()` uses to find the node
+# list (`_FETCH_ROUTES`'s `("data", "shipments")`) is *also* wrong for
+# real data, `nodes` would come back empty and that gate would never
+# open — meaning this new version fires unconditionally, at the raw
+# response boundary, before any of this adapter's own extraction guesses
+# run, so it can't be silently skipped by a different wrong guess.
+_ORDER_FIELD_HINTS = ("order", "channel")
+_SHIPMENT_FIELD_HINTS = ("shipment_id", "awb", "status", "current_status")
+
+
+def _nested_keys(obj: dict[str, Any], *, max_depth: int = 2, _depth: int = 0) -> dict[str, Any]:
+    """Structure only (key names and one-word type markers), never
+    values — up to `max_depth` levels of nested dicts.
     """
-    safe: dict[str, Any] = {}
+    if _depth >= max_depth:
+        return {}
+    result: dict[str, Any] = {}
+    for key, value in obj.items():
+        if isinstance(value, dict):
+            result[key] = _nested_keys(value, max_depth=max_depth, _depth=_depth + 1)
+        elif isinstance(value, list):
+            result[key] = f"<list, {len(value)} item(s)>"
+        else:
+            result[key] = "<scalar>"
+    return result
+
+
+def _candidate_fields(
+    obj: dict[str, Any], hints: tuple[str, ...], *, prefix: str = "", max_depth: int = 2
+) -> dict[str, Any]:
+    """Safe (denylist-filtered) values for every key at any depth (up to
+    `max_depth`) whose name contains one of `hints` — e.g. `order_id`,
+    `channel_order_id`, `shipment_id`, `awb_code`, `current_status`.
+    """
+    if prefix.count(".") >= max_depth:
+        return {}
+    found: dict[str, Any] = {}
     for key, value in obj.items():
         lowered = key.lower()
+        path = f"{prefix}.{key}" if prefix else key
         if any(bad in lowered for bad in _NEVER_LOG_KEY_SUBSTRINGS):
             continue
+        if any(hint in lowered for hint in hints):
+            if isinstance(value, dict):
+                found[path] = "<nested object>"
+            elif isinstance(value, list):
+                found[path] = f"<list, {len(value)} item(s)>"
+            else:
+                found[path] = value
         if isinstance(value, dict):
-            safe[key] = _safe_scalar_values(value)
-        elif isinstance(value, list):
-            safe[key] = f"<list, {len(value)} item(s)>"
-        else:
-            safe[key] = value
-    return safe
+            found.update(_candidate_fields(value, hints, prefix=path, max_depth=max_depth))
+    return found
 
 
-def _log_first_shipment_shape(raw: dict[str, Any]) -> None:
+def _log_shipments_response_shape(
+    *, endpoint: str, response: dict[str, Any], node_keys: tuple[str, ...]
+) -> None:
+    first_record: dict[str, Any] | None = None
+    for key in node_keys:
+        value = response.get(key)
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            first_record = value[0]
+            break
+
     logger.info(
         "shiprocket_shipment_raw_shape",
-        all_top_level_keys=sorted(raw.keys()),
-        safe_values=_safe_scalar_values(raw),
+        endpoint=endpoint,
+        response_keys=sorted(response.keys()),
+        shipment_keys=sorted(first_record.keys()) if first_record is not None else None,
+        nested_keys=_nested_keys(first_record) if first_record is not None else None,
+        candidate_order_fields=(
+            _candidate_fields(first_record, _ORDER_FIELD_HINTS) if first_record is not None else {}
+        ),
+        candidate_shipment_fields=(
+            _candidate_fields(first_record, _SHIPMENT_FIELD_HINTS)
+            if first_record is not None
+            else {}
+        ),
     )
 
 
@@ -184,11 +242,15 @@ class ShiprocketAdapter(IntegrationAdapter):
         except ShiprocketApiError as exc:
             raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
 
+        if entity_type == "shipments":
+            # Unconditional -- see `_log_shipments_response_shape`'s
+            # docstring for why this must not depend on the node-list
+            # key guess below already having succeeded.
+            _log_shipments_response_shape(endpoint=path, response=data, node_keys=node_keys)
+
         nodes: list[dict[str, Any]] = next(
             (data[key] for key in node_keys if data.get(key)), []
         )
-        if entity_type == "shipments" and nodes:
-            _log_first_shipment_shape(nodes[0])
         meta = (
             data.get("meta", {}).get("pagination", {}) if isinstance(data.get("meta"), dict) else {}
         )

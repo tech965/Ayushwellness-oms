@@ -197,60 +197,77 @@ async def test_process_webhook_is_a_documented_no_op() -> None:
     assert result == {"entity_type": None, "normalized": None}
 
 
-# Round 10 — diagnostic logging added to identify the real `/shipments`
-# field carrying the merchant's order number (150/150 real shipments
-# failed with `channel_order_id=None`, proving `ShiprocketShipment
-# Normalizer`'s field-name guess for it was wrong). These tests prove
-# the diagnostic itself is safe to run against real data, independent
-# of whatever the real field names turn out to be.
-def test_safe_scalar_values_excludes_denylisted_keys_at_any_nesting_level() -> None:
-    from app.integrations.shiprocket.adapter import _safe_scalar_values
+# Round 11 — diagnostic logging to identify the real `/shipments` field
+# carrying the merchant's order number (150/150 real shipments failed
+# with `channel_order_id=None`, proving `ShiprocketShipmentNormalizer`'s
+# field-name guess for it was wrong). The first version of this
+# diagnostic (Round 10) didn't reach production logs at all; this
+# version fires unconditionally at the raw response boundary — before
+# this adapter's own node-list-key guess runs — so it can't be silently
+# skipped by a *different* wrong guess the way the first version could.
+def test_candidate_fields_finds_hinted_keys_at_any_depth_and_excludes_pii() -> None:
+    from app.integrations.shiprocket.adapter import _candidate_fields
+
+    raw = {
+        "shipment_id": 1085847380,
+        "awb_code": "77931116852",
+        "current_status": "NEW",
+        "customer_name": "Should Not Appear",
+        "order": {"channel_order_id": "AWL91535", "order_email": "should-not-appear@x.com"},
+    }
+
+    order_fields = _candidate_fields(raw, ("order", "channel"))
+    shipment_fields = _candidate_fields(raw, ("shipment_id", "awb", "status", "current_status"))
+
+    assert order_fields == {"order": "<nested object>", "order.channel_order_id": "AWL91535"}
+    assert "order.order_email" not in order_fields
+    assert shipment_fields["shipment_id"] == 1085847380
+    assert shipment_fields["awb_code"] == "77931116852"
+    assert shipment_fields["current_status"] == "NEW"
+    assert "customer_name" not in shipment_fields
+    assert "customer_name" not in order_fields
+
+
+def test_nested_keys_reports_structure_only_never_values() -> None:
+    from app.integrations.shiprocket.adapter import _nested_keys
 
     raw = {
         "id": 1,
-        "awb": "AWB1",
-        "customer_email": "should-not-appear@example.com",
-        "customer": {
-            "name": "Should Not Appear",
-            "phone": "9999999999",
-            "email": "also-should-not-appear@example.com",
-        },
-        "billing_address": "123 Should Not Appear Street",
-        "channel_order_id": "AWL91535",
+        "order": {"channel_order_id": "AWL91535", "customer": {"name": "Should Not Appear"}},
+        "line_items": [{"sku": "A"}],
     }
 
-    safe = _safe_scalar_values(raw)
-    dumped = str(safe)
+    keys = _nested_keys(raw, max_depth=2)
 
-    assert "should-not-appear" not in dumped
-    assert "also-should-not-appear" not in dumped
-    assert "Should Not Appear" not in dumped
-    assert "9999999999" not in dumped
-    assert "customer_email" not in safe
-    assert "billing_address" not in safe
-    # "customer" itself isn't a denylisted key name, so it's recursed into
-    # (not dropped outright) -- but every key inside it was denylisted, so
-    # it comes back empty, not with any of the PII values inside it.
-    assert safe["customer"] == {}
-    assert safe["channel_order_id"] == "AWL91535"
-    assert safe["id"] == 1
+    assert keys["id"] == "<scalar>"
+    assert keys["line_items"] == "<list, 1 item(s)>"
+    assert keys["order"]["channel_order_id"] == "<scalar>"
+    # depth 2 reached at "order" -> "customer" -- its own contents (a PII
+    # name) are not recursed into a third level.
+    assert "Should Not Appear" not in str(keys)
 
 
-def test_safe_scalar_values_reports_nested_non_pii_dicts_and_list_lengths_only() -> None:
-    from app.integrations.shiprocket.adapter import _safe_scalar_values
+async def test_fetch_shipments_logs_response_shape_unconditionally(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fires even when this adapter's own node-list-key guess fails to
+    find anything -- the exact gap the first (Round 10) diagnostic had.
+    """
+    import logging
 
-    raw = {
-        "order": {"channel_order_id": "AWL91535", "status": "NEW"},
-        "line_items": [{"sku": "A"}, {"sku": "B"}],
-    }
+    client = _StubClient([{"unexpected_top_level_key": ["not", "data", "or", "shipments"]}])
+    adapter = ShiprocketAdapter(client=client)
 
-    safe = _safe_scalar_values(raw)
+    with caplog.at_level(logging.INFO):
+        await adapter.fetch("shipments", cursor=None, limit=50)
 
-    assert safe["order"] == {"channel_order_id": "AWL91535", "status": "NEW"}
-    assert safe["line_items"] == "<list, 2 item(s)>"
+    matches = [r for r in caplog.records if "shiprocket_shipment_raw_shape" in r.message]
+    assert len(matches) == 1
+    assert "unexpected_top_level_key" in matches[0].message
+    assert '"shipment_keys": null' in matches[0].message  # no record found -- shape still logged
 
 
-async def test_fetch_shipments_logs_the_first_record_shape(
+async def test_fetch_shipments_logs_candidate_order_and_shipment_fields(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     import logging
@@ -259,8 +276,12 @@ async def test_fetch_shipments_logs_the_first_record_shape(
         [
             {
                 "data": [
-                    {"id": 1, "channel_order_id": "AWL1", "awb": "AWB1"},
-                    {"id": 2, "channel_order_id": "AWL2", "awb": "AWB2"},
+                    {
+                        "id": 1085847380,
+                        "awb_code": "77931116852",
+                        "current_status": "NEW",
+                        "order": {"channel_order_id": "AWL91535"},
+                    }
                 ],
                 "meta": {"pagination": {"total_pages": 1}},
             }
@@ -271,8 +292,10 @@ async def test_fetch_shipments_logs_the_first_record_shape(
     with caplog.at_level(logging.INFO):
         await adapter.fetch("shipments", cursor=None, limit=50)
 
-    assert any("shiprocket_shipment_raw_shape" in record.message for record in caplog.records)
-    # Only the first record is logged per page -- not all 150 in a real run.
-    assert (
-        sum("shiprocket_shipment_raw_shape" in r.message for r in caplog.records) == 1
-    )
+    matches = [r for r in caplog.records if "shiprocket_shipment_raw_shape" in r.message]
+    assert len(matches) == 1
+    logged = matches[0].message
+    assert "channel_order_id" in logged
+    assert "AWL91535" in logged
+    assert "awb_code" in logged
+    assert "77931116852" in logged
