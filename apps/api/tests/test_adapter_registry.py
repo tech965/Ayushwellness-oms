@@ -230,3 +230,76 @@ async def test_run_sync_task_execution_path_sees_a_registered_shiprocket_adapter
     assert not any(
         "No adapter registered" in (e.error_message or "") for e in errors
     ), "adapter registry was empty at the real run_sync_task execution boundary"
+
+
+# Round 9 — production evidence proved `worker_process_init` genuinely
+# fires (both `ForkPoolWorker-1`/`-2` logged `adapters_registered_in_
+# worker_process` on startup), yet the process that later executed the
+# actual sync task still saw `registered_adapters=[]`. Since a plain
+# in-memory dict cannot spontaneously empty itself, and nothing in this
+# codebase calls `clear_adapters()` outside tests, this can only be
+# explained by something Render-specific and unreproducible locally.
+# `get_adapter` was made self-healing instead of chasing a fourth theory
+# (see its docstring): these tests prove the fix holds even in the
+# worst case actually observed in production — a call to `get_adapter`
+# with *neither* prior registration mechanism (module import,
+# `worker_process_init`) having run in this process at all.
+def test_get_adapter_self_heals_shiprocket_even_with_no_prior_registration_at_all() -> None:
+    clear_adapters()
+    assert snapshot_adapters() == {}
+
+    adapter = get_adapter(IntegrationCode.SHIPROCKET)
+
+    assert isinstance(adapter, ShiprocketAdapter)
+
+
+def test_get_adapter_self_heals_shopify_even_with_no_prior_registration_at_all() -> None:
+    clear_adapters()
+    assert snapshot_adapters() == {}
+
+    adapter = get_adapter(IntegrationCode.SHOPIFY)
+
+    assert isinstance(adapter, ShopifyAdapter)
+
+
+def test_get_adapter_self_heal_does_not_reinvent_an_already_correct_registry() -> None:
+    """The self-heal path must be a pure fallback, not a routine
+    re-registration on every call — a cache hit must never trigger it
+    (`register_all_adapters` is cheap and idempotent, but there's no
+    reason to pay even that cost when nothing is actually missing).
+    """
+    clear_adapters()
+    register_all_adapters()
+    original_shiprocket = get_adapter(IntegrationCode.SHIPROCKET)
+
+    same_adapter = get_adapter(IntegrationCode.SHIPROCKET)
+
+    assert same_adapter is original_shiprocket
+
+
+def test_a_genuinely_separate_process_self_heals_without_worker_process_init_at_all() -> None:
+    """The single strongest available proof of the actual fix: a fresh
+    OS process where the registry is empty and `worker_process_init` is
+    *never sent* — exactly the failure state production evidence showed
+    (a process whose registration mechanisms, whatever happened to
+    them, left an empty registry) — still finds `shiprocket` and
+    `shopify` on a plain `get_adapter` call.
+    """
+    probe = (
+        "import app.workers.celery_app\n"  # import only -- no worker_process_init.send()
+        "from app.integrations.registry import clear_adapters, get_adapter\n"
+        "clear_adapters()\n"  # simulate the exact reported symptom: registered_adapters=[]
+        "sr = get_adapter('shiprocket')\n"
+        "sp = get_adapter('shopify')\n"
+        "print('SHIPROCKET_OK' if sr is not None else 'SHIPROCKET_MISSING')\n"
+        "print('SHOPIFY_OK' if sp is not None else 'SHOPIFY_MISSING')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SHIPROCKET_OK" in result.stdout, result.stdout + result.stderr
+    assert "SHOPIFY_OK" in result.stdout, result.stdout + result.stderr

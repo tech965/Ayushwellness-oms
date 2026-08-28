@@ -112,7 +112,32 @@ async def _make_order(session: AsyncSession, *, order_number: str) -> object:
 # 21. Reconciliation mismatch / 22. Reconciliation missing record
 
 
-async def test_no_adapters_registered_skips_every_provider_check(db_session: AsyncSession) -> None:
+async def test_no_adapters_registered_skips_every_provider_check(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 9: `get_adapter` now self-heals a registry that's merely
+    empty (see `app.integrations.registry.get_adapter`'s docstring) —
+    `clear_adapters()` alone can no longer represent "neither provider
+    is available" for Shopify/Shiprocket specifically, since both have
+    a real `register()` and will always be found again on the very next
+    lookup. What "no adapters" actually still looks like post-fix is
+    "registered, but genuinely unconfigured" (no credentials) — every
+    check that touches the adapter still gracefully reports itself
+    skipped, exactly as before, just via a different internal path
+    (`_safe_check` catching the adapter's own "not configured"
+    `IntegrationError`, not the `adapter is None` branch this test used
+    to exercise). Config is forced to `None` explicitly here rather than
+    relying on the environment having no real credentials, so this test
+    can't accidentally start making live API calls in a dev environment
+    that *does* have them configured (e.g. a real Shopify token in
+    `.env`) — confirmed that was a real risk while fixing this test.
+    """
+    from app.integrations.shiprocket.config import ShiprocketConfig
+    from app.integrations.shopify.config import ShopifyConfig
+
+    monkeypatch.setattr(ShopifyConfig, "from_settings", classmethod(lambda cls: None))
+    monkeypatch.setattr(ShiprocketConfig, "from_settings", classmethod(lambda cls: None))
+
     service = ReconciliationService(db_session)
     run = await service.start_run(actor=None)
     completed = await service.run_checks(run.id)
@@ -121,7 +146,7 @@ async def test_no_adapters_registered_skips_every_provider_check(db_session: Asy
     assert completed.run_metadata is not None
     skipped = completed.run_metadata["skipped_checks"]
     assert "shopify_order_missing_in_oms" in skipped
-    assert "shiprocket_tracking_family" in skipped
+    assert "shiprocket_ndr_mismatch" in skipped
     assert completed.run_metadata["errored_checks"] == []
 
 

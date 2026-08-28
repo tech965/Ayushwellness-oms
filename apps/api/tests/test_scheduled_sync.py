@@ -109,10 +109,19 @@ async def test_scheduled_sync_enqueues_shiprocket_shipments_before_ndr(
     ]
 
 
-async def test_scheduled_sync_enqueues_nothing_when_no_adapters_registered(
+async def test_scheduled_sync_enqueues_nothing_for_a_genuinely_unimplemented_provider(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await _make_integration(db_session, IntegrationCode.SHOPIFY)
+    """Round 9: `get_adapter` now self-heals a registry that's merely
+    *momentarily* empty for a provider that really does have a
+    `register()` (see `app.integrations.registry.get_adapter`'s
+    docstring) — so this test can no longer use Shopify (which does)
+    to prove "no adapter -> nothing enqueued"; self-healing would find
+    it and enqueue its entities, which is the whole point of that fix.
+    Blue Dart has no adapter at all to find, self-heal or not, so it's
+    the only honest way left to exercise this branch.
+    """
+    await _make_integration(db_session, IntegrationCode.BLUE_DART)
 
     calls: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
