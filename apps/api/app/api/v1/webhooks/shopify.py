@@ -70,8 +70,17 @@ async def receive_shopify_webhook(
     # whitespace here does not weaken verification (Shopify secrets never
     # intentionally contain leading/trailing whitespace).
     secret = (settings.SHOPIFY_WEBHOOK_SECRET or "").strip()
+    # Optional, temporary: during a Shopify Client Secret rotation,
+    # Shopify signs with the OLDEST unrevoked secret until it's revoked
+    # — see app.integrations.shopify.webhooks.verify_webhook_hmac_with_rotation.
+    # Empty/unset collapses to None so downstream checks treat it as
+    # "not configured" rather than an empty-string secret.
+    old_secret = (settings.SHOPIFY_WEBHOOK_SECRET_OLD or "").strip() or None
     diagnostics = webhook_hmac_debug_info(
-        raw_body=raw_body, signature_header=x_shopify_hmac_sha256, secret=secret
+        raw_body=raw_body,
+        signature_header=x_shopify_hmac_sha256,
+        secret=secret,
+        old_secret=old_secret,
     )
     logger.info(
         "shopify_webhook_hmac_check",

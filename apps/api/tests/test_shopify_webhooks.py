@@ -19,6 +19,7 @@ from app.integrations.shopify.adapter import ShopifyAdapter
 from app.integrations.shopify.webhooks import (
     content_length_matches_body,
     verify_webhook_hmac,
+    verify_webhook_hmac_with_rotation,
     webhook_hmac_debug_info,
     webhook_secret_fingerprint,
 )
@@ -84,6 +85,65 @@ async def test_verify_webhook_hmac_rejects_missing_header_or_secret() -> None:
     assert verify_webhook_hmac(raw_body=body, signature_header=_sign(body), secret="") is False
 
 
+# Client-secret rotation: Shopify signs with the oldest unrevoked secret
+# during a rotation window, so verification must accept either.
+async def test_rotation_accepts_signature_from_current_secret() -> None:
+    body = b'{"id": 1}'
+    signature = _sign(body, secret=_SECRET)
+    assert (
+        verify_webhook_hmac_with_rotation(
+            raw_body=body, signature_header=signature, secret=_SECRET, old_secret="old-secret-value"
+        )
+        is True
+    )
+
+
+async def test_rotation_accepts_signature_from_old_secret_when_current_fails() -> None:
+    old_secret = "old-secret-value"
+    body = b'{"id": 1}'
+    signature = _sign(body, secret=old_secret)
+    assert (
+        verify_webhook_hmac_with_rotation(
+            raw_body=body, signature_header=signature, secret=_SECRET, old_secret=old_secret
+        )
+        is True
+    )
+
+
+async def test_rotation_rejects_when_signature_matches_neither_secret() -> None:
+    body = b'{"id": 1}'
+    signature = _sign(body, secret="some-unrelated-secret")
+    assert (
+        verify_webhook_hmac_with_rotation(
+            raw_body=body,
+            signature_header=signature,
+            secret=_SECRET,
+            old_secret="old-secret-value",
+        )
+        is False
+    )
+
+
+async def test_rotation_with_no_old_secret_configured_still_verifies_current() -> None:
+    body = b'{"id": 1}'
+    signature = _sign(body, secret=_SECRET)
+    # `old_secret` omitted entirely (defaults to None) — the common case
+    # outside a rotation window, and must behave identically to
+    # `verify_webhook_hmac` on its own.
+    assert (
+        verify_webhook_hmac_with_rotation(raw_body=body, signature_header=signature, secret=_SECRET)
+        is True
+    )
+    # And a wrong signature must still be rejected — no old secret must
+    # never mean "skip verification."
+    assert (
+        verify_webhook_hmac_with_rotation(
+            raw_body=body, signature_header="not-a-valid-signature", secret=_SECRET
+        )
+        is False
+    )
+
+
 async def test_valid_webhook_signature_is_accepted(
     db_session: AsyncSession, client: AsyncClient
 ) -> None:
@@ -103,6 +163,89 @@ async def test_valid_webhook_signature_is_accepted(
 
     assert response.status_code == 200
     assert response.json()["success"] is True
+
+
+async def test_webhook_signed_with_new_secret_is_accepted_during_rotation(
+    db_session: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "SHOPIFY_WEBHOOK_SECRET_OLD", "old-shopify-client-secret")
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 501, "email": "rotation-new@example.com"}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "orders/create",
+            "X-Shopify-Hmac-Sha256": _sign(body, secret=_SECRET),
+            "X-Shopify-Webhook-Id": "wh_rotation_new",
+        },
+    )
+    assert response.status_code == 200
+
+
+async def test_webhook_signed_with_old_secret_is_accepted_during_rotation(
+    db_session: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_secret = "old-shopify-client-secret"
+    monkeypatch.setattr(settings, "SHOPIFY_WEBHOOK_SECRET_OLD", old_secret)
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 502, "email": "rotation-old@example.com"}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "orders/create",
+            # Signed with the OLD secret — this is exactly what Shopify
+            # sends for the remainder of a rotation window per their
+            # documented behavior.
+            "X-Shopify-Hmac-Sha256": _sign(body, secret=old_secret),
+            "X-Shopify-Webhook-Id": "wh_rotation_old",
+        },
+    )
+    assert response.status_code == 200
+
+
+async def test_webhook_rejected_when_signature_matches_neither_secret(
+    db_session: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "SHOPIFY_WEBHOOK_SECRET_OLD", "old-shopify-client-secret")
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 503}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "orders/create",
+            "X-Shopify-Hmac-Sha256": _sign(body, secret="some-completely-unrelated-secret"),
+            "X-Shopify-Webhook-Id": "wh_rotation_neither",
+        },
+    )
+    assert response.status_code == 401
+
+
+async def test_webhook_still_verifies_when_old_secret_is_not_configured(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """No `SHOPIFY_WEBHOOK_SECRET_OLD` set at all (the default, outside a
+    rotation window) — behavior must be unchanged from before rotation
+    support existed.
+    """
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 504, "email": "no-rotation@example.com"}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "orders/create",
+            "X-Shopify-Hmac-Sha256": _sign(body, secret=_SECRET),
+            "X-Shopify-Webhook-Id": "wh_no_rotation",
+        },
+    )
+    assert response.status_code == 200
 
 
 # 22. Invalid webhook rejection
@@ -165,7 +308,11 @@ async def test_webhook_hmac_debug_info_never_exposes_secret_or_digest() -> None:
         "webhook_secret_configured": True,
         "webhook_secret_length": len(_SECRET),
         "webhook_secret_fingerprint": webhook_secret_fingerprint(_SECRET),
+        "old_webhook_secret_configured": False,
+        "old_webhook_secret_length": 0,
+        "old_webhook_secret_fingerprint": None,
         "computed_hmac_length": len(signature),
+        "hmac_matched_with": "current",
         "hmac_valid": True,
     }
     for value in info.values():
@@ -179,12 +326,32 @@ async def test_webhook_hmac_debug_info_reports_missing_header_and_secret() -> No
     missing_header = webhook_hmac_debug_info(raw_body=body, signature_header=None, secret=_SECRET)
     assert missing_header["hmac_header_present"] is False
     assert missing_header["hmac_valid"] is False
+    assert missing_header["hmac_matched_with"] is None
 
     missing_secret = webhook_hmac_debug_info(raw_body=body, signature_header=_sign(body), secret="")
     assert missing_secret["webhook_secret_configured"] is False
     assert missing_secret["computed_hmac_length"] == 0
     assert missing_secret["webhook_secret_fingerprint"] is None
     assert missing_secret["hmac_valid"] is False
+    assert missing_secret["hmac_matched_with"] is None
+
+
+async def test_webhook_hmac_debug_info_reports_match_against_old_secret() -> None:
+    old_secret = "previous-shopify-client-secret"
+    body = b'{"id": 1}'
+    signed_with_old = _sign(body, secret=old_secret)
+
+    info = webhook_hmac_debug_info(
+        raw_body=body, signature_header=signed_with_old, secret=_SECRET, old_secret=old_secret
+    )
+    assert info["hmac_valid"] is True
+    assert info["hmac_matched_with"] == "old"
+    assert info["old_webhook_secret_configured"] is True
+    assert info["old_webhook_secret_length"] == len(old_secret)
+    assert info["old_webhook_secret_fingerprint"] == webhook_secret_fingerprint(old_secret)
+    for value in info.values():
+        assert old_secret not in str(value)
+        assert _SECRET not in str(value)
 
 
 async def test_webhook_secret_fingerprint_is_stable_and_distinguishes_values() -> None:

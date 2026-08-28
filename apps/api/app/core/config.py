@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     SHOPIFY_API_SECRET: str | None = None
     SHOPIFY_ACCESS_TOKEN: str | None = None
     SHOPIFY_WEBHOOK_SECRET: str | None = None
+    # Temporary, optional: during a Shopify Client Secret rotation,
+    # Shopify signs webhooks with the OLDEST unrevoked secret until the
+    # old one is explicitly revoked (their documented behavior, not an
+    # OMS assumption). Set this to the previous secret for the duration
+    # of a rotation, then remove it once the old secret is revoked in
+    # Shopify — see app.integrations.shopify.webhooks.
+    SHOPIFY_WEBHOOK_SECRET_OLD: str | None = None
     SHOPIFY_STORE_DOMAIN: str | None = None
     # GraphQL Admin API — REST is legacy as of April 2025; new integrations
     # must use GraphQL. Quarterly release, e.g. "2026-01". Verify against
