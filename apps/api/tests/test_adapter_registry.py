@@ -94,3 +94,51 @@ def test_get_adapter_returns_none_for_an_unimplemented_provider() -> None:
     register_all_adapters()
 
     assert get_adapter(IntegrationCode.BLUE_DART) is None
+
+
+# Round 7 — production incident: `get_adapter("shiprocket")` returned
+# `None` inside the *actual running* Celery worker process at the moment
+# it executed a sync, even though manually re-running
+# `register_all_adapters()` in a fresh Render shell always worked. That
+# combination only makes sense if the live worker process's copy of the
+# registry, at that moment, hadn't received module-import-time
+# registration the way a fresh process does — module-level code in
+# `app.workers.celery_app` only *usually* reaches a forked child worker
+# via memory inheritance, it isn't guaranteed for every pool/deploy
+# scenario. Fixed with `worker_process_init` (Celery's own per-process
+# startup signal) as a second, more robust trigger for the same
+# `register_all_adapters()` call — this proves that signal actually
+# repopulates an empty registry, the exact "BEFORE: {}" state captured
+# on Render before this fix.
+def test_worker_process_init_signal_populates_an_empty_registry() -> None:
+    from app.workers.celery_app import _register_adapters_in_worker_process
+
+    clear_adapters()
+    assert snapshot_adapters() == {}
+
+    _register_adapters_in_worker_process()
+
+    shiprocket = get_adapter(IntegrationCode.SHIPROCKET)
+    shopify = get_adapter(IntegrationCode.SHOPIFY)
+    assert isinstance(shiprocket, ShiprocketAdapter)
+    assert isinstance(shopify, ShopifyAdapter)
+
+
+def test_worker_process_init_signal_is_actually_connected_to_celery() -> None:
+    """Not enough to prove the handler function works in isolation — it
+    must actually be wired to Celery's `worker_process_init` signal, or
+    it never fires in a real worker process at all. Sends the real
+    signal (as Celery itself would, once per worker process) rather than
+    calling the handler directly, so this only passes if the `@connect`
+    wiring in `celery_app.py` is genuinely intact.
+    """
+    import app.workers.celery_app  # noqa: F401 - import side effect: connects the signal
+    from celery.signals import worker_process_init
+
+    clear_adapters()
+    assert snapshot_adapters() == {}
+
+    worker_process_init.send(sender=None)
+
+    assert isinstance(get_adapter(IntegrationCode.SHIPROCKET), ShiprocketAdapter)
+    assert isinstance(get_adapter(IntegrationCode.SHOPIFY), ShopifyAdapter)

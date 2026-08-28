@@ -21,14 +21,53 @@ instance — so only use it if there is exactly one worker running.)
 from __future__ import annotations
 
 from celery import Celery
+from celery.signals import worker_process_init
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.integrations.bootstrap import register_all_adapters
 
-# Registered at worker-process import time — the registry is in-memory
-# and per-process, so the Celery worker needs its own registration pass
-# independent of `app.main`'s (FastAPI request process).
+logger = get_logger(__name__)
+
+# Registered here at *module import* time so the registry is populated
+# in every process that merely imports this module without going
+# through Celery's own worker bootstrap at all — the master/beat
+# process, an eager task call in tests, a one-off script that imports
+# `celery_app` to inspect config, etc.
 register_all_adapters()
+
+
+@worker_process_init.connect
+def _register_adapters_in_worker_process(**_kwargs: object) -> None:
+    """Belt-and-braces for the one case the module-level call above
+    can't guarantee: the *actual* worker process(es) that run tasks.
+
+    Celery's prefork pool forks child processes from the master after
+    this module's top-level code (including the `register_all_adapters()`
+    call above) has already run — and `fork()` normally inherits that
+    already-populated in-memory registry via copy-on-write, so this is
+    usually redundant. But "usually" was exactly the gap behind a real
+    production incident: a `SyncError` — "No adapter registered for
+    integration 'shiprocket'" — that could not be reproduced by manually
+    re-running `register_all_adapters()` in a fresh Render shell (it
+    always worked there), which only makes sense if the actual *running*
+    worker process's copy of the registry, at the moment it executed
+    that sync, was a different, stale process than what a fresh shell
+    invocation gets — e.g. a worker process that predates a deploy, or a
+    pool/process-spawning path that doesn't preserve fork-inherited
+    state the way plain `os.fork()` does. `worker_process_init` is
+    Celery's own signal for "run this once, in this exact process, right
+    before it starts pulling tasks" — firing it here removes the
+    dependency on fork-inheritance being reliable, for every pool type
+    Celery supports (prefork, solo, gevent, eventlet), without
+    introducing a second registry or repeating this per task execution
+    (see `SyncService.execute_sync`, which deliberately does not call
+    this — registration stays a once-per-process startup concern, not a
+    per-call one).
+    """
+    register_all_adapters()
+    logger.info("adapters_registered_in_worker_process")
+
 
 celery_app = Celery(
     "ayushwellness_oms",
