@@ -299,3 +299,100 @@ async def test_fetch_shipments_logs_candidate_order_and_shipment_fields(
     assert "AWL91535" in logged
     assert "awb_code" in logged
     assert "77931116852" in logged
+
+
+# Round 12 — `candidate_order_fields` never surfaced a value for the
+# merchant's order reference: its hint list doesn't match `number`/`code`,
+# and `channel_name`'s value was suppressed by the PII denylist's "name"
+# substring match even though it names a sales channel, not a person.
+# This adds a second, narrowly-scoped diagnostic logging exactly those
+# three real `/shipments` field names explicitly.
+def test_channel_name_is_no_longer_treated_as_pii_but_other_name_fields_still_are() -> None:
+    from app.integrations.shiprocket.adapter import _is_pii_key
+
+    assert _is_pii_key("channel_name") is False
+    assert _is_pii_key("customer_name") is True
+    assert _is_pii_key("first_name") is True
+    assert _is_pii_key("last_name") is True
+    assert _is_pii_key("billing_name") is True
+    assert _is_pii_key("name") is True
+
+
+async def test_fetch_shipments_logs_number_code_and_channel_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    client = _StubClient(
+        [
+            {
+                "data": [
+                    {
+                        "id": 1,
+                        "number": "SR-NUMBER-123",
+                        "code": "SR-CODE-456",
+                        "channel_name": "Shopify",
+                        "order_id": 1089477745,
+                        "customer_name": "Should Not Appear",
+                        "customer_phone": "9999999999",
+                        "customer_email": "should-not-appear@example.com",
+                        "billing_address": "123 Should Not Appear Street",
+                    }
+                ],
+                "meta": {"pagination": {"total_pages": 1}},
+            }
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    with caplog.at_level(logging.INFO):
+        await adapter.fetch("shipments", cursor=None, limit=50)
+
+    matches = [r for r in caplog.records if "shiprocket_shipment_identity_fields" in r.message]
+    assert len(matches) == 1
+    logged = matches[0].message
+
+    # 1-3: number, code, channel_name are logged.
+    assert '"number": "SR-NUMBER-123"' in logged
+    assert '"code": "SR-CODE-456"' in logged
+    assert '"channel_name": "Shopify"' in logged
+
+    # 4: phone/email/address/customer names are still NOT logged.
+    assert "Should Not Appear" not in logged
+    assert "9999999999" not in logged
+    assert "should-not-appear" not in logged
+    assert "123 Should Not Appear Street" not in logged
+    assert "customer_name" not in logged
+    assert "customer_phone" not in logged
+    assert "customer_email" not in logged
+    assert "billing_address" not in logged
+
+
+async def test_fetch_shipments_logs_identity_fields_exactly_once_per_page(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    client = _StubClient(
+        [
+            {
+                "data": [
+                    {"id": 1, "number": "N1", "code": "C1", "channel_name": "Shopify"},
+                    {"id": 2, "number": "N2", "code": "C2", "channel_name": "Shopify"},
+                    {"id": 3, "number": "N3", "code": "C3", "channel_name": "Shopify"},
+                ],
+                "meta": {"pagination": {"total_pages": 1}},
+            }
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    with caplog.at_level(logging.INFO):
+        await adapter.fetch("shipments", cursor=None, limit=50)
+
+    matches = [r for r in caplog.records if "shiprocket_shipment_identity_fields" in r.message]
+    assert len(matches) == 1
+    # Only the first record's values, not all 3 on the page.
+    assert '"number": "N1"' in matches[0].message
+    assert "N2" not in matches[0].message
+    assert "N3" not in matches[0].message

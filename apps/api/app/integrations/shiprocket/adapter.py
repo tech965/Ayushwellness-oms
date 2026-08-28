@@ -55,6 +55,21 @@ _NEVER_LOG_KEY_SUBSTRINGS = (
     "auth",
 )
 
+# Round 12: `"name"` in the substring denylist above is correct for
+# `customer_name`/`first_name`/`last_name`/`billing_name`/etc, but it
+# also (wrongly) swallows `channel_name` — which identifies which sales
+# channel a shipment came from (e.g. "Shopify"), not a person. Narrow,
+# exact-key exceptions only — this must never become a second, broader
+# allowlist that could exempt a real PII field by accident.
+_KEY_DENYLIST_EXCEPTIONS = frozenset({"channel_name"})
+
+
+def _is_pii_key(key: str) -> bool:
+    if key in _KEY_DENYLIST_EXCEPTIONS:
+        return False
+    lowered = key.lower()
+    return any(bad in lowered for bad in _NEVER_LOG_KEY_SUBSTRINGS)
+
 
 # Round 11: the first diagnostic (a single `if entity_type == "shipments"
 # and nodes: ...` call, gated on this adapter's own node-extraction
@@ -102,7 +117,7 @@ def _candidate_fields(
     for key, value in obj.items():
         lowered = key.lower()
         path = f"{prefix}.{key}" if prefix else key
-        if any(bad in lowered for bad in _NEVER_LOG_KEY_SUBSTRINGS):
+        if _is_pii_key(key):
             continue
         if any(hint in lowered for hint in hints):
             if isinstance(value, dict):
@@ -141,6 +156,24 @@ def _log_shipments_response_shape(
             else {}
         ),
     )
+
+
+# Round 12: the broader shape diagnostic above found the real
+# `/shipments` keys but the merchant-order-reference candidate never
+# surfaced a value — `candidate_order_fields`'s hint list didn't match
+# `number`/`code` (neither contains "order" or "channel"), and
+# `channel_name`'s value was suppressed by the PII denylist's "name"
+# substring match, even though it identifies a sales channel, not a
+# person (fixed above via `_KEY_DENYLIST_EXCEPTIONS`). This logs exactly
+# those three named fields, explicitly, so the real values are visible
+# without expanding the hint-based search further and risking pulling
+# in something unintended.
+_IDENTITY_FIELD_KEYS = ("number", "code", "channel_name")
+
+
+def _log_shipment_identity_fields(raw: dict[str, Any]) -> None:
+    values = {key: raw.get(key) for key in _IDENTITY_FIELD_KEYS if not _is_pii_key(key)}
+    logger.info("shiprocket_shipment_identity_fields", **values)
 
 
 class ShiprocketAdapter(IntegrationAdapter):
@@ -251,6 +284,8 @@ class ShiprocketAdapter(IntegrationAdapter):
         nodes: list[dict[str, Any]] = next(
             (data[key] for key in node_keys if data.get(key)), []
         )
+        if entity_type == "shipments" and nodes:
+            _log_shipment_identity_fields(nodes[0])
         meta = (
             data.get("meta", {}).get("pagination", {}) if isinstance(data.get("meta"), dict) else {}
         )
