@@ -16,7 +16,11 @@ from app.core.config import settings
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import clear_adapters, register_adapter
 from app.integrations.shopify.adapter import ShopifyAdapter
-from app.integrations.shopify.webhooks import verify_webhook_hmac, webhook_hmac_debug_info
+from app.integrations.shopify.webhooks import (
+    verify_webhook_hmac,
+    webhook_hmac_debug_info,
+    webhook_secret_fingerprint,
+)
 from app.models.enums import IntegrationStatus, IntegrationType, OrderStatus, PaymentStatus
 from app.models.integration import IntegrationCode, WebhookEvent
 from app.models.order import Order
@@ -159,6 +163,7 @@ async def test_webhook_hmac_debug_info_never_exposes_secret_or_digest() -> None:
         "raw_body_length": len(body),
         "webhook_secret_configured": True,
         "webhook_secret_length": len(_SECRET),
+        "webhook_secret_fingerprint": webhook_secret_fingerprint(_SECRET),
         "computed_hmac_length": len(signature),
         "hmac_valid": True,
     }
@@ -177,7 +182,31 @@ async def test_webhook_hmac_debug_info_reports_missing_header_and_secret() -> No
     missing_secret = webhook_hmac_debug_info(raw_body=body, signature_header=_sign(body), secret="")
     assert missing_secret["webhook_secret_configured"] is False
     assert missing_secret["computed_hmac_length"] == 0
+    assert missing_secret["webhook_secret_fingerprint"] is None
     assert missing_secret["hmac_valid"] is False
+
+
+async def test_webhook_secret_fingerprint_is_stable_and_distinguishes_values() -> None:
+    # Same input -> same fingerprint every time (so a human can compare
+    # today's log line against a value they compute locally tomorrow).
+    assert webhook_secret_fingerprint(_SECRET) == webhook_secret_fingerprint(_SECRET)
+
+    # Different secrets -> (overwhelmingly likely) different fingerprints —
+    # this is what makes the fingerprint useful for spotting a wrong-app
+    # Client Secret mix-up.
+    other = "a-completely-different-secret-value"
+    assert webhook_secret_fingerprint(_SECRET) != webhook_secret_fingerprint(other)
+
+    # The fingerprint is short and hex — nowhere near enough information
+    # to reconstruct a 38-character high-entropy secret, and the secret
+    # itself never appears as a substring of it.
+    fingerprint = webhook_secret_fingerprint(_SECRET)
+    assert fingerprint is not None
+    assert len(fingerprint) == 8
+    assert all(c in "0123456789abcdef" for c in fingerprint)
+    assert _SECRET not in fingerprint
+
+    assert webhook_secret_fingerprint("") is None
 
 
 async def test_missing_signature_header_is_rejected(

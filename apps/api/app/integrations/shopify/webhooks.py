@@ -11,6 +11,12 @@ import base64
 import hashlib
 import hmac
 
+# Length of the fingerprint below, in hex characters (32 bits) — enough
+# to compare two *specific* known values against each other with
+# negligible accidental-collision risk, while being extra conservative
+# about not exposing anything resembling the real secret.
+_FINGERPRINT_HEX_LENGTH = 8
+
 # entity_type ("customers"/"products"/"orders") is `topic.split("/", 1)[0]`
 # — see app.integrations.shopify.adapter.ShopifyAdapter.process_webhook.
 SUPPORTED_WEBHOOK_TOPICS: frozenset[str] = frozenset(
@@ -39,16 +45,31 @@ def verify_webhook_hmac(*, raw_body: bytes, signature_header: str | None, secret
     return hmac.compare_digest(computed, signature_header)
 
 
+def webhook_secret_fingerprint(secret: str) -> str | None:
+    """A short, non-reversible fingerprint of a secret value — SHA-256,
+    truncated to `_FINGERPRINT_HEX_LENGTH` hex characters. Cannot be used
+    to recover the secret (preimage-resistant hash, further shortened),
+    but is stable and comparable: computing this same function locally
+    over the value shown in Shopify's own dashboard lets a human confirm,
+    without ever typing the real secret into a chat, a log, or any shared
+    channel, whether the value configured here is byte-for-byte the same
+    one Shopify is signing with.
+    """
+    if not secret:
+        return None
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:_FINGERPRINT_HEX_LENGTH]
+
+
 def webhook_hmac_debug_info(
     *, raw_body: bytes, signature_header: str | None, secret: str
-) -> dict[str, int | bool]:
-    """Safe-to-log snapshot of a verification attempt — lengths and
-    booleans only, NEVER the secret, the header, or the computed digest
-    itself. `verify_webhook_hmac` alone gives no visibility into *why* a
-    webhook was rejected (missing header vs. missing secret vs. a real
-    mismatch); this exists so a production log line can distinguish those
-    cases without ever risking a credential or signature value leaking
-    into structured logs.
+) -> dict[str, int | bool | str | None]:
+    """Safe-to-log snapshot of a verification attempt — lengths, booleans,
+    and a non-reversible fingerprint only, NEVER the secret, the header,
+    or the computed digest itself. `verify_webhook_hmac` alone gives no
+    visibility into *why* a webhook was rejected (missing header vs.
+    missing secret vs. a real mismatch); this exists so a production log
+    line can distinguish those cases without ever risking a credential or
+    signature value leaking into structured logs.
     """
     computed_length = 0
     if secret:
@@ -63,6 +84,7 @@ def webhook_hmac_debug_info(
         "raw_body_length": len(raw_body),
         "webhook_secret_configured": bool(secret),
         "webhook_secret_length": len(secret),
+        "webhook_secret_fingerprint": webhook_secret_fingerprint(secret),
         "computed_hmac_length": computed_length,
         "hmac_valid": verify_webhook_hmac(
             raw_body=raw_body, signature_header=signature_header, secret=secret
