@@ -14,12 +14,15 @@ from datetime import datetime
 from typing import Any
 
 from app.core.exceptions import IntegrationError
+from app.core.logging import get_logger
 from app.integrations.base import FetchPage, HealthCheckResult, IntegrationAdapter
 from app.integrations.shiprocket.client import ShiprocketClient
 from app.integrations.shiprocket.config import ShiprocketConfig
 from app.integrations.shiprocket.errors import ShiprocketApiError
 from app.integrations.shiprocket.normalizer import NDR_NORMALIZER, ORDER_PUSH_NORMALIZER
 from app.models.integration import IntegrationCode
+
+logger = get_logger(__name__)
 
 
 class ShiprocketAdapter(IntegrationAdapter):
@@ -34,6 +37,11 @@ class ShiprocketAdapter(IntegrationAdapter):
             return self._client
         config = ShiprocketConfig.from_settings()
         if config is None:
+            # Silent otherwise — every scheduled NDR sync attempt and every
+            # push action (ship/assign-awb/tracking) routes through here,
+            # so a missing/misconfigured env var on this process previously
+            # left no trace in the logs at all.
+            logger.warning("shiprocket_not_configured", reason="missing_email_or_password")
             raise IntegrationError(
                 "Shiprocket integration is not configured "
                 "(missing SHIPROCKET_EMAIL/SHIPROCKET_PASSWORD).",

@@ -63,6 +63,12 @@ class ShiprocketClient:
             await self._client.aclose()
 
     async def _login(self) -> str:
+        # Safe-to-log diagnostics only (base URL + outcome) — never the
+        # email, password, or token. This is the single choke point every
+        # Shiprocket operation (scheduled NDR sync, Test Connection,
+        # ship/assign-awb/tracking) goes through, so one log line here
+        # answers "did auth even succeed?" from Render logs alone, without
+        # needing DB or shell access to the deployment.
         try:
             response = await self._client.post(
                 f"{self._config.api_base_url}/auth/login",
@@ -70,19 +76,39 @@ class ShiprocketClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise classify_http_error(exc) from exc
+            error = classify_http_error(exc)
+            logger.warning(
+                "shiprocket_login_failed",
+                api_base_url=self._config.api_base_url,
+                error_type=error.error_type,
+                status_code=error.status_code,
+            )
+            raise error from exc
         except httpx.TransportError as exc:
-            raise classify_transport_error(exc) from exc
+            error = classify_transport_error(exc)
+            logger.warning(
+                "shiprocket_login_failed",
+                api_base_url=self._config.api_base_url,
+                error_type=error.error_type,
+            )
+            raise error from exc
 
         body = response.json()
         token = body.get("token")
         if not token:
+            logger.warning(
+                "shiprocket_login_failed",
+                api_base_url=self._config.api_base_url,
+                error_type="authentication_error",
+                reason="no_token_in_response",
+            )
             raise ShiprocketApiError(
                 "Shiprocket login response did not include a token.",
                 error_type="authentication_error",
             )
         self._token = token
         self._token_expires_at = datetime.now(UTC) + _TOKEN_LIFETIME
+        logger.info("shiprocket_login_succeeded", api_base_url=self._config.api_base_url)
         return token
 
     async def _ensure_token(self) -> str:
