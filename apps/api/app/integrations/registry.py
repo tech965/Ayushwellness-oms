@@ -28,6 +28,15 @@ def get_adapter(code: str) -> IntegrationAdapter | None:
     return _ADAPTERS.get(code)
 
 
+def registered_codes() -> list[str]:
+    """Production-safe (unlike `snapshot_adapters`, which is test-only
+    and returns live adapter instances) read of what's currently
+    registered in *this* process — for diagnostic logging at a sync's
+    actual execution boundary, see `SyncService.execute_sync`.
+    """
+    return sorted(_ADAPTERS)
+
+
 async def aclose_all_adapters() -> None:
     """Closes every registered adapter's cached HTTP client. Adapters are
     process-lifetime singletons (registered once at worker startup), so

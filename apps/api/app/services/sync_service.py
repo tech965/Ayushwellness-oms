@@ -7,6 +7,7 @@ that actually drives a job to completion off the request thread.
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import UTC, datetime
 
@@ -16,7 +17,7 @@ from app.core.exceptions import IntegrationError, NotFoundError
 from app.core.logging import get_logger
 from app.integrations.base import IntegrationAdapter
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS, UpsertHandler
-from app.integrations.registry import get_adapter
+from app.integrations.registry import get_adapter, registered_codes
 from app.models.auth import User
 from app.models.enums import IntegrationStatus, SyncJobStatus, SyncType
 from app.models.integration import Integration, SyncError, SyncJob
@@ -241,6 +242,25 @@ class SyncService:
         integration = await self.integrations.get_by_id(job.integration_id)
         adapter = get_adapter(integration.code) if integration else None
         integration_code = integration.code if integration else str(job.integration_id)
+
+        # Temporary diagnostic (see the "No adapter registered" production
+        # incident this is investigating): if `adapter` is ever `None` here
+        # for a provider that's supposed to have one, this line is the
+        # only way to tell *from Render logs alone* whether this process
+        # ever ran adapter registration at all, or registered a different
+        # set of providers than expected — `os.getpid()` also lets two log
+        # lines be correlated to "the same process" or ruled out as
+        # different ones, which a manual shell session can never prove
+        # about a real worker process it isn't.
+        logger.info(
+            "sync_adapter_lookup",
+            pid=os.getpid(),
+            sync_job_id=str(job_id),
+            integration=integration_code,
+            entity_type=entity_type,
+            adapter_found=adapter is not None,
+            registered_adapters=registered_codes(),
+        )
         last_job_for_entity = (
             await self.sync_jobs.get_last_successful_for_entity(
                 integration_id=job.integration_id, entity_type=entity_type

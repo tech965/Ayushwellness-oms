@@ -14,6 +14,9 @@ docstrings). These tests lock that behavior in going forward.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 from app.integrations.bootstrap import register_all_adapters
 from app.integrations.registry import (
@@ -25,6 +28,7 @@ from app.integrations.registry import (
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shopify.adapter import ShopifyAdapter
 from app.models.integration import IntegrationCode
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 @pytest.fixture(autouse=True)
@@ -142,3 +146,87 @@ def test_worker_process_init_signal_is_actually_connected_to_celery() -> None:
 
     assert isinstance(get_adapter(IntegrationCode.SHIPROCKET), ShiprocketAdapter)
     assert isinstance(get_adapter(IntegrationCode.SHOPIFY), ShopifyAdapter)
+
+
+# Round 8 — the previous `worker_process_init` fix is confirmed deployed
+# (commit 9b4e647, part of 830c834) but production still reported the
+# same "No adapter registered" error for `entity_type="shipments"`. Every
+# test above proves the registration *logic* is correct, but all of them
+# run inside the *same* pytest process — none can distinguish "the logic
+# works" from "the logic works, but this specific real OS process never
+# actually ran it," which is exactly the distinction a manual Render
+# shell session can't prove about a real worker process it isn't. This
+# test spawns a genuinely separate OS process (not a thread, not a
+# fixture-shared interpreter) that imports `app.workers.celery_app`
+# exactly the way Celery's own worker bootstrap does, then checks
+# `get_adapter("shiprocket")` from *inside that process* — the strongest
+# proof available without live Render log/shell access.
+def test_a_genuinely_separate_process_has_shiprocket_registered() -> None:
+    probe = (
+        "from app.workers.celery_app import celery_app\n"
+        "from celery.signals import worker_process_init\n"
+        "worker_process_init.send(sender=None)\n"
+        "from app.integrations.registry import get_adapter\n"
+        "adapter = get_adapter('shiprocket')\n"
+        "found = adapter is not None\n"
+        "print('SHIPROCKET_ADAPTER_FOUND' if found else 'SHIPROCKET_ADAPTER_MISSING')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SHIPROCKET_ADAPTER_FOUND" in result.stdout, result.stdout + result.stderr
+
+
+async def test_run_sync_task_execution_path_sees_a_registered_shiprocket_adapter(
+    db_session: AsyncSession,
+) -> None:
+    """Reproduces the exact real path a production `entity_type="shipments"`
+    sync runs through: `app.tasks.sync_tasks.run_sync_task` -> its
+    `_run_sync` body (a thin wrapper: open a session, call `SyncService.
+    run_sync`) -> `SyncService.run_sync` -> `execute_sync` ->
+    `get_adapter`. `SyncService(db_session).run_sync(...)` below is called
+    directly (not through `_run_sync`'s own `AsyncSessionLocal()`) only so
+    it shares this test's transactional session — same reason every other
+    `SyncService`-through-a-real-task test in this suite does the same
+    (see `test_shiprocket_sync.py`). The registry is populated the same
+    way a real worker process does — the `worker_process_init` signal,
+    not a direct `register_all_adapters()` call — so this fails if that
+    signal path is ever broken again.
+    """
+    from app.integrations.shiprocket.adapter import ShiprocketAdapter as _SRAdapter
+    from app.models.enums import IntegrationStatus, IntegrationType, SyncType
+    from app.repositories.integration import IntegrationRepository
+    from app.repositories.sync_error import SyncErrorRepository
+    from app.services.sync_service import SyncService
+    from celery.signals import worker_process_init
+
+    integration = await IntegrationRepository(db_session).create(
+        name="Shiprocket",
+        code=IntegrationCode.SHIPROCKET,
+        type=IntegrationType.COURIER,
+        status=IntegrationStatus.DISCONNECTED,
+        enabled=True,
+    )
+    await db_session.commit()
+
+    clear_adapters()
+    worker_process_init.send(sender=None)
+    assert isinstance(get_adapter(IntegrationCode.SHIPROCKET), _SRAdapter)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="shipments"
+    )
+
+    # The specific bug this guards: a missing adapter always produces
+    # exactly this SyncError message. Any other failure (a real network
+    # call failing, no matching OMS order, ...) is not what this test is
+    # about.
+    stmt = SyncErrorRepository(db_session).for_sync_job(job.id)
+    errors = (await db_session.execute(stmt)).scalars().all()
+    assert not any(
+        "No adapter registered" in (e.error_message or "") for e in errors
+    ), "adapter registry was empty at the real run_sync_task execution boundary"
