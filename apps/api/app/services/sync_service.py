@@ -68,8 +68,7 @@ class SyncService:
             # a time; see `run_sync` for how the scheduler path treats
             # this as "nothing to do" rather than an error.
             raise ConflictError(
-                f"A {entity_type} sync is already {existing.status.value} for this "
-                "integration.",
+                f"A {entity_type} sync is already {existing.status.value} for this " "integration.",
                 details={"sync_job_id": str(existing.id), "status": existing.status.value},
             )
 
@@ -393,6 +392,27 @@ class SyncService:
                         created_count += 1
                     else:
                         updated_count += 1
+                except IntegrationError as exc:
+                    # A per-record failure that couldn't even complete
+                    # (auth/permission/network/timeout on a fallback live
+                    # call, e.g. Shiprocket's `/orders/show`) — kept
+                    # distinct from a genuine "checked, no match"
+                    # `NotFoundError` (which falls through to the generic
+                    # branch below as "validation_error") so a caller
+                    # (e.g. `entity_sync._upsert_shipment`'s "already
+                    # confirmed, don't recheck" cache) can tell "we
+                    # couldn't check" apart from "we checked and there's
+                    # nothing there" — the former must always be retried,
+                    # the latter safely never needs to be re-attempted.
+                    await self.session.rollback()
+                    failed_count += 1
+                    await self.record_error(
+                        job_id,
+                        entity_type=entity_type,
+                        external_id=str(external_id) if external_id else None,
+                        error_type=exc.details.get("error_type", "integration_error"),
+                        error_message=exc.message,
+                    )
                 except Exception as exc:  # noqa: BLE001 - one bad record must not kill the job
                     await self.session.rollback()
                     failed_count += 1

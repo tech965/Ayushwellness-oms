@@ -20,3 +20,25 @@ class SyncErrorRepository(BaseRepository[SyncError]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_latest_for_entity_and_external_id(
+        self, *, entity_type: str, external_id: str
+    ) -> SyncError | None:
+        """The most recent recorded failure for one specific record
+        (matched by `entity_type` + `external_id`, e.g. a Shiprocket
+        shipment id) — used by `entity_sync._upsert_shipment` to tell
+        "we already checked this and it genuinely doesn't match" (safe to
+        skip re-checking) apart from "we couldn't even check last time"
+        (a permission/network failure — must always be retried, since
+        that condition can and does change, unlike a genuine non-match).
+        The caller distinguishes the two via `error_type`, not by
+        assuming presence alone means "confirmed."
+        """
+        stmt = (
+            select(SyncError)
+            .where(SyncError.entity_type == entity_type, SyncError.external_id == external_id)
+            .order_by(SyncError.created_at.desc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()

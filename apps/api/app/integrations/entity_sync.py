@@ -23,6 +23,7 @@ from app.integrations.registry import get_adapter
 from app.models.integration import IntegrationCode
 from app.repositories.order import OrderRepository
 from app.repositories.shipment import ShipmentRepository
+from app.repositories.sync_error import SyncErrorRepository
 from app.services.customer_service import CustomerService
 from app.services.ndr_service import NDRService
 from app.services.order_service import OrderService
@@ -109,6 +110,21 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
     get an extra check, never cause one to be silently skipped when it
     could have matched.
 
+    Round 16 fix: the Round 15 date boundary is a real, confirmed-correct
+    guard (verified against a live 200-shipment sample: 100% correctly
+    judged too old to skip) — but it can only ever catch a shipment old
+    enough to predate the OMS's earliest synced order. It says nothing
+    about a shipment that looks "recent" by that measure whose order
+    still isn't (or will never be) visible to the OMS for some other
+    reason. Once a live `/orders/show` check has genuinely completed for
+    one exact shipment and found no match, repeating that same live call
+    on every subsequent 10-minute sync is pure waste — the outcome can't
+    spontaneously change — so the most recent `SyncError` for this exact
+    shipment is checked first; a genuinely-completed non-match is never
+    re-attempted, but a failure that *couldn't even complete* the check
+    (permission/network — a real, confirmed-transient condition this
+    engagement) always is.
+
     A shipment that still can't be resolved raises `NotFoundError`,
     exactly like `NDRService.upsert_synced_ndr` already does for an
     unmatched AWB (spec §16, "do not invent NDR/shipment data") —
@@ -168,35 +184,87 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
         if predates_oms_coverage:
             skip_reason = "shiprocket_created_at predates earliest OMS order_datetime"
         else:
-            adapter = get_adapter(IntegrationCode.SHIPROCKET)
-            get_order = getattr(adapter, "get_order", None)
-            if get_order is not None:
-                try:
-                    order_detail = await get_order(shiprocket_order_id)
-                except IntegrationError as exc:
-                    # Distinguish "we couldn't even check" from "we
-                    # checked and there's genuinely no match" — collapsing
-                    # both into the same generic NotFoundError message
-                    # (the previous behavior) made a permanent,
-                    # account-wide permission block on this endpoint
-                    # indistinguishable from thousands of individually
-                    # unmatched shipments, both in logs and in every
-                    # SyncError's message text.
-                    order_detail = None
-                    skip_reason = (
-                        f"orders_show_lookup_failed: "
-                        f"{exc.details.get('error_type', 'unknown_error')} — {exc.message}"
+            # Round 16 fix: the date boundary above can only catch a
+            # shipment old enough to predate the OMS's earliest synced
+            # order — it says nothing about a shipment that's "recent" by
+            # that measure but whose underlying order still isn't (or
+            # never will be) visible to the OMS for some other reason
+            # (e.g. it has since aged out of Shopify's rolling 60-day
+            # `read_orders` window, even though it wasn't out of range
+            # when `earliest_order_datetime` was first recorded). Once a
+            # live `/orders/show` check has genuinely completed for THIS
+            # exact shipment and found no match, there is no reason to
+            # repeat that live call on every subsequent 10-minute sync —
+            # the outcome can't spontaneously change. A failure that
+            # *couldn't even complete* the check (permission/network) is
+            # never treated as confirmed here — it must always be retried,
+            # since that condition can and does change (confirmed live
+            # this engagement: an account-wide 403 cleared on its own).
+            already_confirmed_unmatched = False
+            if external_id:
+                prior_error = await SyncErrorRepository(
+                    session
+                ).get_latest_for_entity_and_external_id(
+                    entity_type="shipments", external_id=external_id
+                )
+                if (
+                    prior_error is not None
+                    and prior_error.error_type == "validation_error"
+                    and prior_error.error_message.startswith(
+                        "No OMS order found for Shiprocket shipment"
                     )
-                body = (
-                    order_detail.get("data") if isinstance(order_detail, dict) else None
-                ) or order_detail
-                raw_resolved = body.get("channel_order_id") if isinstance(body, dict) else None
-                fetched_channel_order_id = str(raw_resolved) if raw_resolved is not None else None
-                if fetched_channel_order_id is not None:
-                    channel_order_id = fetched_channel_order_id
-                order = await _resolve_order_by_channel_order_id(session, fetched_channel_order_id)
-                if order is not None:
-                    match_strategy = "orders_show_channel_order_id"
+                    and "orders_show_lookup_failed" not in prior_error.error_message
+                ):
+                    already_confirmed_unmatched = True
+                    skip_reason = (
+                        "already confirmed unmatched on a previous sync "
+                        f"(checked {prior_error.created_at.isoformat()})"
+                    )
+
+            if not already_confirmed_unmatched:
+                adapter = get_adapter(IntegrationCode.SHIPROCKET)
+                get_order = getattr(adapter, "get_order", None)
+                if get_order is not None:
+                    try:
+                        order_detail = await get_order(shiprocket_order_id)
+                    except IntegrationError as exc:
+                        # Distinguish "we couldn't even check" from "we
+                        # checked and there's genuinely no match" by
+                        # letting the real `IntegrationError` propagate
+                        # (instead of swallowing it into a generic
+                        # NotFoundError) — `SyncService._run_entity_sync`
+                        # now records this with its real `error_type`
+                        # (e.g. "authorization_error"), which is exactly
+                        # what the cache check above relies on to never
+                        # treat a lookup failure as a confirmed non-match.
+                        logger.info(
+                            "shiprocket_shipment_order_resolution",
+                            shiprocket_shipment_id=external_id,
+                            shiprocket_order_id=shiprocket_order_id,
+                            channel_order_id=channel_order_id,
+                            matched=False,
+                            match_strategy=None,
+                            skip_reason=(
+                                "orders_show_lookup_failed: "
+                                f"{exc.details.get('error_type', 'unknown_error')}"
+                            ),
+                            matched_order_id=None,
+                        )
+                        raise
+                    body = (
+                        order_detail.get("data") if isinstance(order_detail, dict) else None
+                    ) or order_detail
+                    raw_resolved = body.get("channel_order_id") if isinstance(body, dict) else None
+                    fetched_channel_order_id = (
+                        str(raw_resolved) if raw_resolved is not None else None
+                    )
+                    if fetched_channel_order_id is not None:
+                        channel_order_id = fetched_channel_order_id
+                    order = await _resolve_order_by_channel_order_id(
+                        session, fetched_channel_order_id
+                    )
+                    if order is not None:
+                        match_strategy = "orders_show_channel_order_id"
 
     logger.info(
         "shiprocket_shipment_order_resolution",

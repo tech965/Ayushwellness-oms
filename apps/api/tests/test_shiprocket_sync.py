@@ -685,6 +685,132 @@ async def test_shipment_sync_records_a_sync_error_when_orders_show_also_has_no_m
     assert total.scalar_one() == 0
 
 
+# --- Round 16: real production evidence showed the Round 15 date-based
+# guard is correct (verified against a live 200-shipment sample, 100%
+# correctly judged too old) but can't catch a shipment that looks
+# "recent" by that measure and still doesn't match for another reason.
+# Once a live check has genuinely completed for one shipment, repeating
+# it on every subsequent 10-minute sync is pure waste. -------------------
+
+
+async def test_shipment_sync_does_not_repeat_orders_show_for_a_confirmed_unmatched_shipment(
+    db_session: AsyncSession,
+) -> None:
+    """A shipment resolved via `/orders/show` on a first sync (and
+    genuinely found to match no OMS order) must not trigger a second live
+    call on the next sync — the second run's stub client has no
+    `/orders/show` response queued at all, so a repeat attempt would
+    raise `IndexError` and fail this test.
+    """
+    client_1 = _StubClient(
+        [
+            _shipments_page(
+                records=[{"id": 555, "channel_order_id": None, "order_id": 98765, "awb": ""}]
+            ),
+            _orders_show_response("AWL-STILL-DOES-NOT-EXIST"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client_1))
+    integration = await _make_shiprocket_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+    assert job1.status == "partial"
+    assert job1.error_count == 1
+
+    # Second run: same shipment, still no matching order, but the stub
+    # client has ONLY the /shipments page queued -- no /orders/show
+    # response. If the cache didn't work, this would IndexError.
+    client_2 = _StubClient(
+        [
+            _shipments_page(
+                records=[{"id": 555, "channel_order_id": None, "order_id": 98765, "awb": ""}]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client_2))
+
+    job2 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job2.status == "partial"
+    assert job2.error_count == 1
+    assert job2.records_created == 0
+
+    from app.models.integration import SyncError
+
+    latest_error = (
+        await db_session.execute(select(SyncError).where(SyncError.sync_job_id == job2.id))
+    ).scalar_one()
+    assert "already confirmed unmatched on a previous sync" in latest_error.error_message
+    assert latest_error.error_type == "validation_error"
+
+
+async def test_shipment_sync_retries_orders_show_after_a_prior_permission_failure(
+    db_session: AsyncSession,
+) -> None:
+    """The opposite of the test above: a shipment whose PRIOR attempt
+    failed with a permission error (never actually completed the check)
+    must NOT be treated as "confirmed unmatched" — it must be retried on
+    the next sync, since that condition can and does change (confirmed
+    live this engagement: an account-wide block cleared on its own).
+    """
+    from app.integrations.shiprocket.errors import ShiprocketApiError
+
+    client_1 = _StubClient(
+        [
+            _shipments_page(
+                records=[{"id": 777, "channel_order_id": None, "order_id": 55512, "awb": ""}]
+            ),
+            ShiprocketApiError(
+                "Shiprocket account lacks permission for this operation.",
+                error_type="authorization_error",
+                status_code=403,
+            ),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client_1))
+    integration = await _make_shiprocket_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+    assert job1.error_count == 1
+
+    # Second run: the permission block has since cleared, and this time
+    # the shipment genuinely matches. A fresh adapter (new instance, new
+    # circuit-breaker state) with a real, successful response queued --
+    # if the cache wrongly treated the first run as "confirmed", this
+    # response would never be consumed and the order would stay unmatched.
+    order = await _make_bare_order(db_session, order_number="#AWL-NOWMATCHES")
+    client_2 = _StubClient(
+        [
+            _shipments_page(
+                records=[{"id": 777, "channel_order_id": None, "order_id": 55512, "awb": ""}]
+            ),
+            _orders_show_response("#AWL-NOWMATCHES"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client_2))
+
+    job2 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job2.status == "completed"
+    assert job2.records_created == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_source_external_id(
+        source_system="shiprocket", external_id="777"
+    )
+    assert shipment is not None
+    assert shipment.order_id == order.id
+
+
 async def test_shipment_sync_distinguishes_a_permission_error_from_a_genuine_no_match(
     db_session: AsyncSession,
 ) -> None:
@@ -725,8 +851,13 @@ async def test_shipment_sync_distinguishes_a_permission_error_from_a_genuine_no_
 
     error = await db_session.scalar(select(SyncError).where(SyncError.sync_job_id == job.id))
     assert error is not None
-    assert "orders_show_lookup_failed" in error.error_message
-    assert "authorization_error" in error.error_message
+    # The real IntegrationError is allowed to propagate out of
+    # `_upsert_shipment` (Round 16) instead of being swallowed into a
+    # generic NotFoundError, so `_run_entity_sync`'s new `except
+    # IntegrationError` branch records its REAL error_type here — the
+    # distinguishing signal now lives in a queryable column, not buried
+    # in message text.
+    assert error.error_type == "authorization_error"
     assert "Shiprocket account lacks permission" in error.error_message
 
 
@@ -811,7 +942,7 @@ async def test_shipment_sync_does_not_hammer_orders_show_after_one_permission_er
         .all()
     )
     assert len(errors) == 2
-    assert all("orders_show_lookup_failed" in e.error_message for e in errors)
+    assert all(e.error_type == "authorization_error" for e in errors)
 
 
 async def test_shipment_sync_does_not_call_orders_show_when_channel_order_id_already_present(
