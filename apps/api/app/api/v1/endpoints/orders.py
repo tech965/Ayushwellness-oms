@@ -16,7 +16,13 @@ from app.dependencies.auth import get_current_user, require_permission
 from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
-from app.models.enums import OrderStatus
+from app.models.enums import (
+    FulfillmentStatus,
+    OrderStatus,
+    PaymentStatus,
+    PaymentType,
+    ShipmentStatus,
+)
 from app.models.order import Order
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.order import (
@@ -39,11 +45,11 @@ router = APIRouter()
 
 def _order_filters(
     q: str | None = Query(default=None),
-    status: str | None = Query(default=None),
-    payment_status: str | None = Query(default=None),
-    payment_type: str | None = Query(default=None),
-    fulfillment_status: str | None = Query(default=None),
-    shipment_status: str | None = Query(default=None),
+    status: OrderStatus | None = Query(default=None),
+    payment_status: PaymentStatus | None = Query(default=None),
+    payment_type: PaymentType | None = Query(default=None),
+    fulfillment_status: FulfillmentStatus | None = Query(default=None),
+    shipment_status: ShipmentStatus | None = Query(default=None),
     courier_id: uuid.UUID | None = Query(default=None),
     sku: str | None = Query(default=None),
     amount_min: Decimal | None = Query(default=None, ge=0),
@@ -54,6 +60,14 @@ def _order_filters(
 ) -> dict:
     """Shared filter set for `list_orders` and `export_orders` so the two
     routes can never drift apart on which query params they accept.
+
+    Typed against the real enums (not plain `str`) so FastAPI/Pydantic
+    rejects a typo'd or stale value with a 422 at the API boundary,
+    instead of it silently reaching `OrderRepository.search_query` as an
+    opaque string that matches zero rows — a `200` with an empty list
+    that looks identical to "the filter works but nothing matches,"
+    which is exactly the confusing, hard-to-diagnose failure mode a
+    broken filter and an over-narrow-but-correct filter both produce.
     """
     return {
         "q": q,

@@ -1,16 +1,13 @@
 "use client"
 
 import * as React from "react"
-import Link from "next/link"
 import { useParams, useRouter } from "next/navigation"
-import { ArrowLeft } from "lucide-react"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
-import { Button } from "@/components/ui/button"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useTelecallerOrders } from "@/services/team"
@@ -75,14 +72,8 @@ function TeamTelecallerWorkloadContent() {
     <>
       <PageHeader
         title="Telecaller Workload"
-        actions={
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/team/telecallers">
-              <ArrowLeft className="size-4" />
-              Back to Telecallers
-            </Link>
-          </Button>
-        }
+        backHref="/team/telecallers"
+        backLabel="Back to Telecallers"
       />
       <QueryStates
         isLoading={query.isLoading}

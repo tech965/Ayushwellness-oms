@@ -147,6 +147,31 @@ describe("OrdersPage", () => {
     mockSearchParams = new URLSearchParams()
   })
 
+  // Direct fix verification for the reported "Pending shows 0 orders"
+  // confusion: three different fields (Order Status, Payment Status,
+  // Shipment Status) can each be set to "Pending". Before this chip row
+  // existed, a <Select> only ever displayed the bare label "Pending" —
+  // now every active filter is labeled by field name, so it's always
+  // unambiguous which one is actually applied.
+  it("labels each active filter by field name so the three different 'Pending' filters are never ambiguous", () => {
+    mockSearchParams = new URLSearchParams("shipment_status=pending")
+    mockedUseOrders.mockReturnValue(baseQueryResult({}))
+    renderWithProviders(<OrdersPage />)
+    expect(screen.getByText("Shipment Status: Pending")).toBeInTheDocument()
+    expect(screen.queryByText("Order Status: Pending")).not.toBeInTheDocument()
+    mockSearchParams = new URLSearchParams()
+  })
+
+  it("shows Order Status: Pending distinctly when that field is the one set", () => {
+    mockSearchParams = new URLSearchParams("status=pending")
+    mockedUseOrders.mockReturnValue(baseQueryResult({}))
+    renderWithProviders(<OrdersPage />)
+    expect(screen.getByText("Order Status: Pending")).toBeInTheDocument()
+    expect(screen.queryByText("Shipment Status: Pending")).not.toBeInTheDocument()
+    expect(screen.queryByText("Payment Status: Pending")).not.toBeInTheDocument()
+    mockSearchParams = new URLSearchParams()
+  })
+
   it("combines multiple URL filters (payment_type + status) into one request", () => {
     mockSearchParams = new URLSearchParams("payment_type=cod&status=pending")
     mockedUseOrders.mockReturnValue(baseQueryResult({}))

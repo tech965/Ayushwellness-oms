@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { Columns3, Download } from "lucide-react"
+import { Columns3, Download, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
@@ -15,6 +15,7 @@ import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -408,6 +409,75 @@ function OrdersPageContent() {
     clearFilters()
   }
 
+  // Three different, unrelated fields on this page can each be set to a
+  // value that literally reads "Pending" once selected (Order Status,
+  // Payment Status, Shipment Status each have their own PENDING enum
+  // member) — a plain <Select> only shows the picked label, with no
+  // indication of *which* field it came from. This makes every active
+  // filter explicit, labeled by field, so "Pending" always reads
+  // unambiguously as e.g. "Shipment Status: Pending" — and lets a single
+  // filter be cleared independently without resetting everything else.
+  function clearField(field: string) {
+    if (field === "q") setSearchInput("")
+    if (field === "sku") setSkuInput("")
+    if (field === "amount_min") setAmountMinInput("")
+    if (field === "amount_max") setAmountMaxInput("")
+    if (field === "date") {
+      setFilters({ date_from: "", date_to: "" })
+      return
+    }
+    setFilters({ [field]: "" })
+  }
+
+  const courierName = couriersQuery.data?.find((c) => c.id === filters.courier_id)?.name
+  const activeFilterChips: { key: string; label: string }[] = [
+    filters.q && { key: "q", label: `Search: "${filters.q}"` },
+    filters.status && {
+      key: "status",
+      label: `Order Status: ${
+        ORDER_STATUS_OPTIONS.find((o) => o.value === filters.status)?.label ?? filters.status
+      }`,
+    },
+    filters.payment_type && {
+      key: "payment_type",
+      label: `Payment Type: ${
+        PAYMENT_TYPE_OPTIONS.find((o) => o.value === filters.payment_type)?.label ??
+        filters.payment_type
+      }`,
+    },
+    filters.payment_status && {
+      key: "payment_status",
+      label: `Payment Status: ${
+        PAYMENT_STATUS_OPTIONS.find((o) => o.value === filters.payment_status)?.label ??
+        filters.payment_status
+      }`,
+    },
+    filters.fulfillment_status && {
+      key: "fulfillment_status",
+      label: `Fulfillment: ${
+        FULFILLMENT_STATUS_OPTIONS.find((o) => o.value === filters.fulfillment_status)?.label ??
+        filters.fulfillment_status
+      }`,
+    },
+    filters.shipment_status && {
+      key: "shipment_status",
+      label: `Shipment Status: ${
+        SHIPMENT_STATUS_OPTIONS.find((o) => o.value === filters.shipment_status)?.label ??
+        filters.shipment_status
+      }`,
+    },
+    filters.courier_id && { key: "courier_id", label: `Courier: ${courierName ?? "—"}` },
+    filters.sku && { key: "sku", label: `SKU: ${filters.sku}` },
+    filters.amount_min && { key: "amount_min", label: `Min ₹${filters.amount_min}` },
+    filters.amount_max && { key: "amount_max", label: `Max ₹${filters.amount_max}` },
+    (filters.date_from || filters.date_to) && {
+      key: "date",
+      label: `Date: ${dateRange.from ? formatDate(dateRange.from.toISOString()) : "…"} – ${
+        dateRange.to ? formatDate(dateRange.to.toISOString()) : "…"
+      }`,
+    },
+  ].filter((chip): chip is { key: string; label: string } => Boolean(chip))
+
   function handleExport() {
     exportMutation.mutate(activeFilters, {
       onError: (error) => toast.error(getApiErrorMessage(error)),
@@ -423,6 +493,8 @@ function OrdersPageContent() {
             ? `${query.data.meta.total_items} orders match the current filters.`
             : "Search, filter, and drill into any order."
         }
+        backHref="/dashboard"
+        backLabel="Back to Dashboard"
         actions={
           <>
             <DropdownMenu>
@@ -603,6 +675,28 @@ function OrdersPageContent() {
             </Button>
           </div>
         </div>
+
+        {activeFilterChips.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-muted-foreground text-xs font-medium">Active filters:</span>
+            {activeFilterChips.map((chip) => (
+              <Badge key={chip.key} variant="secondary" className="gap-1 py-1">
+                {chip.label}
+                <button
+                  type="button"
+                  aria-label={`Remove filter: ${chip.label}`}
+                  onClick={() => clearField(chip.key)}
+                  className="hover:text-destructive ml-0.5"
+                >
+                  <X className="size-3" />
+                </button>
+              </Badge>
+            ))}
+            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={handleClear}>
+              Clear All
+            </Button>
+          </div>
+        )}
 
         <QueryStates
           isLoading={query.isLoading}

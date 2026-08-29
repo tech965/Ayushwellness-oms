@@ -1,9 +1,8 @@
 "use client"
 
 import * as React from "react"
-import Link from "next/link"
 import { useParams } from "next/navigation"
-import { ArrowLeft, CalendarClock, CheckCircle2, PhoneCall, XCircle } from "lucide-react"
+import { CalendarClock, CheckCircle2, PhoneCall, XCircle } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/shared/page-header"
@@ -112,14 +111,8 @@ export default function TelecallerOrderDetailPage() {
     <>
       <PageHeader
         title={orderQuery.data ? `Order ${orderQuery.data.order_number}` : "Order"}
-        actions={
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/telecaller/orders">
-              <ArrowLeft className="size-4" />
-              Back to My Orders
-            </Link>
-          </Button>
-        }
+        backHref="/telecaller/orders"
+        backLabel="Back to My Orders"
       />
       <QueryStates
         isLoading={orderQuery.isLoading}

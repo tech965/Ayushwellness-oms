@@ -1,9 +1,8 @@
 "use client"
 
 import * as React from "react"
-import Link from "next/link"
 import { useParams } from "next/navigation"
-import { ArrowLeft, Repeat } from "lucide-react"
+import { Repeat } from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/shared/page-header"
@@ -80,14 +79,8 @@ export default function TeamOrderDetailPage() {
     <>
       <PageHeader
         title={orderQuery.data ? `Order ${orderQuery.data.order_number}` : "Order"}
-        actions={
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/team/orders/unfulfilled">
-              <ArrowLeft className="size-4" />
-              Back to Unfulfilled Orders
-            </Link>
-          </Button>
-        }
+        backHref="/team/orders/unfulfilled"
+        backLabel="Back to Unfulfilled Orders"
       />
       <QueryStates
         isLoading={orderQuery.isLoading}

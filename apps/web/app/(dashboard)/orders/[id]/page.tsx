@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams, useSearchParams } from "next/navigation"
-import { ArrowLeft, Mail, MapPin, Phone, Truck } from "lucide-react"
+import { Mail, MapPin, Phone, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { Breadcrumbs } from "@/components/shared/breadcrumbs"
@@ -107,14 +107,8 @@ function OrderDetailContent() {
       <PageHeader
         title={orderQuery.data ? `Order ${orderQuery.data.order_number}` : "Order"}
         description={`ID: ${orderId}`}
-        actions={
-          <Button variant="outline" size="sm" asChild>
-            <Link href={ordersHref}>
-              <ArrowLeft className="size-4" />
-              Back to Orders
-            </Link>
-          </Button>
-        }
+        backHref={ordersHref}
+        backLabel="Back to Orders"
       />
       <QueryStates
         isLoading={orderQuery.isLoading}
