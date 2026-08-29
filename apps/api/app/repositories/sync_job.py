@@ -58,6 +58,34 @@ class SyncJobRepository(BaseRepository[SyncJob]):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_stale_queued(self, *, created_before: datetime) -> list[SyncJob]:
+        """`QUEUED` jobs created before `created_before` that a worker
+        never advanced to `RUNNING`.
+
+        Production incident: `start_sync`'s one-active-job-per
+        `(integration, entity_type)` guard treats *both* QUEUED and
+        RUNNING as "active" (`_ACTIVE_STATUSES`), but `get_stale_running`
+        — and therefore the reaper — only ever recovers RUNNING jobs. A
+        single orphaned QUEUED job (worker killed in the tiny
+        QUEUED→RUNNING window, a lost broker message, or the manual
+        `POST /sync/{id}/trigger` path that deliberately leaves the job
+        QUEUED when the broker is unreachable) then wedges every
+        subsequent scheduled sync for that entity type forever — each run
+        just logs `sync_run_skipped_already_active` and does nothing. A
+        healthy QUEUED job becomes RUNNING within seconds, so anything
+        still QUEUED well past the threshold is genuinely abandoned.
+        `created_at` (not `updated_at`) is the age signal here: a QUEUED
+        job is never `update()`d before `mark_running`, so the two are
+        equal anyway, and `created_at` can't be nudged forward by an
+        unrelated write.
+        """
+        stmt = select(SyncJob).where(
+            SyncJob.status == SyncJobStatus.QUEUED,
+            SyncJob.created_at < created_before,
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_last_successful_for_entity(
         self, *, integration_id: uuid.UUID, entity_type: str
     ) -> SyncJob | None:

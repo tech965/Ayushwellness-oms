@@ -145,18 +145,42 @@ async def _reap_stale_sync_jobs() -> list[str]:
     reaped: list[str] = []
     async with AsyncSessionLocal() as session:
         cutoff = datetime.now(UTC) - STALE_SYNC_JOB_THRESHOLD
-        stale = await SyncJobRepository(session).get_stale_running(updated_before=cutoff)
+        repo = SyncJobRepository(session)
+        stale_running = await repo.get_stale_running(updated_before=cutoff)
+        # A QUEUED job that no worker ever picked up is just as capable of
+        # wedging every future scheduled sync for its entity type (via
+        # `start_sync`'s one-active-job guard, which counts QUEUED as
+        # active) as a stuck RUNNING one — and nothing else ever clears
+        # it. Reap both in the same pass.
+        stale_queued = await repo.get_stale_queued(created_before=cutoff)
         sync_service = SyncService(session)
-        for job in stale:
+        threshold_minutes = int(STALE_SYNC_JOB_THRESHOLD.total_seconds() // 60)
+        for job in stale_running:
             await sync_service.record_error(
                 job.id,
                 entity_type=job.entity_type,
                 error_type="orphaned",
                 error_message=(
                     "Sync job marked failed by the stale-job reaper: no progress for "
-                    f"over {int(STALE_SYNC_JOB_THRESHOLD.total_seconds() // 60)} minutes "
+                    f"over {threshold_minutes} minutes "
                     "(the worker process most likely restarted mid-sync, e.g. during a "
                     "deploy, and never got to mark this job complete)."
+                ),
+            )
+            await sync_service.complete_sync(job.id, success=False)
+            reaped.append(str(job.id))
+        for job in stale_queued:
+            await sync_service.record_error(
+                job.id,
+                entity_type=job.entity_type,
+                error_type="orphaned",
+                error_message=(
+                    "Sync job marked failed by the stale-job reaper: still QUEUED "
+                    f"over {threshold_minutes} minutes after creation "
+                    "(no worker ever started it — a lost broker message, a worker "
+                    "killed in the QUEUED->RUNNING window, or an enqueue that failed "
+                    "on a broker outage). Left as-is it would block every later "
+                    "scheduled sync for this entity type via the one-active-job guard."
                 ),
             )
             await sync_service.complete_sync(job.id, success=False)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,22 @@ from app.services.audit_service import AuditService
 
 logger = get_logger(__name__)
 
+# A single Celery task must not run unboundedly. Real production evidence
+# this engagement: Shiprocket's list endpoints (`/shipments`, `/ndr`) have
+# no genuine "since"/date filter — `ShiprocketAdapter.fetch_incremental`
+# degrades to a full page-1-to-end crawl every time — so a large backlog
+# (~23k+ historical shipments) can take hours to fully page through even
+# once per-record matching is fully optimized, since the cost here is
+# Shiprocket's own list-pagination latency, not our matching logic. Left
+# unbounded, a single job either never finishes inside one Celery task's
+# practical runtime, or — worse — occupies `start_sync`'s one-active-job-
+# per-entity-type slot for hours, blocking every scheduled attempt behind
+# it. Stopping after a bounded slice and resuming from a persisted cursor
+# next run (`Integration.configuration["sync_cursors"]`) turns an
+# unbounded single-job crawl into steady incremental progress across the
+# scheduled cadence instead.
+_MAX_ENTITY_SYNC_DURATION = timedelta(minutes=8)
+
 
 class SyncService:
     def __init__(self, session: AsyncSession) -> None:
@@ -42,6 +58,33 @@ class SyncService:
         if job is None:
             raise NotFoundError("Sync job not found.")
         return job
+
+    async def _persist_sync_cursor(
+        self, *, integration_id: uuid.UUID, entity_type: str, cursor: str | None
+    ) -> None:
+        """Cross-job resume point for one `(integration, entity_type)`
+        pull, stored on `Integration.configuration` (not the `SyncJob`
+        row, which is per-run) so the *next* scheduled job picks up where
+        this one left off instead of restarting at page 1. Re-fetches
+        `Integration` fresh rather than holding a reference across
+        `_run_entity_sync`'s loop -- a per-record failure there calls
+        `session.rollback()`, which expires every attribute on every
+        object still attached to the session (see that method's
+        docstring); a stale reference's `.configuration` access would
+        raise `MissingGreenlet`.
+        """
+        integration = await self.integrations.get_by_id(integration_id)
+        if integration is None:
+            return
+        configuration = dict(integration.configuration or {})
+        cursors = dict(configuration.get("sync_cursors") or {})
+        if cursor is None:
+            cursors.pop(entity_type, None)
+        else:
+            cursors[entity_type] = cursor
+        configuration["sync_cursors"] = cursors
+        await self.integrations.update(integration, configuration=configuration)
+        await self.session.commit()
 
     async def start_sync(
         self,
@@ -285,6 +328,11 @@ class SyncService:
             else None
         )
         since = last_job_for_entity.completed_at if last_job_for_entity else None
+        resume_cursor = (
+            (integration.configuration or {}).get("sync_cursors", {}).get(entity_type)
+            if integration
+            else None
+        )
 
         # Round 5: sync_service.py had zero structured logging, making
         # "is the scheduled sync actually running against real data, or
@@ -298,6 +346,7 @@ class SyncService:
             entity_type=entity_type,
             sync_type=sync_type.value,
             since=since.isoformat() if since else None,
+            resume_cursor=resume_cursor,
         )
 
         if adapter is None:
@@ -308,6 +357,7 @@ class SyncService:
                 error_message=f"No adapter registered for integration '{integration_code}'.",
             )
             return await self.complete_sync(job_id, success=False)
+        assert integration is not None  # adapter is only non-None once integration is resolved
 
         handler = ENTITY_UPSERT_HANDLERS.get(entity_type)
         if handler is None:
@@ -322,11 +372,13 @@ class SyncService:
         try:
             await self._run_entity_sync(
                 job_id=job_id,
+                integration_id=integration.id,
                 entity_type=entity_type,
                 sync_type=sync_type,
                 since=since,
                 adapter=adapter,
                 handler=handler,
+                resume_cursor=resume_cursor,
             )
         except IntegrationError as exc:
             # A page-level failure (auth/permission/rate-limit/network) —
@@ -346,11 +398,13 @@ class SyncService:
         self,
         *,
         job_id: uuid.UUID,
+        integration_id: uuid.UUID,
         entity_type: str,
         sync_type: SyncType,
         since: datetime | None,
         adapter: IntegrationAdapter,
         handler: UpsertHandler,
+        resume_cursor: str | None,
     ) -> None:
         """Pages through every record of `entity_type`, normalizing and
         upserting each one via `handler`. A single record's failure is
@@ -368,8 +422,17 @@ class SyncService:
         still attached to this session, and a later plain attribute
         access (not an `await`ed reload) on an expired attribute raises
         `MissingGreenlet` under `AsyncSession`.
+
+        Starts from `resume_cursor` (the previous job's stopping point for
+        this exact `(integration, entity_type)`, if any) rather than
+        always page 1 — see `_MAX_ENTITY_SYNC_DURATION`. Persists the
+        cursor after every page (not just at the time-budget exit) so a
+        worker crash mid-crawl loses no more than one page of progress,
+        matching real production evidence: a worker restart mid-sync
+        previously orphaned `SyncJob` rows with no resumable state at all.
         """
-        cursor: str | None = None
+        cursor: str | None = resume_cursor
+        deadline = datetime.now(UTC) + _MAX_ENTITY_SYNC_DURATION
         while True:
             if sync_type == SyncType.INCREMENTAL and since:
                 page = await adapter.fetch_incremental(
@@ -448,8 +511,24 @@ class SyncService:
             )
 
             if not page.has_more:
+                await self._persist_sync_cursor(
+                    integration_id=integration_id, entity_type=entity_type, cursor=None
+                )
                 break
+
             cursor = page.next_cursor
+            await self._persist_sync_cursor(
+                integration_id=integration_id, entity_type=entity_type, cursor=cursor
+            )
+
+            if datetime.now(UTC) >= deadline:
+                logger.info(
+                    "sync_time_budget_reached",
+                    sync_job_id=str(job_id),
+                    entity_type=entity_type,
+                    next_cursor=cursor,
+                )
+                break
 
     async def run_sync(
         self, *, integration_id: uuid.UUID, sync_type: SyncType | str, entity_type: str

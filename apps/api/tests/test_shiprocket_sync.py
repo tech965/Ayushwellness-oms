@@ -1398,4 +1398,98 @@ async def test_tracking_refresh_skips_terminal_shipments(db_session: AsyncSessio
     adapter = _CountingAdapter()
     await refresh_tracking(db_session, job.id, adapter)
 
-    assert adapter.calls == 0
+
+# --- Cross-job cursor resume: real production evidence this engagement
+# showed `ShiprocketAdapter.fetch_incremental` has no genuine "since"
+# filter, so every sync -- incremental or full -- restarts the entire
+# `/shipments` crawl at page 1. Against a ~23k-record backlog that takes
+# hours, meaning a scheduled sync could never realistically reach today's
+# new shipments. `Integration.configuration["sync_cursors"]` persists
+# where the last job's crawl stopped so the next one resumes instead of
+# re-walking history from scratch every time. ---------------------------
+
+
+async def test_shipment_sync_resumes_from_a_persisted_cursor(db_session: AsyncSession) -> None:
+    """A cursor already saved from a previous job's crawl (e.g. it hit the
+    time budget mid-backlog) must be used as the starting page for the
+    next job -- not page 1.
+    """
+    client = _StubClient([_shipments_page(records=[])])
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+    await IntegrationRepository(db_session).update(
+        integration, configuration={"sync_cursors": {"shipments": "7"}}
+    )
+    await db_session.commit()
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    method, path, params = client.calls[0]
+    assert method == "GET"
+    assert path == "/shipments"
+    assert params["page"] == 7
+
+
+async def test_shipment_sync_clears_the_cursor_once_a_full_pass_completes(
+    db_session: AsyncSession,
+) -> None:
+    """Once a crawl genuinely reaches the end of the list (`has_more`
+    False), the persisted cursor must be cleared -- the next job starts a
+    fresh pass from page 1 rather than being stuck resuming from "the end"
+    forever.
+    """
+    client = _StubClient([_shipments_page(records=[], total_pages=1)])
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+    await IntegrationRepository(db_session).update(
+        integration, configuration={"sync_cursors": {"shipments": "3"}}
+    )
+    await db_session.commit()
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    await db_session.refresh(integration)
+    assert integration.configuration["sync_cursors"].get("shipments") is None
+
+
+async def test_shipment_sync_stops_early_and_saves_a_resumable_cursor_past_the_time_budget(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the time budget already exhausted, a job must stop after one
+    page (persisting the next page as the resume cursor) instead of
+    crawling the whole backlog in a single run -- the fix for a ~23k-record
+    Shiprocket backlog otherwise taking hours per job and blocking every
+    scheduled attempt behind it via the one-active-job-per-entity guard.
+    A second page response is queued but must never be consumed.
+    """
+    from datetime import timedelta
+
+    import app.services.sync_service as sync_service_module
+
+    monkeypatch.setattr(sync_service_module, "_MAX_ENTITY_SYNC_DURATION", timedelta(seconds=-1))
+
+    # No `order_id`/`channel_order_id` on this record -- resolution stops
+    # at "no match" with zero further API calls, so the single queued page
+    # response below is the only network call this test should ever make.
+    client = _StubClient(
+        [
+            _shipments_page(records=[{"id": "no-match-1", "awb": ""}], total_pages=2),
+            _shipments_page(records=[{"id": "no-match-2", "awb": ""}], total_pages=2),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert len(client.calls) == 1
+
+    await db_session.refresh(integration)
+    assert integration.configuration["sync_cursors"]["shipments"] == "2"

@@ -506,6 +506,77 @@ async def test_reap_stale_sync_jobs_leaves_a_recently_updated_job_alone(
     assert refreshed.status == "running"
 
 
+async def test_reap_stale_sync_jobs_fails_a_queued_job_that_no_worker_ever_started(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Production incident: `start_sync`'s one-active-job guard counts
+    QUEUED as active, but the reaper only ever recovered RUNNING jobs --
+    so a single orphaned QUEUED `orders` job (lost broker message, worker
+    killed in the QUEUED->RUNNING window, or the manual-trigger enqueue
+    failing on a broker outage) wedged every subsequent scheduled orders
+    sync forever. The reaper must now clear a long-QUEUED job too.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.repositories.sync_job import SyncJobRepository
+    from app.tasks import sync_tasks
+
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+    job = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+    assert job.status == "queued"
+
+    stale_time = datetime.now(UTC) - timedelta(minutes=30)
+    await SyncJobRepository(db_session).update(
+        job, created_at=stale_time, updated_at=stale_time
+    )
+    await db_session.commit()
+
+    monkeypatch.setattr(
+        sync_tasks, "AsyncSessionLocal", lambda: db_session_cm_for_reaper(db_session)
+    )
+
+    reaped = await sync_tasks._reap_stale_sync_jobs()
+
+    assert str(job.id) in reaped
+    refreshed = await service.sync_jobs.get_by_id(job.id)
+    assert refreshed.status == "failed"
+
+    # The wedge is gone: a fresh scheduled run can now start a new job.
+    new_job = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+    assert new_job.id != job.id
+
+
+async def test_reap_stale_sync_jobs_leaves_a_freshly_queued_job_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A healthy QUEUED job becomes RUNNING within seconds -- one that was
+    only just created must never be reaped out from under the worker
+    about to pick it up.
+    """
+    from app.tasks import sync_tasks
+
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+    job = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+
+    monkeypatch.setattr(
+        sync_tasks, "AsyncSessionLocal", lambda: db_session_cm_for_reaper(db_session)
+    )
+
+    reaped = await sync_tasks._reap_stale_sync_jobs()
+
+    assert str(job.id) not in reaped
+    refreshed = await service.sync_jobs.get_by_id(job.id)
+    assert refreshed.status == "queued"
+
+
 class db_session_cm_for_reaper:
     """Same wrapper as `test_scheduled_sync.py`'s `db_session_cm` --
     duplicated locally rather than imported to avoid coupling two
