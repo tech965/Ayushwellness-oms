@@ -117,9 +117,10 @@ class ShiprocketShipmentNormalizer:
     """One raw item from `GET /shipments` -> the kwargs
     `app.integrations.entity_sync._upsert_shipment` expects — a superset
     of what `ShipmentService.upsert_synced_shipment` takes, plus
-    `channel_order_id` (popped by the handler, never passed through to
-    the service), since matching to an OMS `Order` is provider-specific
-    logic that doesn't belong inside a generic shipment upsert.
+    `channel_order_id`/`shiprocket_order_id` (both popped by the handler,
+    never passed through to the service), since matching to an OMS
+    `Order` is provider-specific logic that doesn't belong inside a
+    generic shipment upsert.
 
     Field names, confirmed against a real production `/shipments`
     response: `id` is the Shiprocket shipment id (`external_id` below —
@@ -131,11 +132,13 @@ class ShiprocketShipmentNormalizer:
     `channel_order_id` does **not** exist on this endpoint at all —
     unlike the NDR listing, which really does have it (see
     `ShiprocketNDRNormalizer`). This always reads as `None` here; that's
-    expected, not a bug, and is exactly why `_upsert_shipment` no longer
-    depends on it for a shipment this OMS already has a `Shipment` row
-    for. No reliable replacement field for a genuinely *new* shipment
-    (one this OMS has never created) has been confirmed yet — real data
-    for a `PENDING` shipment shows `number`/`code` both empty too.
+    expected, not a bug. `order_id` (Shiprocket's own internal numeric
+    order id, distinct from `id`/`external_id` above) *is* present here
+    though, and is passed through as `shiprocket_order_id` purely so
+    `entity_sync._upsert_shipment` can fall back to `GET
+    /orders/show/{order_id}` — the one endpoint confirmed live to return
+    `channel_order_id` reliably — when a shipment has no existing
+    `Shipment` row and no usable `channel_order_id` from this endpoint.
     """
 
     def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -147,6 +150,9 @@ class ShiprocketShipmentNormalizer:
             "shiprocket_shipment_id": external_id or None,
             "channel_order_id": (
                 str(raw["channel_order_id"]) if raw.get("channel_order_id") is not None else None
+            ),
+            "shiprocket_order_id": (
+                str(raw["order_id"]) if raw.get("order_id") is not None else None
             ),
             "awb": raw.get("awb") or raw.get("awb_code"),
             "current_status": normalize_shipment_status(raw_status),

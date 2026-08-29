@@ -525,6 +525,264 @@ async def test_existing_shipment_awb_is_populated_once_shiprocket_assigns_one(
     assert refreshed.order_id == order.id  # still the same order, no re-resolution
 
 
+# --- Round 14: `channel_order_id` is confirmed live to always be absent
+# from `/shipments` for a shipment with no existing OMS `Shipment` row —
+# `GET /orders/show/{order_id}` is the confirmed-reliable fallback. Real
+# live evidence: for an OMS-created order, `channel_order_id` comes back
+# WITH the `#` (`"#AWL92268"`, matching `Order.order_number` verbatim);
+# for a shipment created outside this OMS, it comes back WITHOUT it
+# (`"AWL43729"`, needing `#` prepended). Both forms are covered. --------
+
+
+def _orders_show_response(channel_order_id: object) -> dict:
+    return {"data": {"channel_order_id": channel_order_id}}
+
+
+async def test_shipment_sync_resolves_via_orders_show_fallback_with_hash_prefixed_channel_order_id(
+    db_session: AsyncSession,
+) -> None:
+    """1: a shipment with no existing Shipment row and no channel_order_id
+    on /shipments still resolves, via GET /orders/show/{order_id} --
+    real shape for an order this OMS itself pushed (channel_order_id
+    comes back with the `#` already).
+    """
+    order = await _make_bare_order(db_session, order_number="#AWL92268")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1544069864,
+                        "channel_order_id": None,
+                        "order_id": 1547850287,
+                        "awb": "",
+                        "status": "New",
+                    }
+                ]
+            ),
+            _orders_show_response("#AWL92268"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert job.records_created == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_source_external_id(
+        source_system="shiprocket", external_id="1544069864"
+    )
+    assert shipment is not None
+    assert shipment.order_id == order.id
+
+
+async def test_shipment_sync_resolves_via_orders_show_fallback_without_hash_prefix(
+    db_session: AsyncSession,
+) -> None:
+    """2: channel_order_id without a leading `#` -- real shape for a
+    shipment created outside this OMS (e.g. Shopify's native Shiprocket
+    connection), confirmed live this engagement.
+    """
+    order = await _make_bare_order(db_session, order_number="#AWL43729")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1085847769,
+                        "channel_order_id": None,
+                        "order_id": 1089478217,
+                        "awb": "",
+                    }
+                ]
+            ),
+            _orders_show_response("AWL43729"),  # no leading '#' -- real live shape
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert job.records_created == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_source_external_id(
+        source_system="shiprocket", external_id="1085847769"
+    )
+    assert shipment is not None
+    assert shipment.order_id == order.id
+
+
+async def test_shipment_sync_does_not_crash_on_a_numeric_channel_order_id(
+    db_session: AsyncSession,
+) -> None:
+    """3: real production evidence this engagement showed a bare numeric
+    channel_order_id (41531) via /orders/show for a shipment whose order
+    genuinely isn't in this OMS. It must fail gracefully (SyncError), not
+    raise an unhandled exception from `.startswith()` on a non-string.
+    """
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 1089477745, "channel_order_id": None, "order_id": 1089477745, "awb": ""}
+                ]
+            ),
+            _orders_show_response(41531),  # raw int, not a string
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.error_count == 1
+    assert job.records_created == 0
+
+
+async def test_shipment_sync_records_a_sync_error_when_orders_show_also_has_no_match(
+    db_session: AsyncSession,
+) -> None:
+    """6: even after trying both channel_order_id sources, an order that
+    genuinely doesn't exist in the OMS must still fail cleanly -- never
+    fabricated, and the SyncError is recorded, not silently dropped.
+    """
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 999,
+                        "channel_order_id": None,
+                        "order_id": 12345,
+                        "awb": "",
+                    }
+                ]
+            ),
+            _orders_show_response("AWL-DOES-NOT-EXIST"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.error_count == 1
+    assert job.records_created == 0
+
+    from app.models.shipment import Shipment
+
+    total = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total.scalar_one() == 0
+
+
+async def test_shipment_sync_does_not_call_orders_show_when_channel_order_id_already_present(
+    db_session: AsyncSession,
+) -> None:
+    """No wasted live call: when /shipments already has a usable
+    channel_order_id, GET /orders/show is never attempted -- the stub
+    client has only one response queued, so a second (unwanted) call
+    would raise IndexError and fail this test.
+    """
+    await _make_bare_order(db_session, order_number="#AWL-DIRECT")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 5, "channel_order_id": "#AWL-DIRECT", "order_id": 777, "awb": ""}
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert job.records_created == 1
+
+
+async def test_shipment_sync_via_orders_show_fallback_is_idempotent_on_rerun(
+    db_session: AsyncSession,
+) -> None:
+    """5: once a shipment has been resolved via the orders/show fallback
+    and saved, a re-sync finds it by (source_system, external_id) FIRST
+    -- the fallback (and its extra live call) never fires again. The
+    second stub client has only the /shipments page queued; a repeat
+    orders/show call would raise IndexError.
+    """
+    order = await _make_bare_order(db_session, order_number="#AWL92268")
+    first_client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 1544069864, "channel_order_id": None, "order_id": 1547850287, "awb": ""}
+                ]
+            ),
+            _orders_show_response("#AWL92268"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=first_client))
+    integration = await _make_shiprocket_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+    assert job1.records_created == 1
+
+    second_client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1544069864,
+                        "channel_order_id": None,
+                        "order_id": 1547850287,
+                        "awb": "AWB-NEW",
+                    }
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=second_client))
+
+    job2 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job2.status == "completed"
+    assert job2.records_created == 0
+    assert job2.records_updated == 1
+
+    from app.models.shipment import Shipment
+
+    total = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total.scalar_one() == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_source_external_id(
+        source_system="shiprocket", external_id="1544069864"
+    )
+    assert shipment.order_id == order.id
+    assert shipment.awb == "AWB-NEW"
+
+
 async def test_shipment_sync_partial_failure_does_not_abort_other_records(
     db_session: AsyncSession,
 ) -> None:

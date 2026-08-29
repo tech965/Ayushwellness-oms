@@ -338,6 +338,20 @@ class ShiprocketAdapter(IntegrationAdapter):
         except ShiprocketApiError as exc:
             raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
 
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        """`GET /orders/show/{order_id}` — the only endpoint confirmed
+        live to return `channel_order_id` reliably; `/shipments` never
+        populates it (confirmed across every real record inspected this
+        engagement). Used by `entity_sync._upsert_shipment` as a fallback
+        order-resolution step when a pulled shipment has no matching
+        `Shipment` row yet.
+        """
+        client = self._get_client()
+        try:
+            return await client.request("GET", f"/orders/show/{order_id}")
+        except ShiprocketApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
     async def assign_awb(
         self, shiprocket_shipment_id: str, *, courier_id: str | None = None
     ) -> dict[str, Any]:
