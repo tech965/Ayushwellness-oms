@@ -75,6 +75,27 @@ def _clean_text(value: Any, *, max_len: int | None = None) -> str | None:
     return cleaned[:max_len] if max_len is not None else cleaned
 
 
+def _sanitize_raw_payload(value: Any) -> Any:
+    """`raw_external_payload` is stored as-is by every normalizer below,
+    unlike every individually-extracted field, which already goes
+    through `_clean_text`. A raw NUL byte anywhere inside this blob
+    crashes the INSERT the same way it does in a `text`/`varchar`
+    column — Postgres's `jsonb` type rejects `\\u0000` in a string value
+    just as strictly (`UntranslatableCharacterError`), confirmed live:
+    the same 3 customer/order external_ids failed on every retry,
+    forever, because nothing ever cleaned this blob. Structure (keys,
+    list order, non-string values) is preserved exactly; only string
+    leaves are cleaned, recursively.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {key: _sanitize_raw_payload(v) for key, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_raw_payload(v) for v in value]
+    return value
+
+
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -157,7 +178,7 @@ class ShopifyCustomerNormalizer(CustomerNormalizer):
             "is_active": raw.get("state") != "DISABLED",
             "external_created_at": _parse_datetime(raw.get("createdAt")),
             "external_updated_at": _parse_datetime(raw.get("updatedAt")),
-            "raw_external_payload": raw,
+            "raw_external_payload": _sanitize_raw_payload(raw),
             "addresses": [a for a in addresses if a is not None],
         }
 
@@ -196,7 +217,7 @@ class ShopifyProductNormalizer(ProductNormalizer):
             "status": normalize_product_status(raw.get("status")),
             "external_created_at": _parse_datetime(raw.get("createdAt")),
             "external_updated_at": _parse_datetime(raw.get("updatedAt")),
-            "raw_external_payload": raw,
+            "raw_external_payload": _sanitize_raw_payload(raw),
             "variants": variants,
         }
 
@@ -228,7 +249,7 @@ class ShopifyProductNormalizer(ProductNormalizer):
             "barcode": raw.get("barcode"),
             "options": options or None,
             "status": ProductStatus.ACTIVE,
-            "raw_external_payload": raw,
+            "raw_external_payload": _sanitize_raw_payload(raw),
         }
 
 
@@ -321,7 +342,7 @@ class ShopifyOrderNormalizer(OrderNormalizer):
             "billing_address": normalize_address(raw.get("billingAddress")),
             "external_created_at": _parse_datetime(raw.get("createdAt")),
             "external_updated_at": _parse_datetime(raw.get("updatedAt")),
-            "raw_external_payload": raw,
+            "raw_external_payload": _sanitize_raw_payload(raw),
             "items": line_items,
         }
 

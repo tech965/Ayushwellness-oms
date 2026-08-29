@@ -326,3 +326,83 @@ def test_address_normalization_strips_null_bytes_from_every_text_field() -> None
     assert "\x00" not in address["line1"]
     assert "\x00" not in address["city"]
     assert "\x00" not in address["contact_phone"]
+
+
+# Round 14 — real production evidence: the same `UntranslatableCharacterError`
+# from Round 4 recurred for the *same* customer external_id (7459254665405)
+# even though `first_name`/`last_name`/`email` were all confirmed clean in
+# the crashing INSERT's own logged parameters. Root cause: `_clean_text` was
+# only ever applied to individually-extracted fields — `raw_external_payload`
+# was always passed straight through unsanitized, and Postgres's `jsonb`
+# rejects a raw NUL byte in a string value exactly like `text`/`varchar`
+# does. These prove the *blob*, not just the extracted fields, is now clean.
+
+
+def test_customer_normalization_strips_null_bytes_from_raw_external_payload() -> None:
+    raw = {
+        "id": "gid://shopify/Customer/7459254665405",
+        "firstName": "Amit",
+        "lastName": ".",
+        "email": "amitm16@icloud.com",
+        "state": "ENABLED",
+        "note": "VIP customer\x00 - handle with care",
+    }
+    normalized = ShopifyCustomerNormalizer().normalize(raw)
+    assert "\x00" not in normalized["raw_external_payload"]["note"]
+    # structure/other values must survive unchanged
+    assert normalized["raw_external_payload"]["firstName"] == "Amit"
+    assert normalized["raw_external_payload"]["id"] == "gid://shopify/Customer/7459254665405"
+
+
+def test_order_normalization_strips_null_bytes_from_raw_external_payload() -> None:
+    raw = {
+        "id": "gid://shopify/Order/6676426948797",
+        "name": "#AWL91535",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "customer": {"id": "gid://shopify/Customer/123"},
+        "shippingAddress": None,
+        "billingAddress": None,
+        "lineItems": {"edges": []},
+        "note": "Deliver after 5pm\x00",
+        "customAttributes": [{"key": "gift_message", "value": "Happy\x00 Birthday"}],
+    }
+    normalized = ShopifyOrderNormalizer().normalize(raw)
+    payload = normalized["raw_external_payload"]
+    assert "\x00" not in payload["note"]
+    assert "\x00" not in payload["customAttributes"][0]["value"]
+    assert payload["customAttributes"][0]["key"] == "gift_message"
+    assert payload["name"] == "#AWL91535"
+
+
+def test_product_normalization_strips_null_bytes_from_raw_external_payload() -> None:
+    raw = {
+        "id": "gid://shopify/Product/55",
+        "title": "Ashwagandha Capsules",
+        "status": "ACTIVE",
+        "descriptionHtml": "<p>Pure\x00 herbal extract</p>",
+        "variants": {"edges": []},
+    }
+    normalized = ShopifyProductNormalizer().normalize(raw)
+    assert "\x00" not in normalized["raw_external_payload"]["descriptionHtml"]
+
+
+def test_variant_normalization_strips_null_bytes_from_raw_external_payload() -> None:
+    raw = {
+        "id": "gid://shopify/Product/55",
+        "title": "Ashwagandha",
+        "variants": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "gid://shopify/ProductVariant/99",
+                        "sku": "ASH-60",
+                        "title": "60 count\x00",
+                        "price": "499.00",
+                    }
+                }
+            ]
+        },
+    }
+    data = ShopifyProductNormalizer().normalize(raw)
+    variant_payload = data["variants"][0]["raw_external_payload"]
+    assert "\x00" not in variant_payload["title"]
