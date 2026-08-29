@@ -12,12 +12,15 @@ import {
 } from "lucide-react"
 import { endOfDay, startOfDay, subDays } from "date-fns"
 
+import { DrilldownOrdersTable } from "@/components/analytics/drilldown-orders-table"
+import { SplitTimelineChart } from "@/components/analytics/split-timeline-chart"
+import { StatusDonutCard } from "@/components/dashboard/status-donut-card"
 import { PageHeader } from "@/components/shared/page-header"
 import { StatTile } from "@/components/shared/stat-tile"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import { useAnalyticsSummary, useBreakdowns } from "@/services/analytics"
+import { useAnalyticsSummary, useBreakdowns, useRevenueTimeseries } from "@/services/analytics"
 
 const FILTER_DEFAULTS = { date_from: "", date_to: "" }
 
@@ -66,7 +69,14 @@ function OrderBreakdownContent() {
 
   const summaryQuery = useAnalyticsSummary(dateParams)
   const breakdownsQuery = useBreakdowns(dateParams)
+  const timeseriesQuery = useRevenueTimeseries({ ...dateParams, interval: "day" })
   const summary = summaryQuery.data
+
+  const ordersTimelineData = (timeseriesQuery.data?.points ?? []).map((p) => ({
+    bucket: p.bucket,
+    seriesAValue: p.cod_orders,
+    seriesBValue: p.prepaid_orders,
+  }))
 
   const orderQueryString = new URLSearchParams(dateParams).toString()
   function ordersHref(extra: Record<string, string>): string {
@@ -113,7 +123,7 @@ function OrderBreakdownContent() {
               value={summary ? Number(summary.cod_orders.current).toLocaleString("en-IN") : 0}
               subtext={`${pct(Number(summary?.cod_orders.current ?? 0), totalOrders)} · ${formatMoney(summary?.cod_value.current ?? "0")}`}
               accent="amber"
-              href={ordersHref({ payment_type: "cod" })}
+              href={`/orders/breakdown/cod?${orderQueryString}`}
             />
             <StatTile
               label="Prepaid Orders"
@@ -123,7 +133,7 @@ function OrderBreakdownContent() {
               }
               subtext={`${pct(Number(summary?.prepaid_orders.current ?? 0), totalOrders)} · ${formatMoney(summary?.prepaid_value.current ?? "0")}`}
               accent="emerald"
-              href={ordersHref({ payment_type: "prepaid" })}
+              href={`/orders/breakdown/prepaid?${orderQueryString}`}
             />
             <StatTile
               label="Pending Orders"
@@ -167,6 +177,35 @@ function OrderBreakdownContent() {
               href={ordersHref({ status: "cancelled" })}
             />
           </section>
+
+          {/* Root-cause fix: this page previously had stat cards only --
+              no chart component was ever added when it was built. */}
+          <section className="grid gap-4 lg:grid-cols-2">
+            <StatusDonutCard
+              title="COD vs Prepaid Orders"
+              domain="payment"
+              isLoading={breakdownsQuery.isLoading}
+              centerLabel="Orders"
+              data={breakdownsQuery.data?.payment_type}
+              hrefFor={(status) => ordersHref({ payment_type: status })}
+            />
+            <SplitTimelineChart
+              title="Orders Timeline"
+              data={ordersTimelineData}
+              seriesALabel="COD"
+              seriesBLabel="Prepaid"
+              seriesAColor="var(--warning)"
+              seriesBColor="var(--info)"
+              valueKind="count"
+              isLoading={timeseriesQuery.isLoading}
+            />
+          </section>
+
+          <DrilldownOrdersTable
+            title="Orders in This Range"
+            filters={dateParams}
+            ordersHref={ordersHref({})}
+          />
         </div>
       )}
     </>

@@ -14,12 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.dependencies.auth import require_permission
 from app.models.auth import User
+from app.models.enums import PaymentType
 from app.schemas.analytics import (
     AnalyticsSummaryResponse,
     BreakdownsResponse,
     CourierPerformance,
     OrdersTimeseriesResponse,
+    PaymentStatusBreakdownResponse,
+    PaymentStatusTimeseriesResponse,
     RecentActivityResponse,
+    RevenueTimeseriesResponse,
     TopProduct,
 )
 from app.schemas.response import ApiResponse
@@ -48,6 +52,51 @@ async def get_orders_timeseries(
     _: User = Depends(require_permission("analytics.read")),
 ) -> ApiResponse[OrdersTimeseriesResponse]:
     series = await AnalyticsService(session).get_orders_timeseries(date_from, date_to, interval)
+    return ApiResponse(data=series)
+
+
+@router.get(
+    "/payment-status-breakdown", response_model=ApiResponse[PaymentStatusBreakdownResponse]
+)
+async def get_payment_status_breakdown(
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    payment_type: PaymentType | None = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("analytics.read")),
+) -> ApiResponse[PaymentStatusBreakdownResponse]:
+    breakdown = await AnalyticsService(session).get_payment_status_breakdown(
+        date_from, date_to, payment_type
+    )
+    return ApiResponse(data=breakdown)
+
+
+@router.get("/revenue-timeseries", response_model=ApiResponse[RevenueTimeseriesResponse])
+async def get_revenue_timeseries(
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    interval: str = Query(default="day", pattern="^(day|week|month)$"),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("analytics.read")),
+) -> ApiResponse[RevenueTimeseriesResponse]:
+    series = await AnalyticsService(session).get_revenue_timeseries(date_from, date_to, interval)
+    return ApiResponse(data=series)
+
+
+@router.get(
+    "/payment-status-timeseries", response_model=ApiResponse[PaymentStatusTimeseriesResponse]
+)
+async def get_payment_status_timeseries(
+    payment_type: PaymentType,
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    interval: str = Query(default="day", pattern="^(day|week|month)$"),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("analytics.read")),
+) -> ApiResponse[PaymentStatusTimeseriesResponse]:
+    series = await AnalyticsService(session).get_payment_status_timeseries(
+        date_from, date_to, interval, payment_type
+    )
     return ApiResponse(data=series)
 
 

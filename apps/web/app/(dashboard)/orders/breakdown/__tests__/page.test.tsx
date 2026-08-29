@@ -3,8 +3,9 @@ import { screen } from "@testing-library/react"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import OrderBreakdownPage from "@/app/(dashboard)/orders/breakdown/page"
-import { useAnalyticsSummary, useBreakdowns } from "@/services/analytics"
-import type { AnalyticsSummary, Breakdowns } from "@/types/analytics"
+import { useAnalyticsSummary, useBreakdowns, useRevenueTimeseries } from "@/services/analytics"
+import { useOrders } from "@/services/orders"
+import type { AnalyticsSummary, Breakdowns, RevenueTimeseries } from "@/types/analytics"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
@@ -15,10 +16,19 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/services/analytics", () => ({
   useAnalyticsSummary: vi.fn(),
   useBreakdowns: vi.fn(),
+  useRevenueTimeseries: vi.fn(),
+}))
+
+vi.mock("@/services/orders", () => ({
+  useOrders: vi.fn(),
 }))
 
 const mockedUseSummary = vi.mocked(useAnalyticsSummary)
 const mockedUseBreakdowns = vi.mocked(useBreakdowns)
+const mockedUseRevenueTimeseries = vi.mocked(useRevenueTimeseries)
+const mockedUseOrders = vi.mocked(useOrders)
+
+const EMPTY_TIMESERIES: RevenueTimeseries = { interval: "day", points: [] }
 
 function kpi(current: string) {
   return { current, previous: "0", change_pct: null }
@@ -70,6 +80,14 @@ describe("OrderBreakdownPage", () => {
       data: BREAKDOWNS,
       isLoading: false,
     } as unknown as ReturnType<typeof useBreakdowns>)
+    mockedUseRevenueTimeseries.mockReturnValue({
+      data: EMPTY_TIMESERIES,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useRevenueTimeseries>)
+    mockedUseOrders.mockReturnValue({
+      data: { data: [], meta: { total_items: 0 } },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useOrders>)
 
     renderWithProviders(<OrderBreakdownPage />)
 
@@ -82,14 +100,19 @@ describe("OrderBreakdownPage", () => {
     expect(totalLink).toHaveAttribute("href", expect.stringContaining("/orders?"))
     expect(totalLink?.getAttribute("href")).not.toMatch(/status=|payment_type=/)
 
-    // COD: 70/100 = 70.0%
+    // COD: 70/100 = 70.0% -- opens the dedicated COD Orders drill-down
+    // (charts + paid/pending), not a plain filtered Orders list.
     expect(screen.getByText("70.0%", { exact: false })).toBeInTheDocument()
     const codLink = screen.getByText("COD Orders").closest("a")
-    expect(codLink?.getAttribute("href")).toContain("payment_type=cod")
+    expect(codLink?.getAttribute("href")).toContain("/orders/breakdown/cod")
 
     // Prepaid: 30/100 = 30.0%
     const prepaidLink = screen.getByText("Prepaid Orders").closest("a")
-    expect(prepaidLink?.getAttribute("href")).toContain("payment_type=prepaid")
+    expect(prepaidLink?.getAttribute("href")).toContain("/orders/breakdown/prepaid")
+
+    // Root-cause fix: this page previously had stat cards only, no chart.
+    expect(screen.getByText("COD vs Prepaid Orders")).toBeInTheDocument()
+    expect(screen.getByText("Orders Timeline")).toBeInTheDocument()
 
     // Pending: 25/100 = 25.0%, links to status=pending (OrderStatus, not
     // payment_status — the exact distinction the reported bug was about).
@@ -119,6 +142,14 @@ describe("OrderBreakdownPage", () => {
       data: undefined,
       isLoading: true,
     } as unknown as ReturnType<typeof useBreakdowns>)
+    mockedUseRevenueTimeseries.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+    } as unknown as ReturnType<typeof useRevenueTimeseries>)
+    mockedUseOrders.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+    } as unknown as ReturnType<typeof useOrders>)
 
     const { container } = renderWithProviders(<OrderBreakdownPage />)
     expect(container.querySelectorAll("[data-slot='skeleton']").length).toBeGreaterThan(0)

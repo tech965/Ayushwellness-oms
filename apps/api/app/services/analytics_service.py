@@ -27,6 +27,24 @@ Timeseries bucketing is done in Python, not SQL `date_trunc`, so the
 exact same code path works against both production Postgres and the
 SQLite test suite (see `BaseRepository.upsert_by_external_id`'s docstring
 for why this codebase avoids dialect-specific SQL wherever practical).
+
+Revenue/order drill-down definitions (Total Revenue/Total Orders ->
+COD/Prepaid -> Paid/Pending), confirmed against the real schema, not
+assumed: `Order.total_amount` is the order total used for every revenue
+figure below; `Order.payment_type` (`cod`/`prepaid`/`other`) is the
+COD-vs-Prepaid split; `Order.payment_status` (`pending`/`authorized`/
+`paid`/`failed`/`refunded`/`partially_refunded`) is the paid-vs-pending
+split — "paid" means exactly `payment_status == PAID`, "pending" means
+every other status. Both are scoped by `Order.order_datetime`, same as
+every other KPI in this file, so a single date range produces
+consistent cards/charts/tables. No order is ever double-counted (each
+order has exactly one `payment_type` and one `payment_status`, so
+COD+Prepaid always sums to the total, and Paid+Pending always sums to
+the total within a payment type). Cancelled orders are **included**,
+matching the existing `total_revenue`/`cod_value`/`prepaid_value`
+figures elsewhere in this file, which have never excluded them — this
+preserves that existing rule rather than inventing a new one for just
+the new drill-down views.
 """
 
 from __future__ import annotations
@@ -46,6 +64,7 @@ from app.models.enums import (
     FulfillmentStatus,
     NDRStatus,
     OrderStatus,
+    PaymentStatus,
     PaymentType,
     RTOStatus,
     ShipmentDelayStatus,
@@ -65,11 +84,17 @@ from app.schemas.analytics import (
     CourierPerformance,
     KPIValue,
     OrdersTimeseriesResponse,
+    PaymentStatusBreakdownItem,
+    PaymentStatusBreakdownResponse,
+    PaymentStatusTimeseriesPoint,
+    PaymentStatusTimeseriesResponse,
     RecentActivityResponse,
     RecentNdrRto,
     RecentOrder,
     RecentPayment,
     RecentShipment,
+    RevenueTimeseriesPoint,
+    RevenueTimeseriesResponse,
     StatusCount,
     TimeseriesPoint,
     TopProduct,
@@ -293,6 +318,157 @@ class AnalyticsService:
             for key, amounts in sorted(buckets.items())
         ]
         return OrdersTimeseriesResponse(interval=interval, points=points)
+
+    async def get_payment_status_breakdown(
+        self,
+        date_from: datetime | None,
+        date_to: datetime | None,
+        payment_type: PaymentType | None,
+    ) -> PaymentStatusBreakdownResponse:
+        """Paid-vs-pending snapshot (counts + revenue), optionally scoped
+        to one `payment_type` — the data behind the COD/Prepaid Revenue
+        and COD/Prepaid Orders drill-down cards+donut. See this module's
+        docstring for the exact paid/pending rule.
+        """
+        r = resolve_range(date_from, date_to)
+        conditions = [Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to]
+        if payment_type is not None:
+            conditions.append(Order.payment_type == payment_type)
+
+        stmt = (
+            select(
+                Order.payment_status,
+                func.count(),
+                func.coalesce(func.sum(Order.total_amount), 0),
+            )
+            .where(*conditions)
+            .group_by(Order.payment_status)
+        )
+        rows = (await self.session.execute(stmt)).all()
+
+        items = [
+            PaymentStatusBreakdownItem(status=str(status), count=cnt, revenue=Decimal(revenue))
+            for status, cnt, revenue in rows
+        ]
+        paid = next((i for i in items if i.status == PaymentStatus.PAID.value), None)
+        paid_count = paid.count if paid else 0
+        paid_revenue = paid.revenue if paid else Decimal("0")
+        total_count = sum(i.count for i in items)
+        total_revenue = sum((i.revenue for i in items), Decimal("0"))
+
+        return PaymentStatusBreakdownResponse(
+            payment_type=payment_type.value if payment_type else None,
+            total_count=total_count,
+            total_revenue=total_revenue,
+            paid_count=paid_count,
+            paid_revenue=paid_revenue,
+            pending_count=total_count - paid_count,
+            pending_revenue=total_revenue - paid_revenue,
+            items=items,
+        )
+
+    async def get_revenue_timeseries(
+        self, date_from: datetime | None, date_to: datetime | None, interval: str
+    ) -> RevenueTimeseriesResponse:
+        """COD-vs-Prepaid orders/revenue per date bucket — drives the
+        Revenue Analytics timeline chart (COD/Prepaid/Total lines) and the
+        Total Orders drill-down timeline chart (COD/Prepaid/Total bars),
+        both from the same query so the two views can never disagree.
+        """
+        r = resolve_range(date_from, date_to)
+        stmt = select(Order.order_datetime, Order.payment_type, Order.total_amount).where(
+            Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to
+        )
+        rows = (await self.session.execute(stmt)).all()
+
+        buckets: dict[str, dict[str, Decimal | int]] = defaultdict(
+            lambda: {
+                "cod_orders": 0,
+                "cod_revenue": Decimal("0"),
+                "prepaid_orders": 0,
+                "prepaid_revenue": Decimal("0"),
+            }
+        )
+        for order_datetime, payment_type, total_amount in rows:
+            bucket = buckets[_bucket_key(order_datetime, interval)]
+            if payment_type == PaymentType.COD:
+                bucket["cod_orders"] += 1
+                bucket["cod_revenue"] += total_amount
+            elif payment_type == PaymentType.PREPAID:
+                bucket["prepaid_orders"] += 1
+                bucket["prepaid_revenue"] += total_amount
+            # PaymentType.OTHER is intentionally excluded from both -- it
+            # already isn't part of cod_orders/prepaid_orders in
+            # get_summary either, so total_orders/total_revenue here stay
+            # consistent with "cod + prepaid" the same way the existing
+            # summary KPIs do, rather than silently inventing a third
+            # bucket this drill-down didn't ask for.
+
+        points = [
+            RevenueTimeseriesPoint(
+                bucket=key,
+                cod_orders=b["cod_orders"],
+                cod_revenue=b["cod_revenue"],
+                prepaid_orders=b["prepaid_orders"],
+                prepaid_revenue=b["prepaid_revenue"],
+                total_orders=b["cod_orders"] + b["prepaid_orders"],
+                total_revenue=b["cod_revenue"] + b["prepaid_revenue"],
+            )
+            for key, b in sorted(buckets.items())
+        ]
+        return RevenueTimeseriesResponse(interval=interval, points=points)
+
+    async def get_payment_status_timeseries(
+        self,
+        date_from: datetime | None,
+        date_to: datetime | None,
+        interval: str,
+        payment_type: PaymentType,
+    ) -> PaymentStatusTimeseriesResponse:
+        """Paid-vs-pending orders/revenue per date bucket, within one
+        payment type -- the COD/Prepaid Revenue and COD/Prepaid Orders
+        drill-downs' own timeline charts.
+        """
+        r = resolve_range(date_from, date_to)
+        stmt = select(Order.order_datetime, Order.payment_status, Order.total_amount).where(
+            Order.order_datetime >= r.date_from,
+            Order.order_datetime <= r.date_to,
+            Order.payment_type == payment_type,
+        )
+        rows = (await self.session.execute(stmt)).all()
+
+        buckets: dict[str, dict[str, Decimal | int]] = defaultdict(
+            lambda: {
+                "paid_orders": 0,
+                "paid_revenue": Decimal("0"),
+                "pending_orders": 0,
+                "pending_revenue": Decimal("0"),
+            }
+        )
+        for order_datetime, payment_status, total_amount in rows:
+            bucket = buckets[_bucket_key(order_datetime, interval)]
+            if payment_status == PaymentStatus.PAID:
+                bucket["paid_orders"] += 1
+                bucket["paid_revenue"] += total_amount
+            else:
+                bucket["pending_orders"] += 1
+                bucket["pending_revenue"] += total_amount
+
+        points = [
+            PaymentStatusTimeseriesPoint(
+                bucket=key,
+                paid_orders=b["paid_orders"],
+                paid_revenue=b["paid_revenue"],
+                pending_orders=b["pending_orders"],
+                pending_revenue=b["pending_revenue"],
+                total_orders=b["paid_orders"] + b["pending_orders"],
+                total_revenue=b["paid_revenue"] + b["pending_revenue"],
+            )
+            for key, b in sorted(buckets.items())
+        ]
+        return PaymentStatusTimeseriesResponse(
+            interval=interval, payment_type=payment_type.value, points=points
+        )
 
     async def get_breakdowns(
         self, date_from: datetime | None, date_to: datetime | None

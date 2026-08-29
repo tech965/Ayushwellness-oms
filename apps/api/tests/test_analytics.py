@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
+from app.models.enums import OrderStatus, PaymentStatus, PaymentType
+from app.repositories.order import OrderRepository
+from app.schemas.order import OrderItemCreateRequest
+from app.services.analytics_service import AnalyticsService
+from app.services.order_service import OrderService
 from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.asyncio
@@ -193,3 +200,331 @@ async def test_orders_timeseries_buckets_by_ist_calendar_day_not_utc(
         points = {p["bucket"]: p["order_count"] for p in response.json()["data"]["points"]}
         assert points.get("2026-03-15") == 1
         assert "2026-03-14" not in points
+
+
+# --- Revenue/order drill-down analytics (Total Revenue/Total Orders ->
+# COD/Prepaid -> Paid/Pending). Field semantics confirmed against the real
+# schema: Order.total_amount (revenue), Order.payment_type (cod/prepaid
+# split), Order.payment_status (paid vs everything-else split) -- see
+# AnalyticsService's module docstring for the exact rule. Uses direct
+# service-level order creation (not the HTTP orders API) because
+# payment_status isn't settable through that API -- it's only ever set by
+# the Shopify sync/payment flows -- so it's set directly via the
+# repository here, the same way test_shiprocket_sync.py's helpers build
+# fixture state the HTTP layer doesn't expose. ---------------------------
+
+
+async def _make_order(
+    session: AsyncSession,
+    *,
+    order_number: str,
+    payment_type: PaymentType,
+    payment_status: PaymentStatus,
+    amount: str,
+    order_datetime: datetime | None = None,
+    status: OrderStatus = OrderStatus.CONFIRMED,
+):
+    order = await OrderService(session).create_order(
+        actor=None,
+        order_number=order_number,
+        customer_id=None,
+        order_datetime=order_datetime or datetime.now(UTC),
+        currency="INR",
+        payment_type=payment_type,
+        shipping_charge=0,
+        notes=None,
+        items=[
+            OrderItemCreateRequest(
+                sku="SKU-1", product_name="Ashwagandha 60ct", quantity=1, unit_price=amount
+            )
+        ],
+    )
+    await OrderRepository(session).update(
+        order, payment_status=payment_status, status=status
+    )
+    await session.commit()
+    return order
+
+
+async def test_payment_status_breakdown_computes_total_paid_pending_revenue_and_counts(
+    db_session: AsyncSession,
+) -> None:
+    await _make_order(
+        db_session,
+        order_number="OMS-COD-PAID",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="600.00",
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-COD-PENDING",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PENDING,
+        amount="400.00",
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-PREPAID-PAID",
+        payment_type=PaymentType.PREPAID,
+        payment_status=PaymentStatus.PAID,
+        amount="1000.00",
+    )
+
+    result = await AnalyticsService(db_session).get_payment_status_breakdown(
+        None, None, PaymentType.COD
+    )
+
+    # 1: total COD revenue = sum of COD orders only, excluding prepaid.
+    assert result.total_revenue == 1000  # 600 + 400, NOT the 1000 prepaid order
+    assert result.total_count == 2
+    # 2: paid COD = only the PAID-status COD order.
+    assert result.paid_revenue == 600
+    assert result.paid_count == 1
+    # 3: pending COD = every non-PAID status (here just PENDING).
+    assert result.pending_revenue == 400
+    assert result.pending_count == 1
+
+
+async def test_payment_status_breakdown_for_prepaid_excludes_cod(
+    db_session: AsyncSession,
+) -> None:
+    await _make_order(
+        db_session,
+        order_number="OMS-PP-PAID",
+        payment_type=PaymentType.PREPAID,
+        payment_status=PaymentStatus.PAID,
+        amount="900.00",
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-PP-PENDING",
+        payment_type=PaymentType.PREPAID,
+        payment_status=PaymentStatus.FAILED,
+        amount="100.00",
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-COD-UNRELATED",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="5000.00",
+    )
+
+    result = await AnalyticsService(db_session).get_payment_status_breakdown(
+        None, None, PaymentType.PREPAID
+    )
+
+    assert result.total_revenue == 1000  # 900 + 100, excludes the 5000 COD order
+    assert result.paid_revenue == 900
+    # FAILED (not PENDING) still counts as "pending" -- any non-PAID status
+    # does, per the documented rule ("paid" vs "everything else").
+    assert result.pending_revenue == 100
+    assert result.pending_count == 1
+
+
+async def test_payment_status_breakdown_without_payment_type_covers_all_orders(
+    db_session: AsyncSession,
+) -> None:
+    await _make_order(
+        db_session,
+        order_number="OMS-ALL-COD",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="300.00",
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-ALL-PREPAID",
+        payment_type=PaymentType.PREPAID,
+        payment_status=PaymentStatus.PENDING,
+        amount="700.00",
+    )
+
+    result = await AnalyticsService(db_session).get_payment_status_breakdown(None, None, None)
+
+    assert result.total_revenue == 1000
+    assert result.total_count == 2
+    assert result.payment_type is None
+
+
+async def test_payment_status_breakdown_respects_date_filtering(
+    db_session: AsyncSession,
+) -> None:
+    await _make_order(
+        db_session,
+        order_number="OMS-OLD",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="500.00",
+        order_datetime=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-RECENT",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="700.00",
+    )
+
+    result = await AnalyticsService(db_session).get_payment_status_breakdown(
+        datetime(2025, 1, 1, tzinfo=UTC), datetime.now(UTC), PaymentType.COD
+    )
+
+    # 4: the 2020 order must be excluded by the date range.
+    assert result.total_revenue == 700
+    assert result.total_count == 1
+
+
+async def test_payment_status_breakdown_includes_cancelled_orders(
+    db_session: AsyncSession,
+) -> None:
+    """Cancelled orders are included -- matches the existing, unchanged
+    behavior of total_revenue/cod_value/prepaid_value in get_summary,
+    which has never excluded them. Not a new rule invented for this
+    drill-down.
+    """
+    await _make_order(
+        db_session,
+        order_number="OMS-CANCELLED",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="250.00",
+        status=OrderStatus.CANCELLED,
+    )
+
+    result = await AnalyticsService(db_session).get_payment_status_breakdown(
+        None, None, PaymentType.COD
+    )
+
+    assert result.total_revenue == 250
+    assert result.total_count == 1
+
+
+async def test_revenue_timeseries_splits_cod_and_prepaid_per_bucket(
+    db_session: AsyncSession,
+) -> None:
+    day = datetime(2026, 6, 15, 10, 0, tzinfo=UTC)
+    await _make_order(
+        db_session,
+        order_number="OMS-TS-COD",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="200.00",
+        order_datetime=day,
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-TS-PREPAID",
+        payment_type=PaymentType.PREPAID,
+        payment_status=PaymentStatus.PAID,
+        amount="300.00",
+        order_datetime=day,
+    )
+
+    result = await AnalyticsService(db_session).get_revenue_timeseries(
+        datetime(2026, 6, 1, tzinfo=UTC), datetime(2026, 6, 30, tzinfo=UTC), "day"
+    )
+
+    assert len(result.points) == 1
+    point = result.points[0]
+    assert point.cod_orders == 1
+    assert point.cod_revenue == 200
+    assert point.prepaid_orders == 1
+    assert point.prepaid_revenue == 300
+    # 5: cards and charts must use the same dataset -- total here must
+    # equal cod + prepaid, matching get_summary's total_revenue for the
+    # same range (no double-counting).
+    assert point.total_orders == 2
+    assert point.total_revenue == 500
+
+
+async def test_payment_status_timeseries_splits_paid_and_pending_per_bucket(
+    db_session: AsyncSession,
+) -> None:
+    day = datetime(2026, 6, 15, 10, 0, tzinfo=UTC)
+    await _make_order(
+        db_session,
+        order_number="OMS-PST-PAID",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="150.00",
+        order_datetime=day,
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-PST-PENDING",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PENDING,
+        amount="50.00",
+        order_datetime=day,
+    )
+    # A prepaid order on the same day must never leak into a COD-scoped
+    # timeseries.
+    await _make_order(
+        db_session,
+        order_number="OMS-PST-PREPAID",
+        payment_type=PaymentType.PREPAID,
+        payment_status=PaymentStatus.PAID,
+        amount="9999.00",
+        order_datetime=day,
+    )
+
+    result = await AnalyticsService(db_session).get_payment_status_timeseries(
+        datetime(2026, 6, 1, tzinfo=UTC), datetime(2026, 6, 30, tzinfo=UTC), "day", PaymentType.COD
+    )
+
+    assert result.payment_type == "cod"
+    assert len(result.points) == 1
+    point = result.points[0]
+    assert point.paid_orders == 1
+    assert point.paid_revenue == 150
+    assert point.pending_orders == 1
+    assert point.pending_revenue == 50
+    assert point.total_revenue == 200  # excludes the 9999 prepaid order
+
+
+async def test_payment_status_breakdown_endpoint_combined_filters(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """6: date range + payment_type combined via the real HTTP endpoint,
+    proving the route wiring (not just the service method) works.
+    """
+    await _make_order(
+        db_session,
+        order_number="OMS-HTTP-COD",
+        payment_type=PaymentType.COD,
+        payment_status=PaymentStatus.PAID,
+        amount="800.00",
+    )
+    await _make_order(
+        db_session,
+        order_number="OMS-HTTP-PREPAID",
+        payment_type=PaymentType.PREPAID,
+        payment_status=PaymentStatus.PAID,
+        amount="1200.00",
+    )
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ANALYTICS_PERMS
+    ) as auth_client:
+        response = await auth_client.get(
+            "/api/v1/analytics/payment-status-breakdown", params={"payment_type": "cod"}
+        )
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["total_revenue"] == "800.00"
+        assert data["paid_revenue"] == "800.00"
+        assert data["payment_type"] == "cod"
+
+        revenue_ts = await auth_client.get(
+            "/api/v1/analytics/revenue-timeseries", params={"interval": "day"}
+        )
+        assert revenue_ts.status_code == 200
+
+        status_ts = await auth_client.get(
+            "/api/v1/analytics/payment-status-timeseries",
+            params={"interval": "day", "payment_type": "prepaid"},
+        )
+        assert status_ts.status_code == 200
+        assert status_ts.json()["data"]["payment_type"] == "prepaid"

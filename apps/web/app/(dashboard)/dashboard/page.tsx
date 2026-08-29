@@ -138,6 +138,10 @@ function DashboardContent() {
   // Orders list every other KPI drills into — same date range carried
   // over so the breakdown page shows exactly the period just displayed.
   const breakdownHref = `/orders/breakdown?${orderQueryString}`
+  // "Total Revenue" opens its own dedicated drill-down (COD/Prepaid ->
+  // Paid/Pending -> charts -> orders), same reasoning as "Total Orders"
+  // above rather than sending the user straight to a plain Orders list.
+  const revenueHref = `/revenue?${orderQueryString}`
 
   const summary = summaryQuery.data
 
@@ -225,7 +229,7 @@ function DashboardContent() {
             icon={IndianRupee}
             kpi={summary?.total_revenue}
             format={money}
-            href={ordersHref({})}
+            href={revenueHref}
             accent="emerald"
           />
           <KpiCard

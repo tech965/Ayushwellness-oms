@@ -117,3 +117,56 @@ export interface AnalyticsDateRangeParams {
   date_from?: string
   date_to?: string
 }
+
+// --- Revenue/order drill-down analytics (Total Revenue/Total Orders ->
+// COD/Prepaid -> Paid/Pending). "paid" = payment_status "paid"; "pending"
+// = every other payment_status -- see AnalyticsService's docstring
+// (backend) for the authoritative definition these mirror.
+
+export interface PaymentStatusBreakdownItem {
+  status: string
+  count: number
+  revenue: string
+}
+
+export interface PaymentStatusBreakdown {
+  payment_type: "cod" | "prepaid" | null
+  total_count: number
+  total_revenue: string
+  paid_count: number
+  paid_revenue: string
+  pending_count: number
+  pending_revenue: string
+  items: PaymentStatusBreakdownItem[]
+}
+
+export interface RevenueTimeseriesPoint {
+  bucket: string
+  cod_orders: number
+  cod_revenue: string
+  prepaid_orders: number
+  prepaid_revenue: string
+  total_orders: number
+  total_revenue: string
+}
+
+export interface RevenueTimeseries {
+  interval: TimeseriesInterval
+  points: RevenueTimeseriesPoint[]
+}
+
+export interface PaymentStatusTimeseriesPoint {
+  bucket: string
+  paid_orders: number
+  paid_revenue: string
+  pending_orders: number
+  pending_revenue: string
+  total_orders: number
+  total_revenue: string
+}
+
+export interface PaymentStatusTimeseries {
+  interval: TimeseriesInterval
+  payment_type: "cod" | "prepaid"
+  points: PaymentStatusTimeseriesPoint[]
+}

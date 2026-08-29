@@ -8,7 +8,10 @@ import type {
   Breakdowns,
   CourierPerformance,
   OrdersTimeseries,
+  PaymentStatusBreakdown,
+  PaymentStatusTimeseries,
   RecentActivity,
+  RevenueTimeseries,
   TimeseriesInterval,
   TopProduct,
 } from "@/types/analytics"
@@ -105,6 +108,75 @@ export function useCourierPerformance(params: AnalyticsDateRangeParams) {
   return useQuery({
     queryKey: ["analytics", "couriers", params],
     queryFn: () => fetchCourierPerformance(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchPaymentStatusBreakdown(
+  params: AnalyticsDateRangeParams & { payment_type?: "cod" | "prepaid" }
+): Promise<PaymentStatusBreakdown> {
+  const response = await apiClient.get<ApiResponse<PaymentStatusBreakdown>>(
+    "/analytics/payment-status-breakdown",
+    { params }
+  )
+  if (!response.data.data) throw new Error("Payment status breakdown not available.")
+  return response.data.data
+}
+
+export function usePaymentStatusBreakdown(
+  params: AnalyticsDateRangeParams & { payment_type?: "cod" | "prepaid" }
+) {
+  return useQuery({
+    queryKey: ["analytics", "payment-status-breakdown", params],
+    queryFn: () => fetchPaymentStatusBreakdown(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchRevenueTimeseries(
+  params: AnalyticsDateRangeParams & { interval: TimeseriesInterval }
+): Promise<RevenueTimeseries> {
+  const response = await apiClient.get<ApiResponse<RevenueTimeseries>>(
+    "/analytics/revenue-timeseries",
+    { params }
+  )
+  if (!response.data.data) throw new Error("Revenue timeseries not available.")
+  return response.data.data
+}
+
+export function useRevenueTimeseries(
+  params: AnalyticsDateRangeParams & { interval: TimeseriesInterval }
+) {
+  return useQuery({
+    queryKey: ["analytics", "revenue-timeseries", params],
+    queryFn: () => fetchRevenueTimeseries(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchPaymentStatusTimeseries(
+  params: AnalyticsDateRangeParams & {
+    interval: TimeseriesInterval
+    payment_type: "cod" | "prepaid"
+  }
+): Promise<PaymentStatusTimeseries> {
+  const response = await apiClient.get<ApiResponse<PaymentStatusTimeseries>>(
+    "/analytics/payment-status-timeseries",
+    { params }
+  )
+  if (!response.data.data) throw new Error("Payment status timeseries not available.")
+  return response.data.data
+}
+
+export function usePaymentStatusTimeseries(
+  params: AnalyticsDateRangeParams & {
+    interval: TimeseriesInterval
+    payment_type: "cod" | "prepaid"
+  }
+) {
+  return useQuery({
+    queryKey: ["analytics", "payment-status-timeseries", params],
+    queryFn: () => fetchPaymentStatusTimeseries(params),
     placeholderData: (previous) => previous,
   })
 }

@@ -124,3 +124,60 @@ class RecentActivityResponse(BaseModel):
     recent_shipments: list[RecentShipment]
     recent_ndr_rto: list[RecentNdrRto]
     recent_payments: list[RecentPayment]
+
+
+# --- Revenue/order drill-down analytics (Total Revenue / Total Orders ->
+# COD/Prepaid -> Paid/Pending). See `AnalyticsService`'s module docstring
+# for the exact "paid" vs "pending" business rule these use: paid means
+# `Order.payment_status == PAID`; every other status (pending, authorized,
+# failed, refunded, partially_refunded) counts as pending -- the literal
+# reading of "paid" vs "pending/unpaid" from the spec that requested this,
+# not an invented finer-grained rule. ------------------------------------
+
+
+class PaymentStatusBreakdownItem(BaseModel):
+    status: str
+    count: int
+    revenue: Decimal
+
+
+class PaymentStatusBreakdownResponse(BaseModel):
+    payment_type: str | None
+    total_count: int
+    total_revenue: Decimal
+    paid_count: int
+    paid_revenue: Decimal
+    pending_count: int
+    pending_revenue: Decimal
+    items: list[PaymentStatusBreakdownItem]
+
+
+class RevenueTimeseriesPoint(BaseModel):
+    bucket: str
+    cod_orders: int
+    cod_revenue: Decimal
+    prepaid_orders: int
+    prepaid_revenue: Decimal
+    total_orders: int
+    total_revenue: Decimal
+
+
+class RevenueTimeseriesResponse(BaseModel):
+    interval: str
+    points: list[RevenueTimeseriesPoint]
+
+
+class PaymentStatusTimeseriesPoint(BaseModel):
+    bucket: str
+    paid_orders: int
+    paid_revenue: Decimal
+    pending_orders: int
+    pending_revenue: Decimal
+    total_orders: int
+    total_revenue: Decimal
+
+
+class PaymentStatusTimeseriesResponse(BaseModel):
+    interval: str
+    payment_type: str
+    points: list[PaymentStatusTimeseriesPoint]
