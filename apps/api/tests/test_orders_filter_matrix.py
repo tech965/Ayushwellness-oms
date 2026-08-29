@@ -243,6 +243,81 @@ async def test_shipment_status_pending_only_matches_orders_with_a_pending_shipme
         assert delivered.json()["data"] == []
 
 
+async def test_shipment_status_pending_does_not_imply_payment_or_order_status_pending(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Direct reproduction of the live report: an order that is PAID and
+    CONFIRMED, but whose shipment hasn't progressed past PENDING yet
+    (no AWB/courier assigned), is a completely normal, valid real-world
+    state — Order Status, Payment Status, and Shipment Status are three
+    independent fields on independent tables (`Order.status`,
+    `Order.payment_status`, `Shipment.current_status`) and this filter
+    must never conflate them:
+
+    - `shipment_status=pending` MUST include this order (its shipment
+      really is pending).
+    - `payment_status=pending` MUST NOT include this order (it's paid).
+    - `status=pending` MUST NOT include this order (it's confirmed).
+    """
+    from app.repositories.order import OrderRepository
+
+    repo = OrderRepository(db_session)
+    order, _ = await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="paid-confirmed-shipment-pending",
+        order_number="OMS-AWL81350",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("649.00"),
+        status="confirmed",
+        payment_status="paid",
+    )
+    await db_session.commit()
+    await _add_shipment(
+        db_session, order_id=order.id, external_id="ship-awl81350", status="pending"
+    )
+
+    # A second, genuinely payment-pending order that must NOT leak into
+    # the shipment_status=pending result (different order entirely).
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="genuinely-payment-pending",
+        order_number="OMS-PAYPEND-2",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+        status="pending",
+        payment_status="pending",
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        by_shipment = await auth_client.get("/api/v1/orders", params={"shipment_status": "pending"})
+        shipment_matches = by_shipment.json()["data"]
+        assert [o["order_number"] for o in shipment_matches] == ["OMS-AWL81350"]
+        # Confirms the returned row's OTHER fields are exactly what the
+        # screenshot showed — Paid + Confirmed — proving the filter
+        # scoped strictly to Shipment Status and touched nothing else.
+        assert shipment_matches[0]["payment_status"] == "paid"
+        assert shipment_matches[0]["status"] == "confirmed"
+
+        by_payment_status = await auth_client.get(
+            "/api/v1/orders", params={"payment_status": "pending"}
+        )
+        assert [o["order_number"] for o in by_payment_status.json()["data"]] == ["OMS-PAYPEND-2"]
+
+        by_order_status = await auth_client.get("/api/v1/orders", params={"status": "pending"})
+        assert [o["order_number"] for o in by_order_status.json()["data"]] == ["OMS-PAYPEND-2"]
+
+        # Combined: Payment Status = Paid AND Shipment Status = Pending —
+        # an explicit AND, still isolating exactly the one matching order.
+        combined = await auth_client.get(
+            "/api/v1/orders",
+            params={"payment_status": "paid", "shipment_status": "pending"},
+        )
+        assert [o["order_number"] for o in combined.json()["data"]] == ["OMS-AWL81350"]
+
+
 # --- 8. Courier filter ------------------------------------------------------
 
 
