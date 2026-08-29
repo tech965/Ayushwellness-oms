@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -14,10 +15,20 @@ from app.db.session import AsyncSessionLocal, dispose_engine_sync
 from app.integrations.registry import get_adapter
 from app.models.enums import SyncType
 from app.models.integration import Integration, IntegrationCode
+from app.repositories.sync_job import SyncJobRepository
 from app.services.sync_service import SyncService
 from app.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
+
+# A RUNNING job's `updated_at` is bumped by every `record_progress`/
+# `record_error` call -- a real heartbeat, not just elapsed wall-clock
+# time, so a genuinely slow multi-hour crawl (a large Shiprocket
+# historical backlog) is never mistaken for a dead one; real production
+# evidence this engagement showed pages updating every 1-2 seconds during
+# normal operation. 20 minutes of silence comfortably exceeds even the
+# longest observed per-page pause (a 60s rate-limit backoff).
+STALE_SYNC_JOB_THRESHOLD = timedelta(minutes=20)
 
 # Which entity types each provider's adapter actually supports syncing
 # generically (matches what `ShopifyAdapter`/`ShiprocketAdapter.fetch()`
@@ -128,3 +139,47 @@ def run_scheduled_sync_task() -> None:
         logger.info("scheduled_sync_enqueued", jobs=enqueued)
     finally:
         dispose_engine_sync()
+
+
+async def _reap_stale_sync_jobs() -> list[str]:
+    reaped: list[str] = []
+    async with AsyncSessionLocal() as session:
+        cutoff = datetime.now(UTC) - STALE_SYNC_JOB_THRESHOLD
+        stale = await SyncJobRepository(session).get_stale_running(updated_before=cutoff)
+        sync_service = SyncService(session)
+        for job in stale:
+            await sync_service.record_error(
+                job.id,
+                entity_type=job.entity_type,
+                error_type="orphaned",
+                error_message=(
+                    "Sync job marked failed by the stale-job reaper: no progress for "
+                    f"over {int(STALE_SYNC_JOB_THRESHOLD.total_seconds() // 60)} minutes "
+                    "(the worker process most likely restarted mid-sync, e.g. during a "
+                    "deploy, and never got to mark this job complete)."
+                ),
+            )
+            await sync_service.complete_sync(job.id, success=False)
+            reaped.append(str(job.id))
+    return reaped
+
+
+@celery_app.task(name="sync.reap_stale")
+def reap_stale_sync_jobs_task() -> list[str]:
+    """Scheduled backstop (Celery Beat, see `beat_schedule` in
+    `app.workers.celery_app`) for a `SyncJob` orphaned by its worker
+    process dying mid-sync — real production incident: 8 separate
+    `shipments` sync jobs were stuck `RUNNING`, several for 18+ hours,
+    after worker restarts (deploys) killed them mid-flight with no way
+    for anything to ever mark them complete. Combined with `start_sync`'s
+    new one-active-job-per-entity-type guard, this both prevents new
+    duplicates and cleans up whatever's already stuck.
+    """
+    logger.info("reap_stale_sync_jobs_started")
+    try:
+        reaped = asyncio.run(_reap_stale_sync_jobs())
+    finally:
+        dispose_engine_sync()
+    if reaped:
+        logger.warning("stale_sync_jobs_reaped", count=len(reaped), job_ids=reaped)
+    return reaped

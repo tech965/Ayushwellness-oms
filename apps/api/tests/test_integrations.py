@@ -356,3 +356,167 @@ async def test_get_integration_not_found_returns_404(
     ) as client:
         response = await client.get(f"/api/v1/integrations/{uuid.uuid4()}")
         assert response.status_code == 404
+
+
+# --- Real production incident: 8 separate `shipments` SyncJobs ended up
+# stuck simultaneously RUNNING, several orphaned for 18+ hours after a
+# worker restart killed them mid-flight -- nothing prevented the
+# scheduler/manual triggers from starting a second concurrent sync for
+# the same (integration, entity_type), and nothing ever marked an
+# orphaned job as failed once its process died. ------------------------
+
+
+async def test_start_sync_refuses_a_second_concurrent_job_for_the_same_entity_type(
+    db_session: AsyncSession,
+) -> None:
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+    assert job1.status == "queued"
+
+    from app.core.exceptions import ConflictError
+
+    with pytest.raises(ConflictError):
+        await service.start_sync(
+            integration_id=integration.id, sync_type="incremental", entity_type="orders"
+        )
+
+
+async def test_start_sync_allows_a_new_job_once_the_previous_one_is_complete(
+    db_session: AsyncSession,
+) -> None:
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+    await service.complete_sync(job1.id, success=True)
+
+    job2 = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+    assert job2.id != job1.id
+    assert job2.status == "queued"
+
+
+async def test_start_sync_allows_concurrent_jobs_for_different_entity_types(
+    db_session: AsyncSession,
+) -> None:
+    """The guard is scoped to (integration, entity_type) -- a real
+    multi-entity integration (Shopify: orders/customers/products) must
+    still be able to sync several entity types at once.
+    """
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    orders_job = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+    customers_job = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="customers"
+    )
+    assert orders_job.id != customers_job.id
+
+
+async def test_run_sync_returns_the_existing_active_job_instead_of_erroring(
+    db_session: AsyncSession,
+) -> None:
+    """The scheduler calls `run_sync` every 10 minutes -- it must never
+    raise just because a previous cycle's job for this entity type is
+    still active; it should treat that as "nothing to do."
+    """
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.start_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+
+    result = await service.run_sync(
+        integration_id=integration.id, sync_type="incremental", entity_type="orders"
+    )
+    assert result.id == job1.id
+    assert result.status == "queued"  # untouched -- no second execution attempted
+
+
+async def test_reap_stale_sync_jobs_fails_a_job_with_no_recent_progress(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.tasks import sync_tasks
+
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+    job = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="shipments"
+    )
+    await service.mark_running(job.id)
+
+    # Simulate a job whose worker process died a long time ago: its
+    # updated_at (the real heartbeat -- bumped by every record_progress/
+    # record_error call) hasn't moved since well past the threshold.
+    from app.repositories.sync_job import SyncJobRepository
+
+    stale_time = datetime.now(UTC) - timedelta(minutes=30)
+    await SyncJobRepository(db_session).update(job, updated_at=stale_time)
+    await db_session.commit()
+
+    monkeypatch.setattr(
+        sync_tasks, "AsyncSessionLocal", lambda: db_session_cm_for_reaper(db_session)
+    )
+
+    reaped = await sync_tasks._reap_stale_sync_jobs()
+
+    assert str(job.id) in reaped
+    refreshed = await service.sync_jobs.get_by_id(job.id)
+    assert refreshed.status == "failed"
+
+
+async def test_reap_stale_sync_jobs_leaves_a_recently_updated_job_alone(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely slow-but-alive job (e.g. a large historical crawl,
+    confirmed live this engagement to take well over an hour) must never
+    be reaped just because it's been running a long time -- only the
+    absence of *recent* progress matters.
+    """
+    from app.tasks import sync_tasks
+
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+    job = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="shipments"
+    )
+    await service.mark_running(job.id)
+    await service.record_progress(job.id, received=50, updated=50)  # bumps updated_at to "now"
+
+    monkeypatch.setattr(
+        sync_tasks, "AsyncSessionLocal", lambda: db_session_cm_for_reaper(db_session)
+    )
+
+    reaped = await sync_tasks._reap_stale_sync_jobs()
+
+    assert str(job.id) not in reaped
+    refreshed = await service.sync_jobs.get_by_id(job.id)
+    assert refreshed.status == "running"
+
+
+class db_session_cm_for_reaper:
+    """Same wrapper as `test_scheduled_sync.py`'s `db_session_cm` --
+    duplicated locally rather than imported to avoid coupling two
+    unrelated test modules together over a small test-only helper.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> AsyncSession:
+        return self._session
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        pass

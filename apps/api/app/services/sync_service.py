@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import IntegrationError, NotFoundError
+from app.core.exceptions import ConflictError, IntegrationError, NotFoundError
 from app.core.logging import get_logger
 from app.integrations.base import IntegrationAdapter
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS, UpsertHandler
@@ -55,6 +55,23 @@ class SyncService:
         integration = await self.integrations.get_by_id(integration_id)
         if integration is None:
             raise NotFoundError("Integration not found.")
+
+        existing = await self.sync_jobs.get_active_for_entity(
+            integration_id=integration.id, entity_type=entity_type
+        )
+        if existing is not None:
+            # Real production incident: nothing previously stopped the
+            # scheduler (every 10 minutes) and manual/retry triggers from
+            # all starting their own concurrent `shipments` sync -- 8 ended
+            # up simultaneously "running" at once, several orphaned for
+            # 18+ hours. One active job per (integration, entity_type) at
+            # a time; see `run_sync` for how the scheduler path treats
+            # this as "nothing to do" rather than an error.
+            raise ConflictError(
+                f"A {entity_type} sync is already {existing.status.value} for this "
+                "integration.",
+                details={"sync_job_id": str(existing.id), "status": existing.status.value},
+            )
 
         job = await self.sync_jobs.create(
             integration_id=integration.id,
@@ -419,10 +436,37 @@ class SyncService:
     ) -> SyncJob:
         """Convenience wrapper: create a new `SyncJob` and run it
         end-to-end in one call. Used by `app.tasks.retry_processing` (which
-        starts a fresh attempt rather than reusing the failed job's id) and
-        by tests that don't need the intermediate QUEUED state.
+        starts a fresh attempt rather than reusing the failed job's id),
+        the scheduled-sync backstop, and by tests that don't need the
+        intermediate QUEUED state.
+
+        A `ConflictError` from `start_sync` (a sync for this entity type
+        is already active) is treated as "nothing to do" here rather than
+        an error — the scheduler calling this every 10 minutes must never
+        pile up a second concurrent crawl on top of one already running;
+        it returns the already-active job untouched instead.
         """
-        job = await self.start_sync(
-            integration_id=integration_id, sync_type=sync_type, entity_type=entity_type
-        )
+        try:
+            job = await self.start_sync(
+                integration_id=integration_id, sync_type=sync_type, entity_type=entity_type
+            )
+        except ConflictError:
+            existing = await self.sync_jobs.get_active_for_entity(
+                integration_id=integration_id, entity_type=entity_type
+            )
+            if existing is None:
+                # Vanishingly rare race: the conflicting job finished
+                # between start_sync's check and this lookup -- safe to
+                # just try again rather than return None.
+                return await self.run_sync(
+                    integration_id=integration_id, sync_type=sync_type, entity_type=entity_type
+                )
+            logger.info(
+                "sync_run_skipped_already_active",
+                integration_id=str(integration_id),
+                entity_type=entity_type,
+                existing_sync_job_id=str(existing.id),
+                existing_status=existing.status.value,
+            )
+            return existing
         return await self.execute_sync(job.id)

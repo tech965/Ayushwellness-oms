@@ -126,5 +126,16 @@ celery_app.conf.update(
             "task": "webhooks.recover_stuck",
             "schedule": 300.0,
         },
+        # Real production incident: 8 separate `shipments` SyncJobs ended
+        # up stuck RUNNING (several for 18+ hours) after worker restarts
+        # killed them mid-flight, with nothing to ever mark them failed —
+        # see `app.tasks.sync_tasks.reap_stale_sync_jobs_task`'s docstring.
+        # Same cadence as the sync backstop above; the reaper's own
+        # 20-minute staleness threshold is what actually bounds how long
+        # an orphaned job can sit before cleanup, not this interval.
+        "reap-stale-sync-jobs": {
+            "task": "sync.reap_stale",
+            "schedule": 600.0,
+        },
     },
 )
