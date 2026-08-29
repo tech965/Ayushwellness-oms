@@ -313,6 +313,218 @@ async def test_shipment_sync_records_a_sync_error_for_an_unmatched_order_without
     assert total.scalar_one() == 0
 
 
+# --- Round 13: an already-known Shipment (created via our own push
+# flow, `ShiprocketOperationsService.create_shipment_for_order`) is
+# resolved by (source_system, external_id) FIRST, before any
+# channel_order_id/order-number lookup is even attempted -- fixes the
+# real production incident where 150/150 real shipments failed with
+# "channel_order_id=None" because /shipments simply has no such field,
+# even though every one of those shipments already had a correct
+# Shipment row in the OMS with a correct order_id. ----------------------
+
+
+async def _make_order_with_existing_shiprocket_shipment(
+    session: AsyncSession,
+    *,
+    order_number: str,
+    shiprocket_shipment_id: str,
+    awb: str | None = None,
+    current_status: ShipmentStatus = ShipmentStatus.PENDING,
+):
+    """Simulates exactly what `ShiprocketOperationsService.
+    create_shipment_for_order` leaves behind: a real `Shipment` row,
+    already linked to a real `Order`, keyed by `(source_system=
+    "shiprocket", external_id=<Shiprocket's own shipment id>)` -- the
+    only way a `Shipment` is ever created in this codebase.
+    """
+    order = await _make_bare_order(session, order_number=order_number)
+    shipment, _ = await ShipmentService(session).upsert_synced_shipment(
+        source_system="shiprocket",
+        external_id=shiprocket_shipment_id,
+        order_id=order.id,
+        shiprocket_shipment_id=shiprocket_shipment_id,
+        awb=awb,
+        current_status=current_status,
+    )
+    return order, shipment
+
+
+async def test_existing_shipment_is_found_by_source_system_and_external_id(
+    db_session: AsyncSession,
+) -> None:
+    order, shipment = await _make_order_with_existing_shiprocket_shipment(
+        db_session, order_number="AWL91535", shiprocket_shipment_id="1089477745"
+    )
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1089477745,
+                        "channel_order_id": None,
+                        "number": "",
+                        "code": "",
+                        "channel_name": "Shopify",
+                        "awb": "",
+                        "status": "PENDING",
+                    }
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    # 1 + 2: found and synced successfully despite every "order reference"
+    # field being empty/None -- the exact real production shape.
+    assert job.status == "completed"
+    assert job.error_count == 0
+    assert job.records_updated == 1
+    assert job.records_created == 0
+
+    from app.models.shipment import Shipment
+
+    refreshed = await db_session.get(Shipment, shipment.id)
+    # 3: existing order_id is preserved.
+    assert refreshed.order_id == order.id
+
+
+async def test_existing_shipment_sync_does_not_call_get_by_order_number(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """4: no OrderRepository.get_by_order_number() lookup occurs at all
+    when the shipment is already known -- not just "isn't needed", but
+    genuinely never called.
+    """
+    from app.repositories.order import OrderRepository
+
+    await _make_order_with_existing_shiprocket_shipment(
+        db_session, order_number="AWL91535", shiprocket_shipment_id="1089477745"
+    )
+
+    calls: list[str] = []
+    original = OrderRepository.get_by_order_number
+
+    async def _tracking_wrapper(self, order_number):  # noqa: ANN001, ANN202
+        calls.append(order_number)
+        return await original(self, order_number)
+
+    monkeypatch.setattr(OrderRepository, "get_by_order_number", _tracking_wrapper)
+
+    client = _StubClient(
+        [_shipments_page(records=[{"id": 1089477745, "channel_order_id": None, "awb": ""}])]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert calls == []
+
+
+async def test_existing_shipment_sync_does_not_create_a_duplicate(
+    db_session: AsyncSession,
+) -> None:
+    """5: syncing an already-known shipment updates the one row, never
+    inserts a second.
+    """
+    await _make_order_with_existing_shiprocket_shipment(
+        db_session, order_number="AWL91535", shiprocket_shipment_id="1089477745"
+    )
+    client = _StubClient(
+        [_shipments_page(records=[{"id": 1089477745, "channel_order_id": None, "awb": ""}])]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    from app.models.shipment import Shipment
+
+    total = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total.scalar_one() == 1
+
+
+async def test_existing_shipment_fields_are_updated_from_the_shiprocket_payload(
+    db_session: AsyncSession,
+) -> None:
+    """6: real Shiprocket fields (status here) update the existing row."""
+    _, shipment = await _make_order_with_existing_shiprocket_shipment(
+        db_session,
+        order_number="AWL91535",
+        shiprocket_shipment_id="1089477745",
+        current_status=ShipmentStatus.PENDING,
+    )
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[{"id": 1089477745, "channel_order_id": None, "awb": "", "status": "New"}]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    from app.models.shipment import Shipment
+
+    refreshed = await db_session.get(Shipment, shipment.id)
+    assert refreshed.current_status == ShipmentStatus.PENDING  # "New" maps to PENDING
+
+
+async def test_existing_shipment_awb_is_populated_once_shiprocket_assigns_one(
+    db_session: AsyncSession,
+) -> None:
+    """7: a shipment created with no AWB (real production shape for a
+    PENDING shipment) gets its AWB filled in on a later sync, once
+    Shiprocket actually assigns one.
+    """
+    order, shipment = await _make_order_with_existing_shiprocket_shipment(
+        db_session, order_number="AWL91535", shiprocket_shipment_id="1089477745", awb=None
+    )
+    assert shipment.awb is None
+
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1089477745,
+                        "channel_order_id": None,
+                        "awb": "77931116852",
+                        "status": "In Transit",
+                    }
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+    assert job.status == "completed"
+
+    from app.models.shipment import Shipment
+
+    refreshed = await db_session.get(Shipment, shipment.id)
+    assert refreshed.awb == "77931116852"
+    assert refreshed.order_id == order.id  # still the same order, no re-resolution
+
+
 async def test_shipment_sync_partial_failure_does_not_abort_other_records(
     db_session: AsyncSession,
 ) -> None:

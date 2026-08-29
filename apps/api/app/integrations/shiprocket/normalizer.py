@@ -121,15 +121,21 @@ class ShiprocketShipmentNormalizer:
     the service), since matching to an OMS `Order` is provider-specific
     logic that doesn't belong inside a generic shipment upsert.
 
-    Field names: `channel_order_id` is confirmed live (identical field,
-    same "merchant's own order number" meaning, seen on the NDR listing
-    — see `ShiprocketNDRNormalizer`). `awb`/`status`/`courier_name` are
-    Shiprocket's commonly documented `/shipments` field names, not yet
-    re-verified against a live account for this specific endpoint (NDR
-    was; this wasn't) — see docs/integrations/shiprocket.md. Read
-    defensively with the same alternate-field-name fallbacks already
-    established elsewhere in this file, so a real but differently-shaped
-    response degrades to a missing field rather than a crash.
+    Field names, confirmed against a real production `/shipments`
+    response: `id` is the Shiprocket shipment id (`external_id` below —
+    this is what `entity_sync._upsert_shipment` uses to find an
+    already-known `Shipment` first, before ever attempting an order
+    lookup). `awb`/`status` are confirmed present too, though `awb` is
+    empty (`""`) until a shipment leaves `PENDING`.
+
+    `channel_order_id` does **not** exist on this endpoint at all —
+    unlike the NDR listing, which really does have it (see
+    `ShiprocketNDRNormalizer`). This always reads as `None` here; that's
+    expected, not a bug, and is exactly why `_upsert_shipment` no longer
+    depends on it for a shipment this OMS already has a `Shipment` row
+    for. No reliable replacement field for a genuinely *new* shipment
+    (one this OMS has never created) has been confirmed yet — real data
+    for a `PENDING` shipment shows `number`/`code` both empty too.
     """
 
     def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
 from app.repositories.order import OrderRepository
+from app.repositories.shipment import ShipmentRepository
 from app.services.customer_service import CustomerService
 from app.services.ndr_service import NDRService
 from app.services.order_service import OrderService
@@ -44,23 +45,51 @@ async def _upsert_ndr(session: AsyncSession, data: dict[str, Any]) -> tuple[Any,
 
 
 async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple[Any, bool]:
-    """A Shiprocket shipment has no OMS order id of its own — `Shipment.
-    order_id` is a required FK, so one must be resolved (never invented)
-    before `ShipmentService.upsert_synced_shipment` can run at all.
-    `channel_order_id` (the merchant's own order number, the same value
-    Shiprocket reports on NDR records too) is the only field Shiprocket
-    returns that a real, already-existing OMS `Order` can be looked up
-    by — `OrderRepository.get_by_order_number` is exactly that existing
-    lookup, not a new one invented for this.
+    """Round 13 fix: a Shiprocket shipment this OMS already knows about
+    (every one ever created went through `ShiprocketOperationsService.
+    create_shipment_for_order` — the only code path that creates a
+    `Shipment` row) already has a correct `order_id`, set the day it was
+    created, from the real OMS order it was created *for* — never
+    derived from anything Shiprocket returns. Its `(source_system,
+    external_id)` — `external_id` being that shipment's own Shiprocket
+    `id`, confirmed live to be exactly what `ShiprocketShipmentNormalizer`
+    already reads (`raw.get("id")`) — is the reliable, pre-existing
+    identity, so it's checked *first*, before any order lookup is even
+    attempted. Real production evidence for why this matters: 150/150
+    real shipments failed with "channel_order_id=None" because
+    `/shipments` simply doesn't have a `channel_order_id` field at all —
+    but every one of those shipments' `Shipment` rows already existed in
+    this OMS with a correct `order_id`, and this path never got to
+    reuse it.
 
-    A shipment whose `channel_order_id` doesn't resolve to a real OMS
-    order raises `NotFoundError`, exactly like `NDRService.
+    Only a shipment with NO existing `Shipment` row falls through to the
+    order-lookup path below — genuinely new to this OMS, where an
+    `order_id` must still be resolved (never invented) via
+    `channel_order_id`/`OrderRepository.get_by_order_number`, exactly as
+    before. A shipment that reaches that path and still can't be
+    resolved raises `NotFoundError`, exactly like `NDRService.
     upsert_synced_ndr` already does for an unmatched AWB (spec §16, "do
     not invent NDR/shipment data") — `SyncService._run_entity_sync`'s
     existing per-record try/except records it as a `SyncError` and moves
     on to the next shipment; the job still lands PARTIAL, not FAILED,
     and nothing fabricated ever reaches the database.
     """
+    source_system = data.get("source_system")
+    external_id = data.get("external_id")
+    existing = (
+        await ShipmentRepository(session).get_by_source_external_id(
+            source_system=source_system, external_id=external_id
+        )
+        if source_system and external_id
+        else None
+    )
+
+    if existing is not None:
+        data.pop("channel_order_id", None)  # not needed -- order_id is already known
+        return await ShipmentService(session).upsert_synced_shipment(
+            order_id=existing.order_id, **data
+        )
+
     channel_order_id = data.pop("channel_order_id", None)
     order = (
         await OrderRepository(session).get_by_order_number(channel_order_id)
