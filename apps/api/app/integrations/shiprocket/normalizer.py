@@ -58,7 +58,15 @@ def normalize_shipment_status(raw_status: str | None) -> ShipmentStatus | None:
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+        # Confirmed live on GET /orders/show/{id}'s `created_at` (e.g.
+        # "21 Dec 2025 12:49 PM") -- a different format than the other
+        # Shiprocket timestamps above, which come from other endpoints.
+        "%d %b %Y %I:%M %p",
+    ):
         try:
             return datetime.strptime(value, fmt)
         except ValueError:
@@ -117,10 +125,13 @@ class ShiprocketShipmentNormalizer:
     """One raw item from `GET /shipments` -> the kwargs
     `app.integrations.entity_sync._upsert_shipment` expects — a superset
     of what `ShipmentService.upsert_synced_shipment` takes, plus
-    `channel_order_id`/`shiprocket_order_id` (both popped by the handler,
-    never passed through to the service), since matching to an OMS
-    `Order` is provider-specific logic that doesn't belong inside a
-    generic shipment upsert.
+    `channel_order_id`/`shiprocket_order_id`/`shiprocket_created_at` (all
+    three popped by the handler, never passed through to the service),
+    since matching to an OMS `Order` is provider-specific logic that
+    doesn't belong inside a generic shipment upsert. `shiprocket_created_at`
+    exists purely so the handler can skip an expensive live order-detail
+    lookup for a shipment old enough to predate the OMS's own order-sync
+    coverage entirely — a performance boundary, not a matching decision.
 
     Field names, confirmed against a real production `/shipments`
     response: `id` is the Shiprocket shipment id (`external_id` below —
@@ -154,6 +165,7 @@ class ShiprocketShipmentNormalizer:
             "shiprocket_order_id": (
                 str(raw["order_id"]) if raw.get("order_id") is not None else None
             ),
+            "shiprocket_created_at": _parse_datetime(raw.get("created_at")),
             "awb": raw.get("awb") or raw.get("awb_code"),
             "current_status": normalize_shipment_status(raw_status),
             "raw_external_payload": raw,

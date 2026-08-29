@@ -12,6 +12,7 @@ which is also why this dependency only points one direction).
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,15 +95,30 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
     tested and confirmed live to be unreliable (`None` for at least one
     real OMS-created order) — deliberately not used.
 
-    A shipment that still can't be resolved after both steps raises
-    `NotFoundError`, exactly like `NDRService.upsert_synced_ndr` already
-    does for an unmatched AWB (spec §16, "do not invent NDR/shipment
-    data") — `SyncService._run_entity_sync`'s existing per-record
-    try/except records it as a `SyncError` and moves on; the job still
-    lands PARTIAL, not FAILED, and nothing fabricated ever reaches the
+    Round 15 fix: that `/orders/show` call is only skipped as a
+    performance boundary — never a matching decision — when
+    `shiprocket_created_at` is confirmed older than this OMS's earliest
+    ever synced `Order.order_datetime`. Confirmed live this engagement: a
+    shipment that old can never resolve to a real OMS order (its order
+    predates this OMS's Shopify sync coverage entirely), so the live call
+    is pure waste — and at real account scale (thousands of historical
+    shipments), it was also the direct cause of hitting Shiprocket's rate
+    limit on every scheduled sync. `None` on either side of the
+    comparison (unparseable timestamp, or no orders synced yet) always
+    means "don't skip" — the boundary can only ever narrow which records
+    get an extra check, never cause one to be silently skipped when it
+    could have matched.
+
+    A shipment that still can't be resolved raises `NotFoundError`,
+    exactly like `NDRService.upsert_synced_ndr` already does for an
+    unmatched AWB (spec §16, "do not invent NDR/shipment data") —
+    `SyncService._run_entity_sync`'s existing per-record try/except
+    records it as a `SyncError` and moves on; the job still lands
+    PARTIAL, not FAILED, and nothing fabricated ever reaches the
     database. Every resolution attempt is logged (see
-    `shiprocket_shipment_order_resolution` below) so a failure's exact
-    reason is always visible, never silent.
+    `shiprocket_shipment_order_resolution` below), including whatever
+    `channel_order_id` was actually found even when it didn't match, so a
+    failure's exact reason is always visible, never silent.
     """
     source_system = data.get("source_system")
     external_id = data.get("external_id")
@@ -117,33 +133,61 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
     if existing is not None:
         data.pop("channel_order_id", None)  # not needed -- order_id is already known
         data.pop("shiprocket_order_id", None)
+        data.pop("shiprocket_created_at", None)
         return await ShipmentService(session).upsert_synced_shipment(
             order_id=existing.order_id, **data
         )
 
     channel_order_id = data.pop("channel_order_id", None)
     shiprocket_order_id = data.pop("shiprocket_order_id", None)
+    shiprocket_created_at = data.pop("shiprocket_created_at", None)
 
     order = await _resolve_order_by_channel_order_id(session, channel_order_id)
     match_strategy = "shipments_channel_order_id" if order is not None else None
+    skip_reason = None
 
     if order is None and shiprocket_order_id:
-        adapter = get_adapter(IntegrationCode.SHIPROCKET)
-        get_order = getattr(adapter, "get_order", None)
-        if get_order is not None:
-            try:
-                order_detail = await get_order(shiprocket_order_id)
-            except IntegrationError:
-                order_detail = None
-            body = (
-                order_detail.get("data") if isinstance(order_detail, dict) else None
-            ) or order_detail
-            raw_resolved = body.get("channel_order_id") if isinstance(body, dict) else None
-            resolved_channel_order_id = str(raw_resolved) if raw_resolved is not None else None
-            order = await _resolve_order_by_channel_order_id(session, resolved_channel_order_id)
-            if order is not None:
-                match_strategy = "orders_show_channel_order_id"
-                channel_order_id = resolved_channel_order_id
+        earliest_order_datetime = await OrderRepository(session).get_earliest_order_datetime()
+        # `_parse_datetime` (Shiprocket's side) returns a naive datetime;
+        # `Order.order_datetime` (via `AwareDateTime`) always loads
+        # tz-aware. Comparing them directly raises TypeError -- caught by
+        # `_run_entity_sync`'s per-record try/except, which would
+        # silently misreport a crash as an ordinary "no match" SyncError.
+        # Normalizing to UTC-aware here only, not in the shared
+        # `_parse_datetime` helper, keeps this fix local to this one
+        # comparison rather than changing behavior for every other caller
+        # of that helper (NDR/tracking timestamps).
+        comparable_created_at = shiprocket_created_at
+        if comparable_created_at is not None and comparable_created_at.tzinfo is None:
+            comparable_created_at = comparable_created_at.replace(tzinfo=UTC)
+        predates_oms_coverage = bool(
+            comparable_created_at and earliest_order_datetime
+            and comparable_created_at < earliest_order_datetime
+        )
+        if predates_oms_coverage:
+            skip_reason = "shiprocket_created_at predates earliest OMS order_datetime"
+        else:
+            adapter = get_adapter(IntegrationCode.SHIPROCKET)
+            get_order = getattr(adapter, "get_order", None)
+            if get_order is not None:
+                try:
+                    order_detail = await get_order(shiprocket_order_id)
+                except IntegrationError:
+                    order_detail = None
+                body = (
+                    order_detail.get("data") if isinstance(order_detail, dict) else None
+                ) or order_detail
+                raw_resolved = body.get("channel_order_id") if isinstance(body, dict) else None
+                fetched_channel_order_id = (
+                    str(raw_resolved) if raw_resolved is not None else None
+                )
+                if fetched_channel_order_id is not None:
+                    channel_order_id = fetched_channel_order_id
+                order = await _resolve_order_by_channel_order_id(
+                    session, fetched_channel_order_id
+                )
+                if order is not None:
+                    match_strategy = "orders_show_channel_order_id"
 
     logger.info(
         "shiprocket_shipment_order_resolution",
@@ -152,6 +196,7 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
         channel_order_id=channel_order_id,
         matched=order is not None,
         match_strategy=match_strategy,
+        skip_reason=skip_reason,
         matched_order_id=str(order.id) if order is not None else None,
     )
 

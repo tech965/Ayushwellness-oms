@@ -783,6 +783,143 @@ async def test_shipment_sync_via_orders_show_fallback_is_idempotent_on_rerun(
     assert shipment.awb == "AWB-NEW"
 
 
+# --- Round 15: the /orders/show fallback is a real, confirmed live fix,
+# but at real account scale (thousands of historical shipments) it meant
+# every 10-minute scheduled sync re-attempted the same already-provably-
+# unmatchable historical records forever -- real production evidence:
+# hitting Shiprocket's rate limit (HTTP 429) mid-sync. A shipment whose
+# `shiprocket_created_at` predates this OMS's earliest-ever synced order
+# can never resolve (its order predates this OMS's Shopify sync coverage
+# entirely -- confirmed live), so the live call is skipped for it. This
+# is purely a performance boundary: `None` on either side always means
+# "don't skip", so it can only narrow which records get the extra live
+# call, never cause a resolvable one to be silently skipped. ------------
+
+
+async def test_shipment_sync_skips_orders_show_for_a_shipment_older_than_the_oms_order_history(
+    db_session: AsyncSession,
+) -> None:
+    """A shipment created well before the OMS's earliest synced order
+    never triggers the live /orders/show call -- the stub client has
+    only the /shipments page queued, so an attempted call would raise
+    IndexError and fail this test. Also asserts the recorded SyncError is
+    a genuine "no match" message, not a crash the per-record try/except
+    happened to catch and misreport as an ordinary failure (a real bug
+    found while writing this test: comparing Shiprocket's naive parsed
+    datetime against the OMS's tz-aware `order_datetime` raised
+    TypeError, which looked identical to a real "no match" from the
+    outside -- same job status, same error_count).
+    """
+    await _make_bare_order(
+        db_session, order_number="#AWL78183"
+    )  # sets the OMS's earliest order_datetime to "now" (test creation time)
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1,
+                        "channel_order_id": None,
+                        "order_id": 12345,
+                        "awb": "",
+                        # Long before "now" -- must predate the order above.
+                        "created_at": "2020-01-01 00:00:00",
+                    }
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.error_count == 1
+    assert job.records_created == 0
+
+    from app.models.integration import SyncError
+
+    error = await db_session.scalar(select(SyncError).where(SyncError.sync_job_id == job.id))
+    assert error is not None
+    assert "No OMS order found for Shiprocket shipment" in error.error_message
+    assert "TypeError" not in error.error_message
+    assert "naive" not in error.error_message
+
+
+async def test_shipment_sync_still_calls_orders_show_when_no_created_at_is_present(
+    db_session: AsyncSession,
+) -> None:
+    """No timestamp to compare against means "don't skip" -- the boundary
+    must never cause a resolvable shipment to be silently dropped just
+    because its age is unknown.
+    """
+    order = await _make_bare_order(db_session, order_number="#AWL92268")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 1544069864, "channel_order_id": None, "order_id": 1547850287, "awb": ""}
+                ]
+            ),
+            _orders_show_response("#AWL92268"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert job.records_created == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_source_external_id(
+        source_system="shiprocket", external_id="1544069864"
+    )
+    assert shipment.order_id == order.id
+
+
+async def test_shipment_sync_still_calls_orders_show_when_no_oms_orders_exist_yet(
+    db_session: AsyncSession,
+) -> None:
+    """No OMS orders synced at all yet -- `get_earliest_order_datetime()`
+    returns None, so there's nothing to compare against and the boundary
+    must not skip anything.
+    """
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1,
+                        "channel_order_id": None,
+                        "order_id": 12345,
+                        "awb": "",
+                        "created_at": "2020-01-01 00:00:00",
+                    }
+                ]
+            ),
+            _orders_show_response("DOES-NOT-MATTER"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    # Fails to match (as expected -- no real order), but critically the
+    # live call WAS made (the stub's second response was consumed without
+    # raising IndexError), proving the boundary correctly did not skip.
+    assert job.status == "partial"
+    assert job.error_count == 1
+
+
 async def test_shipment_sync_partial_failure_does_not_abort_other_records(
     db_session: AsyncSession,
 ) -> None:

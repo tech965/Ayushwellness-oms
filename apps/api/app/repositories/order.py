@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.models.customer import Customer
@@ -19,6 +19,19 @@ class OrderRepository(BaseRepository[Order]):
     async def get_by_order_number(self, order_number: str) -> Order | None:
         stmt = select(Order).where(Order.order_number == order_number)
         result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_earliest_order_datetime(self) -> datetime | None:
+        """The oldest `order_datetime` this OMS has ever synced — used by
+        `entity_sync._upsert_shipment` to skip an expensive live
+        Shiprocket order-detail lookup for a shipment that predates the
+        OMS's own order-sync coverage entirely (confirmed live this
+        engagement: such a shipment can never resolve to a real OMS
+        `Order`, no matter what Shiprocket returns). Purely a performance
+        boundary, never a matching decision — `None` (no orders synced
+        yet) means "don't skip anything."
+        """
+        result = await self.session.execute(select(func.min(Order.order_datetime)))
         return result.scalar_one_or_none()
 
     async def get_by_id_with_items(self, id_: uuid.UUID) -> Order | None:
