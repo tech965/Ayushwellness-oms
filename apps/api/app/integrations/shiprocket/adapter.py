@@ -10,7 +10,7 @@ lives here — that's `SyncService`/`WebhookService`, reused unchanged.
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.core.exceptions import IntegrationError
@@ -24,9 +24,50 @@ from app.integrations.shiprocket.normalizer import (
     ORDER_PUSH_NORMALIZER,
     SHIPMENT_NORMALIZER,
 )
+from app.integrations.shiprocket.normalizer import _parse_datetime as _parse_shiprocket_datetime
 from app.models.integration import IntegrationCode
 
 logger = get_logger(__name__)
+
+# Newest-first ordering hints for the two list endpoints. Shiprocket's
+# external list API accepts `sort`/`sort_by` on most versions, but it has
+# never been verified live for this account (see the module history), so
+# `fetch_incremental` below only *acts* on the early-stop when the page it
+# gets back is actually ordered newest-first — if Shiprocket ignores these
+# params the run simply degrades to a bounded full pass (the 8-minute
+# `SyncService` time budget + the resumable `sync_cursors` cursor), never
+# to silently missing a record.
+_NEWEST_FIRST_PARAMS: dict[str, Any] = {"sort": "desc", "sort_by": "created_at"}
+
+# Per-record "when was this created" keys, by entity type — used only to
+# decide whether a newest-first page is already entirely behind the last
+# successful sync boundary.
+_INCREMENTAL_TS_KEYS: dict[str, tuple[str, ...]] = {
+    "shipments": ("created_at",),
+    "ndr": ("ndr_raised_at", "created_at", "ndr_raised_date"),
+}
+
+# The early-stop only triggers once a whole page is older than
+# `since - this margin`. Shiprocket record timestamps parse naive (dashboard
+# local time) while `since` is UTC; a generous margin means clock/timezone
+# skew can only ever make the crawl page one or two extra (cheap) pages, never
+# skip a genuinely new record.
+_INCREMENTAL_STOP_MARGIN = timedelta(days=1)
+
+
+def _record_created_at(entity_type: str, raw: dict[str, Any]) -> datetime | None:
+    for key in _INCREMENTAL_TS_KEYS.get(entity_type, ("created_at",)):
+        parsed = _parse_shiprocket_datetime(raw.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _is_non_increasing(values: list[datetime]) -> bool:
+    """True if `values` is sorted newest-first (each item >= the next) — i.e.
+    Shiprocket honoured the `_NEWEST_FIRST_PARAMS` sort request.
+    """
+    return all(earlier >= later for earlier, later in zip(values, values[1:], strict=False))
 
 # Round 10 diagnostic (temporary, until a real /shipments payload has
 # been confirmed and this logging is no longer needed): 150/150 real
@@ -270,6 +311,16 @@ class ShiprocketAdapter(IntegrationAdapter):
     async def fetch(
         self, entity_type: str, *, cursor: str | None = None, limit: int = 50
     ) -> FetchPage:
+        return await self._fetch_list(entity_type, cursor=cursor, limit=limit, extra_params=None)
+
+    async def _fetch_list(
+        self,
+        entity_type: str,
+        *,
+        cursor: str | None,
+        limit: int,
+        extra_params: dict[str, Any] | None,
+    ) -> FetchPage:
         route = self._FETCH_ROUTES.get(entity_type)
         if route is None:
             raise IntegrationError(
@@ -281,10 +332,11 @@ class ShiprocketAdapter(IntegrationAdapter):
         path, node_keys = route
         page_number = int(cursor) if cursor else 1
         client = self._get_client()
+        params: dict[str, Any] = {"page": page_number, "per_page": limit}
+        if extra_params:
+            params.update(extra_params)
         try:
-            data = await client.request(
-                "GET", path, params={"page": page_number, "per_page": limit}
-            )
+            data = await client.request("GET", path, params=params)
         except ShiprocketApiError as exc:
             raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
 
@@ -312,12 +364,46 @@ class ShiprocketAdapter(IntegrationAdapter):
     async def fetch_incremental(
         self, entity_type: str, *, since: datetime, cursor: str | None = None, limit: int = 50
     ) -> FetchPage:
-        # Neither Shiprocket list endpoint this adapter supports (NDR,
-        # shipments) has a documented "changed since" filter — incremental
-        # sync degrades to a full pull, same as a full sync. Re-verify
-        # against a live account; until then this is intentionally
-        # conservative rather than silently missing updates.
-        return await self.fetch(entity_type, cursor=cursor, limit=limit)
+        """Incremental pull for `shipments`/`ndr`.
+
+        Neither endpoint has a trustworthy server-side "changed since"
+        filter, so instead of re-crawling the entire (multi-thousand
+        record) list from page 1 every scheduled run — the behaviour that
+        starved the Celery worker and stopped Shopify orders syncing — this
+        asks Shiprocket for newest-first order and stops as soon as it
+        reaches a page that is *entirely* older than the last successful
+        sync boundary (`since`), minus a generous safety margin.
+
+        The stop is only taken when the page genuinely came back ordered
+        newest-first (`_is_non_increasing`). If Shiprocket ignores the sort
+        request, or a page's timestamps don't parse, this returns the page
+        unchanged and `SyncService._run_entity_sync` keeps paging under its
+        8-minute time budget with a resumable cursor — i.e. it degrades to
+        a bounded full pass, never to missing records.
+        """
+        page = await self._fetch_list(
+            entity_type, cursor=cursor, limit=limit, extra_params=_NEWEST_FIRST_PARAMS
+        )
+        if not page.nodes:
+            return page
+
+        stamps = [_record_created_at(entity_type, node) for node in page.nodes]
+        known = [s for s in stamps if s is not None]
+        if not known or not _is_non_increasing(known):
+            return page
+
+        since_naive = since.replace(tzinfo=None) if since.tzinfo is not None else since
+        cutoff = since_naive - _INCREMENTAL_STOP_MARGIN
+        if all(stamp < cutoff for stamp in known):
+            logger.info(
+                "shiprocket_incremental_early_stop",
+                entity_type=entity_type,
+                page=cursor or "1",
+                since=since.isoformat(),
+                newest_on_page=max(known).isoformat(),
+            )
+            return FetchPage(nodes=page.nodes, next_cursor=None, has_more=False)
+        return page
 
     async def process_webhook(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         # No webhook contract implemented — see docs/integrations/shiprocket.md.

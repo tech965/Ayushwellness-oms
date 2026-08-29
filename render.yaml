@@ -68,16 +68,29 @@ services:
     # backstop found missing during a live Shopify-vs-OMS reconciliation
     # (no webhooks were registered and no schedule existed, so orders
     # only ever reached the OMS via a manual "Trigger Sync" click).
-    # `-B` is only safe with exactly one worker process/instance (Celery
-    # docs: running it on more than one double/triple-schedules the same
-    # job) — if this service is ever scaled to multiple instances, move
-    # beat to its own single-instance service instead and drop `-B` here.
-    # NOTE: if the live Render service's Start Command was previously
-    # overridden in the dashboard (e.g. to add --concurrency=2), update
-    # that dashboard value directly — a dashboard override takes
-    # precedence over this file and won't pick up this change on its own.
+    # `-B` is only safe with exactly one worker INSTANCE (Celery docs:
+    # running it on more than one double/triple-schedules the same job) —
+    # multiple prefork child processes via --concurrency on ONE instance
+    # is fine. If this service is ever scaled to >1 instance, move beat to
+    # its own single-instance service instead and drop `-B` here.
+    #
+    # `-Q celery,shiprocket` + `--concurrency=3`: Shopify order/customer/
+    # product syncs run on the `celery` queue, Shiprocket's long
+    # `shipments`/`ndr` list crawls on the `shiprocket` queue (see
+    # `queue_for_entity`/`route_task` in app/workers/celery_app.py). With
+    # >=2 child processes draining both queues in parallel, a slow or
+    # stuck Shiprocket crawl can no longer occupy the only worker slot and
+    # stall Shopify order syncs — the production incident this fixes. The
+    # per-task hard time limit (task_time_limit=660 in celery_app.py)
+    # reclaims a genuinely hung child; the stale-job reaper then fails its
+    # SyncJob row.
+    #
+    # NOTE: a Start Command set in the Render dashboard OVERRIDES this
+    # file and will not pick up this change on its own — update the
+    # dashboard value to exactly:
+    #   celery -A app.workers.celery_app worker -B -Q celery,shiprocket --concurrency=3 --loglevel=info
     buildCommand: pip install --upgrade pip && pip install -r requirements-lock.txt
-    startCommand: celery -A app.workers.celery_app worker -B --loglevel=info
+    startCommand: celery -A app.workers.celery_app worker -B -Q celery,shiprocket --concurrency=3 --loglevel=info
     envVars:
       # Same values as the web service above — set independently here
       # too, since Render services don't share env vars by default.

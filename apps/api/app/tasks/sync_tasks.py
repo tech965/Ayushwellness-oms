@@ -17,7 +17,11 @@ from app.models.enums import SyncType
 from app.models.integration import Integration, IntegrationCode
 from app.repositories.sync_job import SyncJobRepository
 from app.services.sync_service import SyncService
-from app.workers.celery_app import celery_app
+from app.workers.celery_app import (
+    SYNC_TASK_SOFT_TIME_LIMIT,
+    SYNC_TASK_TIME_LIMIT,
+    celery_app,
+)
 
 logger = get_logger(__name__)
 
@@ -61,7 +65,11 @@ async def _execute_sync(sync_job_id: str) -> None:
         await SyncService(session).execute_sync(uuid.UUID(sync_job_id))
 
 
-@celery_app.task(name="sync.execute")
+@celery_app.task(
+    name="sync.execute",
+    soft_time_limit=SYNC_TASK_SOFT_TIME_LIMIT,
+    time_limit=SYNC_TASK_TIME_LIMIT,
+)
 def execute_sync_task(sync_job_id: str) -> None:
     """Runs an already-created (QUEUED) `SyncJob`. This is what the manual
     trigger endpoint (`POST /sync/{integration_id}/trigger`) enqueues,
@@ -83,7 +91,11 @@ async def _run_sync(integration_id: str, sync_type: str, entity_type: str) -> No
         )
 
 
-@celery_app.task(name="sync.run")
+@celery_app.task(
+    name="sync.run",
+    soft_time_limit=SYNC_TASK_SOFT_TIME_LIMIT,
+    time_limit=SYNC_TASK_TIME_LIMIT,
+)
 def run_sync_task(integration_id: str, sync_type: str, entity_type: str) -> None:
     """Creates and runs a new `SyncJob` in one step — for callers (Celery
     beat, `app.tasks.retry_processing`) that don't already have a job id.

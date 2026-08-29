@@ -13,4 +13,8 @@ RUN pip install -r requirements-lock.txt
 
 COPY apps/api/app ./app
 
-CMD ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info"]
+# -B: embedded beat (safe: compose runs exactly one worker instance).
+# -Q celery,shiprocket + --concurrency: keep Shiprocket's long list
+# crawls off the queue that carries Shopify order syncs so neither
+# starves the other — see render.yaml and app/workers/celery_app.py.
+CMD ["celery", "-A", "app.workers.celery_app", "worker", "-B", "-Q", "celery,shiprocket", "--concurrency=3", "--loglevel=info"]

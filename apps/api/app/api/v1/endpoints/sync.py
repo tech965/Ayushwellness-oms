@@ -25,12 +25,15 @@ from app.schemas.response import ApiResponse
 from app.services.sync_service import SyncService
 from app.tasks.shiprocket_sync import refresh_tracking_task
 from app.tasks.sync_tasks import execute_sync_task
+from app.workers.celery_app import SHIPROCKET_QUEUE, queue_for_entity
 
 router = APIRouter()
 logger = get_logger(__name__)
 
 _TASK_BY_ENTITY_TYPE: dict[str, Callable[[str], None]] = {
-    "tracking": lambda job_id: refresh_tracking_task.delay(job_id),
+    "tracking": lambda job_id: refresh_tracking_task.apply_async(
+        args=[job_id], queue=SHIPROCKET_QUEUE
+    ),
 }
 
 
@@ -39,7 +42,10 @@ def _enqueue(entity_type: str, job_id: str) -> None:
     if dispatch is not None:
         dispatch(job_id)
     else:
-        execute_sync_task.delay(job_id)
+        # `sync.execute` carries only the job id, so route it here by
+        # entity_type (Shiprocket `shipments`/`ndr` -> the shiprocket
+        # queue, everything else -> the default queue).
+        execute_sync_task.apply_async(args=[job_id], queue=queue_for_entity(entity_type))
 
 
 @router.post(

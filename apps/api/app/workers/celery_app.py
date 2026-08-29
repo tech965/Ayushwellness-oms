@@ -84,6 +84,64 @@ celery_app = Celery(
     ],
 )
 
+# Queue names. Shopify order/customer/product syncs (and everything else)
+# go to DEFAULT_QUEUE; Shiprocket's list crawls — `shipments`, `ndr`, and
+# `tracking` refresh — go to SHIPROCKET_QUEUE. The worker consumes both,
+# but because they are separate queues a slow/stuck Shiprocket crawl can
+# never occupy the worker slot a Shopify order sync needs (the production
+# incident this fixes: a multi-hour Shiprocket `shipments` backlog crawl
+# monopolised the single worker and Shopify orders stopped syncing). The
+# Render/Docker start command must pass `-Q celery,shiprocket` and a
+# concurrency of at least 2 so both queues drain in parallel.
+DEFAULT_QUEUE = "celery"
+SHIPROCKET_QUEUE = "shiprocket"
+
+# Hard per-task limits for the crawl-style sync tasks. `SyncService`'s own
+# per-entity budget is 8 min and it checks the deadline every page, so a
+# healthy sync finishes far below this; a task still running at 10/11 min
+# is genuinely stuck (a network read that never returns, a pathological
+# page) and its worker slot must be reclaimed rather than pinned forever —
+# otherwise a single hung Shiprocket crawl can still starve Shopify order
+# syncs. The stale-job reaper then marks the killed job's row FAILED.
+SYNC_TASK_SOFT_TIME_LIMIT = 600
+SYNC_TASK_TIME_LIMIT = 660
+
+# entity_type values whose sync work is routed to SHIPROCKET_QUEUE.
+_SHIPROCKET_SYNC_ENTITY_TYPES = frozenset({"shipments", "ndr", "tracking"})
+
+
+def queue_for_entity(entity_type: str | None) -> str:
+    """Which Celery queue a sync for `entity_type` belongs on."""
+    return SHIPROCKET_QUEUE if entity_type in _SHIPROCKET_SYNC_ENTITY_TYPES else DEFAULT_QUEUE
+
+
+def route_task(
+    name: str,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    options: dict[str, object],
+    task: object = None,
+    **_kw: object,
+) -> dict[str, str] | None:
+    """`task_routes` callable — keeps Shiprocket list crawls off the queue
+    that carries Shopify order syncs, whatever enqueues them (Beat,
+    `retry_processing`, a manual trigger via `.delay()`).
+
+    `sync.run(integration_id, sync_type, entity_type)` carries the
+    entity_type positionally; `shiprocket.refresh_tracking` is always
+    Shiprocket. `sync.execute(sync_job_id)` has no entity_type on the wire,
+    so the trigger endpoint sets `queue=` explicitly via `apply_async` and
+    this returns None (no routing opinion) for it.
+    """
+    if name == "sync.run":
+        entity_type = kwargs.get("entity_type")
+        if entity_type is None and len(args) >= 3:
+            entity_type = args[2]
+        return {"queue": queue_for_entity(entity_type if isinstance(entity_type, str) else None)}
+    if name == "shiprocket.refresh_tracking":
+        return {"queue": SHIPROCKET_QUEUE}
+    return None
+
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -94,6 +152,15 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_default_retry_delay=60,
     task_default_max_retries=5,
+    # Queue routing (see DEFAULT_QUEUE / SHIPROCKET_QUEUE above): isolates
+    # Shiprocket's long list crawls from Shopify order syncs so neither can
+    # starve the other. Per-task hard time limits live on the sync tasks
+    # themselves (`app.tasks.sync_tasks`, `app.tasks.shiprocket_sync`) so a
+    # genuinely hung crawl releases its worker slot without also capping
+    # legitimately long non-sync tasks (e.g. reconciliation).
+    task_default_queue=DEFAULT_QUEUE,
+    task_routes=(route_task,),
+    task_create_missing_queues=True,
     # Every task here persists its own outcome (SyncJob/WebhookEvent rows
     # are the source of truth for status) rather than being awaited via
     # Celery's AsyncResult, so results are never read back — ignoring them

@@ -1493,3 +1493,79 @@ async def test_shipment_sync_stops_early_and_saves_a_resumable_cursor_past_the_t
 
     await db_session.refresh(integration)
     assert integration.configuration["sync_cursors"]["shipments"] == "2"
+
+
+# --- Incremental mode: once a backlog crawl has completed a full pass
+# (a COMPLETED/PARTIAL job exists and no resume cursor is left), every
+# later scheduled run is a cheap newest-first slice bounded by `since` --
+# it must NOT re-crawl history and must NOT persist a cross-job cursor,
+# so a stuck cursor can never pin the crawl to stale pages. While a
+# backlog cursor is still set, the sync stays in resumable backlog mode
+# regardless of `since`. --------------------------------------------------
+
+
+async def _complete_a_shipments_sync(db_session: AsyncSession, integration: Integration) -> None:
+    """Give `(integration, "shipments")` a COMPLETED SyncJob so the next
+    run derives a `since` and enters incremental mode.
+    """
+    svc = SyncService(db_session)
+    baseline = await svc.start_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="shipments"
+    )
+    await svc.complete_sync(baseline.id, success=True)
+
+
+async def test_incremental_shipment_sync_uses_newest_first_and_persists_no_cursor(
+    db_session: AsyncSession,
+) -> None:
+    # A newest-first page entirely older than `since` -> the adapter early
+    # -stops, the job completes, and no resume cursor is written.
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[{"id": "old-1", "awb": "", "created_at": "1st Jan 2026 10:00 AM"}],
+                total_pages=25,
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+    await _complete_a_shipments_sync(db_session, integration)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="shipments"
+    )
+
+    assert job.status in ("completed", "partial")
+    assert len(client.calls) == 1
+    _, path, params = client.calls[0]
+    assert path == "/shipments"
+    assert params["sort"] == "desc" and params["sort_by"] == "created_at"
+
+    await db_session.refresh(integration)
+    assert (integration.configuration or {}).get("sync_cursors", {}).get("shipments") is None
+
+
+async def test_incremental_shipment_sync_stays_in_backlog_mode_while_a_cursor_is_set(
+    db_session: AsyncSession,
+) -> None:
+    # Baseline job exists (so `since` is set) AND a backlog cursor is still
+    # persisted -> the run must resume the plain ascending crawl from that
+    # page, not switch to newest-first incremental.
+    client = _StubClient([_shipments_page(records=[], total_pages=9)])
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+    await _complete_a_shipments_sync(db_session, integration)
+    await IntegrationRepository(db_session).update(
+        integration, configuration={"sync_cursors": {"shipments": "4"}}
+    )
+    await db_session.commit()
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="shipments"
+    )
+
+    _, path, params = client.calls[0]
+    assert path == "/shipments"
+    assert params["page"] == 4
+    assert "sort" not in params  # plain backlog fetch(), not fetch_incremental()

@@ -6,6 +6,8 @@ Shiprocket account.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from app.core.exceptions import IntegrationError
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
@@ -396,3 +398,117 @@ async def test_fetch_shipments_logs_identity_fields_exactly_once_per_page(
     assert '"number": "N1"' in matches[0].message
     assert "N2" not in matches[0].message
     assert "N3" not in matches[0].message
+
+
+# --- Incremental shipments/ndr: newest-first + early-stop -----------------
+# Production incident: `fetch_incremental` ignored `since` and re-crawled
+# the entire multi-thousand-record list from page 1 every scheduled run,
+# monopolising the Celery worker so Shopify order syncs stopped. It now
+# asks Shiprocket for newest-first order and stops as soon as it reaches a
+# page wholly older than `since` -- but only when the page genuinely came
+# back ordered newest-first, so an account where Shiprocket ignores the
+# sort request degrades to a bounded full pass, never to missing records.
+
+_SINCE = datetime(2026, 6, 1, tzinfo=UTC)
+
+
+def _dated_shipment(id_: int, created_at: str) -> dict:
+    return {"id": id_, "awb": f"AWB{id_}", "status": "In Transit", "created_at": created_at}
+
+
+async def test_fetch_incremental_requests_newest_first_order() -> None:
+    client = _StubClient(
+        [{"data": [_dated_shipment(1, "1st Jul 2026 10:00 AM")], "meta": {"pagination": {}}}]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    await adapter.fetch_incremental("shipments", since=_SINCE, cursor=None, limit=50)
+
+    _, path, params = client.calls[0]
+    assert path == "/shipments"
+    assert params["sort"] == "desc"
+    assert params["sort_by"] == "created_at"
+    assert params["page"] == 1
+
+
+async def test_fetch_incremental_stops_on_a_newest_first_page_wholly_older_than_since() -> None:
+    # All three records are well before `since` (2026-06-01) and ordered
+    # newest-first -> nothing past this page can be new.
+    client = _StubClient(
+        [
+            {
+                "data": [
+                    _dated_shipment(30, "20th Mar 2026 09:00 AM"),
+                    _dated_shipment(29, "18th Mar 2026 09:00 AM"),
+                    _dated_shipment(28, "15th Mar 2026 09:00 AM"),
+                ],
+                "meta": {"pagination": {"total_pages": 40}},
+            }
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    page = await adapter.fetch_incremental("shipments", since=_SINCE, cursor=None, limit=50)
+
+    assert page.has_more is False
+    assert page.next_cursor is None
+    assert len(page.nodes) == 3  # the page is still handed back for (idempotent) upsert
+
+
+async def test_fetch_incremental_keeps_paging_while_recent_records_are_present() -> None:
+    client = _StubClient(
+        [
+            {
+                "data": [
+                    _dated_shipment(51, "5th Jul 2026 09:00 AM"),  # after `since`
+                    _dated_shipment(50, "2nd May 2026 09:00 AM"),  # before `since`
+                ],
+                "meta": {"pagination": {"total_pages": 40}},
+            }
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    page = await adapter.fetch_incremental("shipments", since=_SINCE, cursor=None, limit=50)
+
+    assert page.has_more is True
+    assert page.next_cursor == "2"
+
+
+async def test_fetch_incremental_no_early_stop_when_page_not_ordered_newest_first() -> None:
+    # Shiprocket ignored the sort request: an old record appears *before* a
+    # newer one, so `_is_non_increasing` is False and the early-stop must
+    # not fire even though every record here predates `since`.
+    client = _StubClient(
+        [
+            {
+                "data": [
+                    _dated_shipment(10, "1st Feb 2026 09:00 AM"),
+                    _dated_shipment(11, "20th Mar 2026 09:00 AM"),
+                    _dated_shipment(12, "2nd Jan 2026 09:00 AM"),
+                ],
+                "meta": {"pagination": {"total_pages": 40}},
+            }
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    page = await adapter.fetch_incremental("shipments", since=_SINCE, cursor=None, limit=50)
+
+    assert page.has_more is True  # degrades to a bounded full pass
+
+
+async def test_fetch_incremental_does_not_stop_early_when_timestamps_are_unparseable() -> None:
+    client = _StubClient(
+        [
+            {
+                "data": [{"id": 7, "awb": "", "status": "New"}],  # no created_at at all
+                "meta": {"pagination": {"total_pages": 40}},
+            }
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    page = await adapter.fetch_incremental("shipments", since=_SINCE, cursor=None, limit=50)
+
+    assert page.has_more is True

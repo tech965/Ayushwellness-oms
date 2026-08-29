@@ -22,7 +22,11 @@ from app.integrations.shiprocket.sync import refresh_tracking
 from app.models.integration import IntegrationCode
 from app.repositories.sync_job import SyncJobRepository
 from app.services.sync_service import SyncService
-from app.workers.celery_app import celery_app
+from app.workers.celery_app import (
+    SYNC_TASK_SOFT_TIME_LIMIT,
+    SYNC_TASK_TIME_LIMIT,
+    celery_app,
+)
 
 logger = get_logger(__name__)
 
@@ -64,7 +68,11 @@ async def _execute_tracking_refresh(sync_job_id: str) -> None:
         await sync_service.complete_sync(job_uuid, success=True)
 
 
-@celery_app.task(name="shiprocket.refresh_tracking")
+@celery_app.task(
+    name="shiprocket.refresh_tracking",
+    soft_time_limit=SYNC_TASK_SOFT_TIME_LIMIT,
+    time_limit=SYNC_TASK_TIME_LIMIT,
+)
 def refresh_tracking_task(sync_job_id: str) -> None:
     logger.info("shiprocket_tracking_refresh_started", sync_job_id=sync_job_id)
     try:

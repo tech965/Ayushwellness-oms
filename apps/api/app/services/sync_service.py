@@ -423,18 +423,37 @@ class SyncService:
         access (not an `await`ed reload) on an expired attribute raises
         `MissingGreenlet` under `AsyncSession`.
 
-        Starts from `resume_cursor` (the previous job's stopping point for
-        this exact `(integration, entity_type)`, if any) rather than
-        always page 1 — see `_MAX_ENTITY_SYNC_DURATION`. Persists the
-        cursor after every page (not just at the time-budget exit) so a
-        worker crash mid-crawl loses no more than one page of progress,
-        matching real production evidence: a worker restart mid-sync
-        previously orphaned `SyncJob` rows with no resumable state at all.
+        Two modes, chosen once up front:
+
+        * **Backlog crawl** — a full sync, OR an incremental sync that has
+          no completed baseline yet, OR one whose previous backlog crawl
+          was interrupted (`resume_cursor` is set). Pages the provider list
+          from the start (or `resume_cursor`) in provider order, persisting
+          the cursor after every page so the next scheduled run resumes
+          instead of restarting at page 1 — see `_MAX_ENTITY_SYNC_DURATION`.
+          A worker crash mid-crawl then loses no more than one page.
+        * **Incremental** — an incremental sync that *does* have a completed
+          baseline and no interrupted backlog. Delegates recency bounding
+          to `adapter.fetch_incremental` (e.g. Shiprocket asks for
+          newest-first order and stops once a page is entirely older than
+          `since`; Shopify uses a server-side `updated_at` filter). No
+          cross-job cursor is persisted here — each run re-establishes the
+          window from `since`, so a stuck cursor can never pin the crawl to
+          stale pages. The time budget is still enforced as a safety valve.
+
+        This split is what stops a huge Shiprocket backlog from being
+        re-crawled end to end every 10 minutes (which starved the Celery
+        worker and blocked Shopify order syncs): the historical crawl runs
+        once, resumably, then every later run is a cheap newest-first slice.
         """
-        cursor: str | None = resume_cursor
+        incremental_mode = (
+            sync_type == SyncType.INCREMENTAL and since is not None and resume_cursor is None
+        )
+        cursor: str | None = None if incremental_mode else resume_cursor
         deadline = datetime.now(UTC) + _MAX_ENTITY_SYNC_DURATION
         while True:
-            if sync_type == SyncType.INCREMENTAL and since:
+            if incremental_mode:
+                assert since is not None  # narrowed by `incremental_mode` above
                 page = await adapter.fetch_incremental(
                     entity_type, since=since, cursor=cursor, limit=50
                 )
@@ -511,15 +530,19 @@ class SyncService:
             )
 
             if not page.has_more:
-                await self._persist_sync_cursor(
-                    integration_id=integration_id, entity_type=entity_type, cursor=None
-                )
+                if not incremental_mode:
+                    # Backlog crawl finished a full pass — clear the resume
+                    # point so the next run switches to incremental mode.
+                    await self._persist_sync_cursor(
+                        integration_id=integration_id, entity_type=entity_type, cursor=None
+                    )
                 break
 
             cursor = page.next_cursor
-            await self._persist_sync_cursor(
-                integration_id=integration_id, entity_type=entity_type, cursor=cursor
-            )
+            if not incremental_mode:
+                await self._persist_sync_cursor(
+                    integration_id=integration_id, entity_type=entity_type, cursor=cursor
+                )
 
             if datetime.now(UTC) >= deadline:
                 logger.info(
@@ -527,6 +550,7 @@ class SyncService:
                     sync_job_id=str(job_id),
                     entity_type=entity_type,
                     next_cursor=cursor,
+                    mode="incremental" if incremental_mode else "backlog",
                 )
                 break
 
