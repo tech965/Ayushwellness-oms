@@ -4,6 +4,7 @@ import * as React from "react"
 import {
   AlertTriangle,
   Boxes,
+  Clock,
   Clock3,
   IndianRupee,
   PackageCheck,
@@ -131,6 +132,13 @@ function DashboardContent() {
     return `/orders?${params.toString()}`
   }
 
+  // "Total Orders" opens the dedicated breakdown page (spec: clicking it
+  // shows a full COD/Prepaid/Pending/Fulfilled/Unfulfilled/Cancelled
+  // breakdown with counts, percentages, and values) rather than the plain
+  // Orders list every other KPI drills into — same date range carried
+  // over so the breakdown page shows exactly the period just displayed.
+  const breakdownHref = `/orders/breakdown?${orderQueryString}`
+
   const summary = summaryQuery.data
 
   const shipmentOverviewItems: ShipmentOverviewItem[] = [
@@ -209,7 +217,7 @@ function DashboardContent() {
             icon={ShoppingCart}
             kpi={summary?.total_orders}
             format={count}
-            href={ordersHref({})}
+            href={breakdownHref}
             accent="blue"
           />
           <KpiCard
@@ -238,7 +246,16 @@ function DashboardContent() {
           />
         </section>
 
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-7">
+          <KpiCard
+            label="Pending Orders"
+            icon={Clock}
+            kpi={summary?.pending_orders}
+            format={count}
+            href={ordersHref({ status: "pending" })}
+            accent="orange"
+            invert
+          />
           <KpiCard
             label="Fulfilled Orders"
             icon={PackageCheck}

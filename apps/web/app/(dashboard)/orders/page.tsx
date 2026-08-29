@@ -123,6 +123,30 @@ const ALL_COLUMNS: ColumnDef[] = [
     },
   },
   {
+    id: "customer_email",
+    label: "Email",
+    defaultVisible: false,
+    column: {
+      id: "customer_email",
+      header: "Email",
+      cell: (o) => o.customer_email ?? "—",
+    },
+  },
+  {
+    id: "city_state",
+    label: "City/State",
+    defaultVisible: false,
+    column: {
+      id: "city_state",
+      header: "City/State",
+      cell: (o) => {
+        const address = o.shipping_address
+        if (!address?.city && !address?.state) return "—"
+        return [address?.city, address?.state].filter(Boolean).join(", ")
+      },
+    },
+  },
+  {
     id: "item_summary",
     label: "Product",
     defaultVisible: true,

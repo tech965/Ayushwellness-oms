@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react"
+import Link from "next/link"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
@@ -17,16 +18,32 @@ interface StatTileProps {
   value: number | string
   icon: LucideIcon
   accent?: keyof typeof ACCENT_CLASSES
+  /** A second line under the value — e.g. "23%" or a formatted money
+   * amount — for tiles that need to show more than one number.
+   */
+  subtext?: string
+  /** Makes the tile a drill-down link (e.g. into a filtered Orders view),
+   * matching `KpiCard`'s click-through convention.
+   */
+  href?: string
 }
 
 /** A plain (non-trend) count tile — `KpiCard`'s sibling for dashboards
  * whose numbers are simple current-period counts with no prior-period
- * comparison (Telecaller/Team Leader summaries), so it doesn't force a
- * fake `KPIValue` shape just to reuse `KpiCard`.
+ * comparison (Telecaller/Team Leader summaries, the Order Breakdown
+ * page), so it doesn't force a fake `KPIValue` shape just to reuse
+ * `KpiCard`.
  */
-export function StatTile({ label, value, icon: Icon, accent = "slate" }: StatTileProps) {
-  return (
-    <Card>
+export function StatTile({
+  label,
+  value,
+  icon: Icon,
+  accent = "slate",
+  subtext,
+  href,
+}: StatTileProps) {
+  const body = (
+    <Card className={cn("h-full", href && "hover:border-primary/40 transition-colors")}>
       <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
         <CardTitle className="text-muted-foreground text-sm font-medium">
           {label}
@@ -42,7 +59,16 @@ export function StatTile({ label, value, icon: Icon, accent = "slate" }: StatTil
       </CardHeader>
       <CardContent>
         <p className="text-2xl font-semibold tabular-nums">{value}</p>
+        {subtext && <p className="text-muted-foreground mt-1 text-xs">{subtext}</p>}
       </CardContent>
     </Card>
+  )
+
+  return href ? (
+    <Link href={href} aria-label={`${label}: view filtered orders`}>
+      {body}
+    </Link>
+  ) : (
+    body
   )
 }

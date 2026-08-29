@@ -45,6 +45,7 @@ from app.models.customer import Customer
 from app.models.enums import (
     FulfillmentStatus,
     NDRStatus,
+    OrderStatus,
     PaymentType,
     RTOStatus,
     ShipmentDelayStatus,
@@ -168,6 +169,35 @@ class AnalyticsService:
             Order.order_datetime <= r.date_to,
             Order.payment_type == PaymentType.PREPAID,
         )
+        # `Order.status` (OMS-internal pack/ship workflow) is a DIFFERENT
+        # column from `Order.payment_status` — both enums happen to share
+        # the string "pending" for unrelated concepts. "Pending Orders"
+        # here means orders not yet confirmed/processed by ops
+        # (`OrderStatus.PENDING`), matching the same `status` field the
+        # Orders page's own "Order Status" filter and the dashboard's
+        # "Order Status" breakdown already use — not a payment-pending
+        # count, which is a separate, already-visible bucket in the
+        # existing Payment Status breakdown.
+        pending_orders = await self._count_where(
+            Order,
+            Order.order_datetime >= r.date_from,
+            Order.order_datetime <= r.date_to,
+            Order.status == OrderStatus.PENDING,
+        )
+        cod_value = await self._scalar(
+            select(func.coalesce(func.sum(Order.total_amount), 0)).where(
+                Order.order_datetime >= r.date_from,
+                Order.order_datetime <= r.date_to,
+                Order.payment_type == PaymentType.COD,
+            )
+        )
+        prepaid_value = await self._scalar(
+            select(func.coalesce(func.sum(Order.total_amount), 0)).where(
+                Order.order_datetime >= r.date_from,
+                Order.order_datetime <= r.date_to,
+                Order.payment_type == PaymentType.PREPAID,
+            )
+        )
         total_customers = await self._count_where(
             Customer, Customer.created_at >= r.date_from, Customer.created_at <= r.date_to
         )
@@ -225,6 +255,9 @@ class AnalyticsService:
             "unfulfilled_orders": unfulfilled_orders,
             "cod_orders": cod_orders,
             "prepaid_orders": prepaid_orders,
+            "pending_orders": pending_orders,
+            "cod_value": cod_value,
+            "prepaid_value": prepaid_value,
             "delivered_shipments": delivered_shipments,
             "in_transit_shipments": in_transit_shipments,
             "out_for_delivery_shipments": out_for_delivery_shipments,

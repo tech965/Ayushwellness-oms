@@ -93,6 +93,7 @@ def _to_list_response(order: Order) -> OrderListResponse:
         **OrderResponse.model_validate(order).model_dump(),
         customer_name=order.customer.full_name if order.customer else None,
         customer_phone=order.customer.phone if order.customer else None,
+        customer_email=order.customer.email if order.customer else None,
         item_summary=item_summary,
         total_quantity=total_quantity,
         shipment_status=shipment.current_status.value if shipment else None,

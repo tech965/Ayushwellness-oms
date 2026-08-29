@@ -105,6 +105,7 @@ class OrderListResponse(OrderResponse):
 
     customer_name: str | None = None
     customer_phone: str | None = None
+    customer_email: str | None = None
     item_summary: str | None = None
     total_quantity: int = 0
     shipment_status: str | None = None

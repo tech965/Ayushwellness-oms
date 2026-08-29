@@ -30,6 +30,9 @@ class AnalyticsSummaryResponse(BaseModel):
     unfulfilled_orders: KPIValue
     cod_orders: KPIValue
     prepaid_orders: KPIValue
+    pending_orders: KPIValue
+    cod_value: KPIValue
+    prepaid_value: KPIValue
     delivered_shipments: KPIValue
     in_transit_shipments: KPIValue
     out_for_delivery_shipments: KPIValue

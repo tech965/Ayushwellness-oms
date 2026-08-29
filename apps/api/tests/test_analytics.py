@@ -45,6 +45,56 @@ async def test_analytics_summary_reflects_orders_in_range(
         assert data["total_orders"]["change_pct"] is None
 
 
+async def test_analytics_summary_reports_pending_orders_and_payment_type_values(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Regression coverage for the dashboard's "Order Breakdown" drill-down
+    (Total Orders -> COD/Prepaid/Pending/Fulfilled/Unfulfilled counts +
+    values): `pending_orders` must reflect `Order.status == PENDING` (the
+    OMS workflow status every new order starts in — NOT
+    `Order.payment_status`, a different enum that happens to share the
+    string "pending"), and `cod_value`/`prepaid_value` must be the summed
+    order value per payment type, not just a count.
+    """
+    async with await make_authenticated_client(
+        db_session, permission_codes=[*_ANALYTICS_PERMS, "orders.update"]
+    ) as auth_client:
+        # Stays PENDING (the default on creation).
+        await _create_order(auth_client, "OMS-PEND-A")
+
+        # Explicitly moved off PENDING -> must not be counted as pending.
+        confirmed = await auth_client.post(
+            "/api/v1/orders",
+            json={
+                "order_number": "OMS-CONF-A",
+                "payment_type": "cod",
+                "shipping_charge": "0",
+                "items": [
+                    {
+                        "sku": "SKU-1",
+                        "product_name": "Ashwagandha 60ct",
+                        "quantity": 1,
+                        "unit_price": "500.00",
+                    }
+                ],
+            },
+        )
+        confirmed_id = confirmed.json()["data"]["id"]
+        await auth_client.patch(f"/api/v1/orders/{confirmed_id}", json={"status": "confirmed"})
+
+        response = await auth_client.get("/api/v1/analytics/summary")
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+        # Two orders total: OMS-PEND-A (prepaid, still pending) and
+        # OMS-CONF-A (cod, confirmed) -> only one is still PENDING.
+        assert data["pending_orders"]["current"] == "1"
+        assert data["cod_orders"]["current"] == "1"
+        assert data["prepaid_orders"]["current"] == "1"
+        assert data["cod_value"]["current"] == "500.00"
+        assert data["prepaid_value"]["current"] == "649.00"
+
+
 async def test_analytics_breakdowns_use_real_enum_values(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:

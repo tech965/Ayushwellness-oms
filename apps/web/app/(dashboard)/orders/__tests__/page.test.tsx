@@ -5,10 +5,12 @@ import { renderWithProviders } from "@/test-utils/render-with-providers"
 import OrdersPage from "@/app/(dashboard)/orders/page"
 import { useOrders } from "@/services/orders"
 
+let mockSearchParams = new URLSearchParams()
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   usePathname: () => "/orders",
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mockSearchParams,
 }))
 
 vi.mock("@/services/orders", () => ({
@@ -101,5 +103,60 @@ describe("OrdersPage", () => {
     )
     renderWithProviders(<OrdersPage />)
     expect(screen.getByText("OMS-1001")).toBeInTheDocument()
+  })
+
+  // Regression coverage for the reported "Pending filter doesn't
+  // correctly filter" bug: a dashboard drill-down link (e.g. from the
+  // Order Status breakdown or the "Pending Orders" KPI) lands on
+  // `/orders?status=pending` — this proves that URL state actually
+  // reaches the `useOrders` API call as `status: "pending"`, not
+  // silently dropped or mapped to the wrong field
+  // (`OrderStatus.PENDING` vs. the unrelated `PaymentStatus.PENDING`,
+  // which happens to share the same string).
+  it("reads status=pending from the URL and requests it from the API", () => {
+    mockSearchParams = new URLSearchParams("status=pending")
+    mockedUseOrders.mockReturnValue(baseQueryResult({}))
+
+    renderWithProviders(<OrdersPage />)
+
+    expect(mockedUseOrders).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "pending" })
+    )
+    // And NOT sent as a payment_status filter, confirming the two
+    // different "pending" enums aren't conflated on the way through.
+    expect(mockedUseOrders).not.toHaveBeenCalledWith(
+      expect.objectContaining({ payment_status: "pending" })
+    )
+
+    mockSearchParams = new URLSearchParams()
+  })
+
+  it("reads payment_type=cod from the URL and requests only COD orders", () => {
+    mockSearchParams = new URLSearchParams("payment_type=cod")
+    mockedUseOrders.mockReturnValue(baseQueryResult({}))
+
+    renderWithProviders(<OrdersPage />)
+
+    expect(mockedUseOrders).toHaveBeenCalledWith(
+      expect.objectContaining({ payment_type: "cod" })
+    )
+    expect(mockedUseOrders).not.toHaveBeenCalledWith(
+      expect.objectContaining({ payment_type: "prepaid" })
+    )
+
+    mockSearchParams = new URLSearchParams()
+  })
+
+  it("combines multiple URL filters (payment_type + status) into one request", () => {
+    mockSearchParams = new URLSearchParams("payment_type=cod&status=pending")
+    mockedUseOrders.mockReturnValue(baseQueryResult({}))
+
+    renderWithProviders(<OrdersPage />)
+
+    expect(mockedUseOrders).toHaveBeenCalledWith(
+      expect.objectContaining({ payment_type: "cod", status: "pending" })
+    )
+
+    mockSearchParams = new URLSearchParams()
   })
 })

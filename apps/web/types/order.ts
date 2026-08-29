@@ -59,6 +59,7 @@ export interface Order {
   // plain `OrderResponse` rows, e.g. a customer's order history.
   customer_name?: string | null
   customer_phone?: string | null
+  customer_email?: string | null
   item_summary?: string | null
   total_quantity?: number
   shipment_status?: string | null

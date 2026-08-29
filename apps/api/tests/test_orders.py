@@ -299,6 +299,79 @@ async def test_list_orders_filters_by_fulfillment_status(
         assert [o["order_number"] for o in unfulfilled.json()["data"]] == ["OMS-UNFULFILLED-1"]
 
 
+async def test_list_orders_filters_by_order_status_pending_reproduction(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """REPRODUCTION for the reported 'Pending filter doesn't work' bug —
+    written before any fix, against real seeded data, per the debugging
+    approach: create one order left PENDING (the default on creation) and
+    one transitioned to CONFIRMED, then assert `status=pending` returns
+    only the still-pending one.
+    """
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        pending = await auth_client.post("/api/v1/orders", json=_order_payload("OMS-PEND-1"))
+        assert pending.json()["data"]["status"] == "pending"
+
+        confirmed = await auth_client.post("/api/v1/orders", json=_order_payload("OMS-CONF-1"))
+        confirmed_id = confirmed.json()["data"]["id"]
+        await auth_client.patch(f"/api/v1/orders/{confirmed_id}", json={"status": "confirmed"})
+
+        response = await auth_client.get("/api/v1/orders", params={"status": "pending"})
+        order_numbers = [o["order_number"] for o in response.json()["data"]]
+
+        assert order_numbers == [
+            "OMS-PEND-1"
+        ], f"Expected only the PENDING order, got: {order_numbers}"
+
+
+async def test_list_orders_filters_by_payment_status_pending(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """`payment_status=pending` (PaymentStatus.PENDING) is a DIFFERENT
+    field from `status=pending` (OrderStatus.PENDING) — both enums happen
+    to share the string 'pending' for different concepts (order workflow
+    state vs. payment state). Every order is created with
+    payment_status=PENDING by default (see `OrderService.create_order`);
+    this proves the filter targets `Order.payment_status`, not `Order.status`.
+    """
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        await auth_client.post("/api/v1/orders", json=_order_payload("OMS-PAYPEND-1"))
+
+        response = await auth_client.get("/api/v1/orders", params={"payment_status": "pending"})
+        order_numbers = [o["order_number"] for o in response.json()["data"]]
+        assert "OMS-PAYPEND-1" in order_numbers
+
+
+async def test_list_orders_exposes_customer_email(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """The COD/Prepaid drill-down table needs customer email when
+    available (spec: "Customer email if available") — `OrderListResponse`
+    denormalizes it from the already-eager-loaded `Order.customer`
+    relationship, same as `customer_name`/`customer_phone`.
+    """
+    customer = Customer(full_name="Priya Sharma", email="priya@example.com", phone="9876543210")
+    db_session.add(customer)
+    await db_session.commit()
+    await db_session.refresh(customer)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        payload = _order_payload("OMS-EMAIL-1")
+        payload["customer_id"] = str(customer.id)
+        await auth_client.post("/api/v1/orders", json=payload)
+
+        response = await auth_client.get("/api/v1/orders", params={"q": "OMS-EMAIL-1"})
+        data = response.json()["data"]
+        assert len(data) == 1
+        assert data[0]["customer_email"] == "priya@example.com"
+
+
 async def test_list_orders_filters_by_amount_range(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
