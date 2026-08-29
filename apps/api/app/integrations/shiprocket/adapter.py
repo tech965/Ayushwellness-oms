@@ -182,6 +182,19 @@ class ShiprocketAdapter(IntegrationAdapter):
     def __init__(self, client: ShiprocketClient | None = None) -> None:
         self._client = client
         self._configured = client is not None or ShiprocketConfig.from_settings() is not None
+        # Set the first time `get_order` confirms this Shiprocket account
+        # (specifically its API user's granted module permissions) cannot
+        # call `GET /orders/show/{id}` at all — a real production incident:
+        # every shipment sync record lacking `channel_order_id` (i.e.
+        # effectively all of them; `/shipments` never populates it) tried
+        # this fallback and got an identical 403, meaning a full backlog
+        # (thousands of shipments) hammered a confirmed-permanently-blocked
+        # endpoint on every single scheduled run. Once confirmed, every
+        # further call in this process's lifetime fails fast with no
+        # network round trip — cleared only by a process restart (i.e. the
+        # next deploy), which is the right lifetime for "an account-level
+        # permission scope, not a per-request fluke."
+        self._orders_show_blocked_reason: str | None = None
 
     def _get_client(self) -> ShiprocketClient:
         if self._client is not None:
@@ -281,9 +294,7 @@ class ShiprocketAdapter(IntegrationAdapter):
             # key guess below already having succeeded.
             _log_shipments_response_shape(endpoint=path, response=data, node_keys=node_keys)
 
-        nodes: list[dict[str, Any]] = next(
-            (data[key] for key in node_keys if data.get(key)), []
-        )
+        nodes: list[dict[str, Any]] = next((data[key] for key in node_keys if data.get(key)), [])
         if entity_type == "shipments" and nodes:
             _log_shipment_identity_fields(nodes[0])
         meta = (
@@ -345,11 +356,32 @@ class ShiprocketAdapter(IntegrationAdapter):
         engagement). Used by `entity_sync._upsert_shipment` as a fallback
         order-resolution step when a pulled shipment has no matching
         `Shipment` row yet.
+
+        Fails fast (no network call) once a 401/403 has already confirmed
+        this account can't call this endpoint at all — see `__init__`.
         """
+        if self._orders_show_blocked_reason is not None:
+            raise IntegrationError(
+                self._orders_show_blocked_reason,
+                details={"error_type": "authorization_error", "orders_show_blocked": True},
+            )
+
         client = self._get_client()
         try:
             return await client.request("GET", f"/orders/show/{order_id}")
         except ShiprocketApiError as exc:
+            if exc.error_type in ("authorization_error", "authentication_error"):
+                self._orders_show_blocked_reason = (
+                    f"GET /orders/show is not accessible to this Shiprocket API user "
+                    f"({exc.message}) — grant this API user access to the Orders module "
+                    "in Shiprocket's dashboard, then redeploy/restart the worker to "
+                    "clear this block and retry."
+                )
+                logger.warning(
+                    "shiprocket_orders_show_blocked",
+                    error_type=exc.error_type,
+                    status_code=exc.status_code,
+                )
             raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
 
     async def assign_awb(

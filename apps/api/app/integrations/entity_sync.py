@@ -161,7 +161,8 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
         if comparable_created_at is not None and comparable_created_at.tzinfo is None:
             comparable_created_at = comparable_created_at.replace(tzinfo=UTC)
         predates_oms_coverage = bool(
-            comparable_created_at and earliest_order_datetime
+            comparable_created_at
+            and earliest_order_datetime
             and comparable_created_at < earliest_order_datetime
         )
         if predates_oms_coverage:
@@ -172,20 +173,28 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
             if get_order is not None:
                 try:
                     order_detail = await get_order(shiprocket_order_id)
-                except IntegrationError:
+                except IntegrationError as exc:
+                    # Distinguish "we couldn't even check" from "we
+                    # checked and there's genuinely no match" — collapsing
+                    # both into the same generic NotFoundError message
+                    # (the previous behavior) made a permanent,
+                    # account-wide permission block on this endpoint
+                    # indistinguishable from thousands of individually
+                    # unmatched shipments, both in logs and in every
+                    # SyncError's message text.
                     order_detail = None
+                    skip_reason = (
+                        f"orders_show_lookup_failed: "
+                        f"{exc.details.get('error_type', 'unknown_error')} — {exc.message}"
+                    )
                 body = (
                     order_detail.get("data") if isinstance(order_detail, dict) else None
                 ) or order_detail
                 raw_resolved = body.get("channel_order_id") if isinstance(body, dict) else None
-                fetched_channel_order_id = (
-                    str(raw_resolved) if raw_resolved is not None else None
-                )
+                fetched_channel_order_id = str(raw_resolved) if raw_resolved is not None else None
                 if fetched_channel_order_id is not None:
                     channel_order_id = fetched_channel_order_id
-                order = await _resolve_order_by_channel_order_id(
-                    session, fetched_channel_order_id
-                )
+                order = await _resolve_order_by_channel_order_id(session, fetched_channel_order_id)
                 if order is not None:
                     match_strategy = "orders_show_channel_order_id"
 
@@ -201,9 +210,15 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
     )
 
     if order is None:
+        # `skip_reason` distinguishes a genuine no-match (None here) from
+        # "we couldn't actually check" (a predates-OMS-history skip, or an
+        # /orders/show failure — including a permission block) — visible
+        # in the SyncError's own message text, not just the structured log
+        # above, since that's what a human reviewing Sync History sees.
+        reason_suffix = f" [{skip_reason}]" if skip_reason else ""
         raise NotFoundError(
             "No OMS order found for Shiprocket shipment "
-            f"(channel_order_id={channel_order_id!r})."
+            f"(channel_order_id={channel_order_id!r}).{reason_suffix}"
         )
     return await ShipmentService(session).upsert_synced_shipment(order_id=order.id, **data)
 

@@ -255,9 +255,7 @@ async def test_shipment_sync_maps_to_an_existing_order_by_channel_order_id(
 async def test_shipment_sync_is_idempotent_on_rerun(db_session: AsyncSession) -> None:
     await _make_bare_order(db_session, order_number="AWL91600")
     record = {"id": 42, "channel_order_id": "AWL91600", "awb": "AWB-IDEMPOTENT", "status": "New"}
-    client = _StubClient(
-        [_shipments_page(records=[record]), _shipments_page(records=[record])]
-    )
+    client = _StubClient([_shipments_page(records=[record]), _shipments_page(records=[record])])
     register_adapter(ShiprocketAdapter(client=client))
     integration = await _make_shiprocket_integration(db_session)
     service = SyncService(db_session)
@@ -289,9 +287,7 @@ async def test_shipment_sync_records_a_sync_error_for_an_unmatched_order_without
     client = _StubClient(
         [
             _shipments_page(
-                records=[
-                    {"id": 1, "channel_order_id": "AWL-DOES-NOT-EXIST", "awb": "AWB-ORPHAN"}
-                ]
+                records=[{"id": 1, "channel_order_id": "AWL-DOES-NOT-EXIST", "awb": "AWB-ORPHAN"}]
             )
         ]
     )
@@ -689,6 +685,135 @@ async def test_shipment_sync_records_a_sync_error_when_orders_show_also_has_no_m
     assert total.scalar_one() == 0
 
 
+async def test_shipment_sync_distinguishes_a_permission_error_from_a_genuine_no_match(
+    db_session: AsyncSession,
+) -> None:
+    """Real production incident: an `/orders/show` failure (here, the
+    exact live error — a 403 "Shiprocket account lacks permission for
+    this operation") used to be silently swallowed and reported with the
+    same generic message as a shipment that genuinely has no matching
+    OMS order. That made a permanent, account-wide permission block on
+    this endpoint indistinguishable — in every log line and every
+    SyncError — from ordinary, expected unmatched-shipment noise. The
+    recorded error must now name the real cause.
+    """
+    from app.integrations.shiprocket.errors import ShiprocketApiError
+
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[{"id": 1143095000, "channel_order_id": None, "order_id": 41531, "awb": ""}]
+            ),
+            ShiprocketApiError(
+                "Shiprocket account lacks permission for this operation.",
+                error_type="authorization_error",
+                status_code=403,
+            ),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.error_count == 1
+
+    from app.models.integration import SyncError
+
+    error = await db_session.scalar(select(SyncError).where(SyncError.sync_job_id == job.id))
+    assert error is not None
+    assert "orders_show_lookup_failed" in error.error_message
+    assert "authorization_error" in error.error_message
+    assert "Shiprocket account lacks permission" in error.error_message
+
+
+async def test_shiprocket_adapter_get_order_short_circuits_after_a_confirmed_permission_error(
+    db_session: AsyncSession,
+) -> None:
+    """Unit-level proof of the circuit breaker: a second `get_order` call
+    on the SAME adapter instance, after a 403 already confirmed this
+    account can't use the endpoint, must fail immediately with no further
+    network call — the stub client has only one response queued, so a
+    second real attempt would raise `IndexError`.
+    """
+    from app.integrations.shiprocket.errors import ShiprocketApiError
+
+    client = _StubClient(
+        [
+            ShiprocketApiError(
+                "Shiprocket account lacks permission for this operation.",
+                error_type="authorization_error",
+                status_code=403,
+            )
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    from app.core.exceptions import IntegrationError
+
+    with pytest.raises(IntegrationError):
+        await adapter.get_order("111")
+    assert len(client.calls) == 1
+
+    with pytest.raises(IntegrationError):
+        await adapter.get_order("222")
+    # No second network call was made -- the breaker tripped.
+    assert len(client.calls) == 1
+
+
+async def test_shipment_sync_does_not_hammer_orders_show_after_one_permission_error(
+    db_session: AsyncSession,
+) -> None:
+    """End-to-end proof at the sync level: two shipments in the SAME run,
+    both needing the `/orders/show` fallback. Only one stub response
+    (a 403) is queued for it — if the second shipment attempted its own
+    live call, the stub client would raise `IndexError` and fail this
+    test. Both shipments must still be recorded as failed (never
+    fabricated), confirming the whole backlog degrades gracefully instead
+    of each record hammering a confirmed-blocked endpoint.
+    """
+    from app.integrations.shiprocket.errors import ShiprocketApiError
+
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 1, "channel_order_id": None, "order_id": 100, "awb": ""},
+                    {"id": 2, "channel_order_id": None, "order_id": 200, "awb": ""},
+                ]
+            ),
+            ShiprocketApiError(
+                "Shiprocket account lacks permission for this operation.",
+                error_type="authorization_error",
+                status_code=403,
+            ),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.error_count == 2
+    assert job.records_created == 0
+
+    from app.models.integration import SyncError
+
+    errors = (
+        (await db_session.execute(select(SyncError).where(SyncError.sync_job_id == job.id)))
+        .scalars()
+        .all()
+    )
+    assert len(errors) == 2
+    assert all("orders_show_lookup_failed" in e.error_message for e in errors)
+
+
 async def test_shipment_sync_does_not_call_orders_show_when_channel_order_id_already_present(
     db_session: AsyncSession,
 ) -> None:
@@ -701,9 +826,7 @@ async def test_shipment_sync_does_not_call_orders_show_when_channel_order_id_alr
     client = _StubClient(
         [
             _shipments_page(
-                records=[
-                    {"id": 5, "channel_order_id": "#AWL-DIRECT", "order_id": 777, "awb": ""}
-                ]
+                records=[{"id": 5, "channel_order_id": "#AWL-DIRECT", "order_id": 777, "awb": ""}]
             )
         ]
     )
@@ -1102,6 +1225,13 @@ async def test_tracking_refresh_does_not_duplicate_events_on_rerun(
         integration_id=integration.id, sync_type=SyncType.FULL, entity_type="tracking"
     )
     await refresh_tracking(db_session, job1.id, _StubAdapter())
+    # Real usage (`app.tasks.shiprocket_sync._execute_tracking_refresh`)
+    # always completes the job after refresh_tracking returns -- doing
+    # the same here is what makes a second start_sync for the same
+    # entity_type legal (SyncService.start_sync now refuses to start a
+    # second concurrent job for the same integration/entity_type; a
+    # completed job is no longer "active").
+    await sync_service.complete_sync(job1.id, success=True)
 
     job2 = await sync_service.start_sync(
         integration_id=integration.id, sync_type=SyncType.FULL, entity_type="tracking"
