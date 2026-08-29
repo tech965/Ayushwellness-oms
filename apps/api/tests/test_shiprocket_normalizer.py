@@ -192,6 +192,30 @@ def test_shipment_normalization_with_unknown_status_does_not_guess() -> None:
     assert data["current_status"] is None
 
 
+# Round 15 fix, real production bug: GET /shipments' `created_at` uses an
+# ordinal day suffix ("18th Dec 2025 03:52 PM") -- confirmed live to
+# differ from GET /orders/show/{id}'s `created_at`, which does not ("21
+# Dec 2025 12:49 PM"). `strptime` can't parse the ordinal form at all, so
+# every real `/shipments` record silently failed to produce a
+# `shiprocket_created_at`, which meant `entity_sync._upsert_shipment`'s
+# incremental performance boundary never actually skipped anything --
+# confirmed live via production logs still showing `skip_reason=None` and
+# a live /orders/show call for every already-known-unmatchable historical
+# record, including one that then hit Shiprocket's rate limit.
+def test_shipment_normalization_parses_created_at_with_an_ordinal_day_suffix() -> None:
+    data = SHIPMENT_NORMALIZER.normalize(
+        {"id": 1, "awb": "AWB1", "created_at": "18th Dec 2025 03:52 PM"}
+    )
+    assert data["shiprocket_created_at"] == datetime(2025, 12, 18, 15, 52)
+
+
+def test_shipment_normalization_still_parses_created_at_without_an_ordinal_suffix() -> None:
+    data = SHIPMENT_NORMALIZER.normalize(
+        {"id": 1, "awb": "AWB1", "created_at": "2026-01-01 09:00:00"}
+    )
+    assert data["shiprocket_created_at"] == datetime(2026, 1, 1, 9, 0, 0)
+
+
 # 9. Courier mapping (payment-method + generic value mapping pattern)
 @pytest.mark.parametrize(
     ("payment_type", "expected"),

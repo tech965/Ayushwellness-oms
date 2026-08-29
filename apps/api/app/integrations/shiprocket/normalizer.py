@@ -14,6 +14,7 @@ it doesn't map to a known `ShipmentStatus` enum value (spec §14).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -55,24 +56,36 @@ def normalize_shipment_status(raw_status: str | None) -> ShipmentStatus | None:
     return _SHIPMENT_STATUS_MAP.get(_normalize_key(raw_status))
 
 
+# Strips an ordinal day suffix ("18th" -> "18", "21st" -> "21") --
+# confirmed live: GET /shipments' `created_at` uses one ("18th Dec 2025
+# 03:52 PM"), but GET /orders/show/{id}'s `created_at` does not ("21 Dec
+# 2025 12:49 PM") -- same provider, two endpoints, two subtly different
+# formats. `strptime` has no directive for an ordinal suffix, so it's
+# stripped before parsing rather than adding a third, near-duplicate
+# format string.
+_ORDINAL_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
+
+
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
+    normalized = _ORDINAL_SUFFIX_RE.sub(r"\1", value)
     for fmt in (
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%d",
         # Confirmed live on GET /orders/show/{id}'s `created_at` (e.g.
-        # "21 Dec 2025 12:49 PM") -- a different format than the other
-        # Shiprocket timestamps above, which come from other endpoints.
+        # "21 Dec 2025 12:49 PM") and, once the ordinal suffix above is
+        # stripped, GET /shipments' `created_at` too (e.g. "18th Dec 2025
+        # 03:52 PM" -> "18 Dec 2025 03:52 PM").
         "%d %b %Y %I:%M %p",
     ):
         try:
-            return datetime.strptime(value, fmt)
+            return datetime.strptime(normalized, fmt)
         except ValueError:
             continue
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError:
         return None
 
