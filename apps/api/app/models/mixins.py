@@ -47,4 +47,5 @@ class SourceSystem:
     SHOPIFY = "shopify"
     SHIPROCKET = "shiprocket"
     BLUE_DART = "blue_dart"
+    CASHFREE = "cashfree"
     MANUAL = "manual"

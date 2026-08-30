@@ -1,9 +1,18 @@
 """Payment and PaymentTransaction.
 
-Payment information may originate from Shopify or a payment provider
-starting Phase 2+. No live gateway is connected in Phase 1 — `Payment`
-rows are created by `OrderService.create_order()` alongside the order,
-and the API only exposes read endpoints (`docs` §36).
+Payment information may originate from Shopify or a payment provider.
+`Payment` rows are created by `OrderService.create_order()` alongside a
+manually-created order, and — starting the Cashfree integration — also
+created/looked-up on demand by `app.services.cashfree_payment_service.
+CashfreePaymentService` when a checkout session is initiated for any
+order (`(source_system="cashfree", external_id=<deterministic Cashfree
+order_id>)`, the same generic `SyncMetadataMixin` identity every other
+provider-synced row already uses — see `BaseRepository.
+upsert_by_external_id`). `PaymentTransaction` is an append-only per-event
+log (never updated) of every gateway callback/lookup applied to a
+`Payment` — one row per Cashfree webhook delivery or reconciliation
+check that successfully resolves to a `Payment`, mirroring
+`ShipmentEvent`'s append-only convention.
 """
 
 from __future__ import annotations
@@ -61,6 +70,17 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
 
 class PaymentTransaction(Base, UUIDPrimaryKeyMixin):
     __tablename__ = "payment_transactions"
+    __table_args__ = (
+        # Defense-in-depth idempotency backstop, on top of the generic
+        # WebhookEvent-level dedup every provider webhook already goes
+        # through (spec: "ensure uniqueness/idempotency around provider
+        # identifiers"). NULL `gateway_transaction_id` values never
+        # collide (standard SQL multi-column unique semantics), so this
+        # never constrains a transaction recorded without one.
+        UniqueConstraint(
+            "gateway", "gateway_transaction_id", name="uq_payment_transactions_gateway_txn"
+        ),
+    )
 
     payment_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("payments.id", ondelete="CASCADE"), nullable=False, index=True
@@ -73,6 +93,13 @@ class PaymentTransaction(Base, UUIDPrimaryKeyMixin):
         sa_enum(PaymentStatus, "payment_status"), nullable=False
     )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Sanitized gateway response for this one event (e.g. Cashfree's
+    # `data.payment`/`data.payment_gateway_details`/`error_details`) —
+    # deliberately never the raw webhook body's `customer_details`, to
+    # avoid a second copy of customer PII beyond what `WebhookEvent.
+    # payload` already unavoidably stores (spec §11/§18: minimize PII
+    # duplication where the data isn't needed).
+    raw_payload: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         AwareDateTime(), server_default=func.now(), nullable=False
     )

@@ -57,6 +57,7 @@ PERMISSIONS: dict[str, str] = {
     "returns.update": "Create/update returns",
     "refunds.read": "View refunds",
     "payments.read": "View payments",
+    "payments.create": "Initiate/reconcile a Cashfree payment checkout for an order",
     "couriers.read": "View couriers",
     "couriers.update": "Create/update couriers",
     "analytics.read": "View dashboard/analytics",
@@ -95,6 +96,8 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "customers.read",
         "reconciliation.read",
         "reconciliation.manage",
+        "payments.read",
+        "payments.create",
     ],
     "CUSTOMER_SUPPORT": [
         "customers.read",
@@ -143,6 +146,14 @@ COURIERS = [
 INTEGRATIONS = [
     ("Shopify", IntegrationCode.SHOPIFY, IntegrationType.ECOMMERCE),
     ("Shiprocket", IntegrationCode.SHIPROCKET, IntegrationType.COURIER),
+    # `IntegrationType` has no dedicated "payment gateway" value (adding
+    # one would mean an Alembic `ALTER TYPE ... ADD VALUE` migration for
+    # a purely descriptive field — nothing in the app branches on
+    # `IntegrationType`, confirmed by inspection). ECOMMERCE is the
+    # closest existing fit; this row exists only so
+    # `WebhookService.ingest()` has an `integration_id` to attach
+    # Cashfree webhook deliveries to (see app.integrations.cashfree).
+    ("Cashfree", IntegrationCode.CASHFREE, IntegrationType.ECOMMERCE),
     ("Blue Dart", IntegrationCode.BLUE_DART, IntegrationType.COURIER),
     ("Delhivery", IntegrationCode.DELHIVERY, IntegrationType.COURIER),
     ("Ecom Express", IntegrationCode.ECOM_EXPRESS, IntegrationType.COURIER),

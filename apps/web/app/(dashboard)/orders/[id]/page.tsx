@@ -6,6 +6,7 @@ import { useParams, useSearchParams } from "next/navigation"
 import { Mail, MapPin, Phone, Truck } from "lucide-react"
 import { toast } from "sonner"
 
+import { CashfreePaymentCard } from "@/components/orders/cashfree-payment-card"
 import { Breadcrumbs } from "@/components/shared/breadcrumbs"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
@@ -332,6 +333,8 @@ function OrderDetailContent() {
                   )}
                 </CardContent>
               </Card>
+
+              <CashfreePaymentCard orderId={orderId} orderPaymentStatus={order.payment_status} />
 
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between gap-2">

@@ -17,6 +17,7 @@ from app.api.v1.endpoints import (
     audit_logs,
     auth,
     automation,
+    cashfree_payments,
     couriers,
     customers,
     dashboard,
@@ -41,6 +42,7 @@ from app.api.v1.endpoints import (
     users,
     webhook_events,
 )
+from app.api.v1.webhooks import cashfree as cashfree_webhooks
 from app.api.v1.webhooks import couriers as courier_webhooks
 from app.api.v1.webhooks import shiprocket as shiprocket_webhooks
 from app.api.v1.webhooks import shopify as shopify_webhooks
@@ -55,6 +57,9 @@ api_router.include_router(orders.router, prefix="/orders", tags=["orders"])
 api_router.include_router(customers.router, prefix="/customers", tags=["customers"])
 api_router.include_router(products.router, prefix="/products", tags=["products"])
 api_router.include_router(payments.router, prefix="/payments", tags=["payments"])
+api_router.include_router(
+    cashfree_payments.router, prefix="/payments/cashfree", tags=["payments:cashfree"]
+)
 api_router.include_router(shipments.router, prefix="/shipments", tags=["shipments"])
 api_router.include_router(
     shipment_events.router, prefix="/shipment-events", tags=["shipment-events"]
@@ -86,4 +91,7 @@ api_router.include_router(
 )
 api_router.include_router(
     courier_webhooks.router, prefix="/webhooks/couriers", tags=["webhooks:couriers"]
+)
+api_router.include_router(
+    cashfree_webhooks.router, prefix="/webhooks/cashfree", tags=["webhooks:cashfree"]
 )

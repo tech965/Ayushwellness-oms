@@ -56,6 +56,29 @@ services:
       # in the request, never by the worker.
       - key: SHIPROCKET_WEBHOOK_SECRET
         sync: false
+      # Cashfree Payments — checkout creation (POST /api/v1/payments/
+      # cashfree/orders/{id}/create) and webhook verification (POST
+      # /api/v1/webhooks/cashfree/payment) both run synchronously in the
+      # web service; the worker never calls Cashfree, so these are web-
+      # service-only. See docs/integrations/cashfree.md.
+      - key: CASHFREE_CLIENT_ID
+        sync: false
+      - key: CASHFREE_CLIENT_SECRET
+        sync: false
+      # Optional — only needed if this Cashfree account has a webhook
+      # signing key distinct from its client secret; leave unset to use
+      # CASHFREE_CLIENT_SECRET (Cashfree's documented default/common
+      # case — see app.integrations.cashfree.webhooks).
+      - key: CASHFREE_WEBHOOK_SECRET
+        sync: false
+      # https://api.cashfree.com/pg for production, defaults to the
+      # sandbox URL if unset — see app.core.config.
+      - key: CASHFREE_BASE_URL
+        sync: false
+      # Optional order_meta.return_url template (a "{order_id}"
+      # placeholder is substituted) — checkout works without it.
+      - key: CASHFREE_RETURN_URL
+        sync: false
 
   - type: worker
     name: ayushwellness-oms-worker

@@ -78,6 +78,9 @@ def _isolate_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
         "SHIPROCKET_EMAIL",
         "SHIPROCKET_PASSWORD",
         "SHIPROCKET_PICKUP_LOCATION",
+        "CASHFREE_CLIENT_ID",
+        "CASHFREE_CLIENT_SECRET",
+        "CASHFREE_WEBHOOK_SECRET",
     ):
         monkeypatch.setattr(settings, attr, None)
 

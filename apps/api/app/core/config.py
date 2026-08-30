@@ -102,6 +102,27 @@ class Settings(BaseSettings):
     BLUE_DART_CLIENT_ID: str | None = None
     BLUE_DART_CLIENT_SECRET: str | None = None
 
+    # --- Cashfree (optional — connected when credentials are present; the
+    # API never fails to start without them). Payments API version
+    # 2025-01-01; base URL defaults to sandbox so a missing/unset value
+    # can never accidentally point at production. ---
+    CASHFREE_CLIENT_ID: str | None = None
+    CASHFREE_CLIENT_SECRET: str | None = None
+    CASHFREE_API_VERSION: str = "2025-01-01"
+    CASHFREE_BASE_URL: str = "https://sandbox.cashfree.com/pg"
+    # Optional override for webhook signature verification. Cashfree's
+    # documented webhook signing key IS the Payment Gateway client secret
+    # (CASHFREE_CLIENT_SECRET) — no separate key is issued for most
+    # accounts — so this is only needed if a specific Cashfree account
+    # is configured with a distinct webhook secret; see
+    # app.integrations.cashfree.webhooks.
+    CASHFREE_WEBHOOK_SECRET: str | None = None
+    # order_meta.return_url sent to Cashfree on order creation — a
+    # {order_id} placeholder is substituted with the OMS order id. Falls
+    # back to a same-origin-safe default (no redirect) when unset, since
+    # a wrong/unset return_url must never break checkout creation.
+    CASHFREE_RETURN_URL: str | None = None
+
     # --- WhatsApp (optional, V2) ---
     WHATSAPP_API_URL: str | None = None
     WHATSAPP_ACCESS_TOKEN: str | None = None

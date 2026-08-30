@@ -41,6 +41,7 @@ class IntegrationCode:
     WHATSAPP = "whatsapp"
     META = "meta"
     INSTAGRAM = "instagram"
+    CASHFREE = "cashfree"
 
 
 class Integration(Base, UUIDPrimaryKeyMixin, TimestampMixin):
