@@ -222,7 +222,7 @@ function DashboardContent() {
             kpi={summary?.total_orders}
             format={count}
             href={breakdownHref}
-            accent="blue"
+            accent="emerald"
           />
           <KpiCard
             label="Total Revenue"

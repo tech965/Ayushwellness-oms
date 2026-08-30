@@ -61,104 +61,103 @@
 
 :root {
   --background: #ffffff;
-  --foreground: #0a0a0a;
+  --foreground: #0f172a;
   --card: #ffffff;
-  --card-foreground: #0a0a0a;
+  --card-foreground: #0f172a;
   --popover: #ffffff;
-  --popover-foreground: #0a0a0a;
+  --popover-foreground: #0f172a;
   --header-background: #ffffff;
-  /* Brand accent is Ayush Wellness lime (#D4FF9F), used verbatim in the
-     dark theme below where it reads clearly against a near-black surface.
-     On white, that exact pale swatch has ~1.1:1 contrast (nearly
-     invisible as a button fill, unreadable as link/text) — so light mode
-     uses a bolder, WCAG-accessible shade from the same lime family
-     (Tailwind lime-700/800) for anything interactive (buttons, links,
-     focus rings, active nav), keeping the brand hue without failing
-     contrast. See docs note in dashboard redesign report. */
-  --primary: #4d7c0f;
-  --primary-hover: #3f6212;
-  --primary-foreground: #ffffff;
-  --secondary: #f5f5f5;
-  --secondary-foreground: #0a0a0a;
-  --muted: #f5f5f5;
-  --muted-foreground: #737373;
-  --accent: #f5f5f5;
-  --accent-foreground: #0a0a0a;
+  /* Brand accent is Ayush Wellness lime. The dark theme below uses the
+     exact reference swatch (#D4FF9F) since it reads clearly against a
+     deep navy surface. On white, that pale swatch has ~1.1:1 contrast
+     (an almost invisible button fill, unreadable link text) — so light
+     mode uses a bolder, still-unmistakably-lime shade (Tailwind
+     lime-500/600) for anything interactive, keeping the brand hue
+     without failing contrast. */
+  --primary: #84cc16;
+  --primary-hover: #65a30d;
+  --primary-foreground: #0a0a0a;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0f172a;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --accent: #f1f5f9;
+  --accent-foreground: #0f172a;
   --destructive: #dc2626;
-  --border: #e5e5e5;
-  --input: #e5e5e5;
-  --ring: #0a0a0a;
-  --success: #16a34a;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+  --ring: #0f172a;
+  --success: #65a30d;
   --success-foreground: #ffffff;
   --warning: #d97706;
   --warning-foreground: #ffffff;
   --danger: #dc2626;
   --danger-foreground: #ffffff;
-  --info: #525252;
+  --info: #3b82f6;
   --info-foreground: #ffffff;
   --purple: #9333ea;
   --orange: #ea580c;
-  --chart-1: #65a30d;
-  --chart-2: #0a0a0a;
-  --chart-3: #737373;
-  --chart-4: #a3a3a3;
-  --chart-5: #d4d4d4;
+  --chart-1: #84cc16;
+  --chart-2: #0f172a;
+  --chart-3: #64748b;
+  --chart-4: #94a3b8;
+  --chart-5: #cbd5e1;
   --radius: 0.625rem;
-  --shadow-soft: 0 1px 2px rgb(10 10 10 / 0.04), 0 1px 3px rgb(10 10 10 / 0.06);
+  --shadow-soft: 0 1px 2px rgb(15 23 42 / 0.04), 0 1px 3px rgb(15 23 42 / 0.06);
   --sidebar: #ffffff;
-  --sidebar-foreground: #0a0a0a;
-  --sidebar-primary: #4d7c0f;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #ecfccb;
-  --sidebar-accent-foreground: #365314;
-  --sidebar-border: #e5e5e5;
-  --sidebar-ring: #0a0a0a;
+  --sidebar-foreground: #0f172a;
+  --sidebar-primary: #84cc16;
+  --sidebar-primary-foreground: #0a0a0a;
+  --sidebar-accent: #d4ff9f;
+  --sidebar-accent-foreground: #0a0a0a;
+  --sidebar-border: #e2e8f0;
+  --sidebar-ring: #0f172a;
 }
 
 .dark {
-  --background: #0a0a0a;
-  --foreground: #ffffff;
-  --card: #111111;
-  --card-foreground: #ffffff;
-  --popover: #181818;
-  --popover-foreground: #ffffff;
-  --header-background: #0a0a0a;
+  --background: #0b1220;
+  --foreground: #f1f5f9;
+  --card: #141b2e;
+  --card-foreground: #f1f5f9;
+  --popover: #1b2438;
+  --popover-foreground: #f1f5f9;
+  --header-background: #0b1220;
   --primary: #d4ff9f;
   --primary-hover: #bef264;
   --primary-foreground: #0a0a0a;
-  --secondary: #181818;
-  --secondary-foreground: #ffffff;
-  --muted: #141414;
-  --muted-foreground: #a3a3a3;
-  --accent: #1a1a1a;
-  --accent-foreground: #ffffff;
+  --secondary: #1b2438;
+  --secondary-foreground: #f1f5f9;
+  --muted: #182033;
+  --muted-foreground: #94a3b8;
+  --accent: #1e2a40;
+  --accent-foreground: #f1f5f9;
   --destructive: #ef4444;
-  --border: #262626;
-  --input: #262626;
+  --border: #26314a;
+  --input: #26314a;
   --ring: #d4ff9f;
-  --success: #22c55e;
+  --success: #a3e635;
   --success-foreground: #052e13;
   --warning: #f59e0b;
   --warning-foreground: #2b1a02;
   --danger: #ef4444;
   --danger-foreground: #2b0a0a;
-  --info: #a3a3a3;
-  --info-foreground: #171717;
+  --info: #60a5fa;
+  --info-foreground: #071b33;
   --purple: #a78bfa;
   --orange: #fb923c;
   --chart-1: #a3e635;
-  --chart-2: #e5e5e5;
-  --chart-3: #a3a3a3;
-  --chart-4: #737373;
-  --chart-5: #525252;
+  --chart-2: #e2e8f0;
+  --chart-3: #94a3b8;
+  --chart-4: #64748b;
+  --chart-5: #475569;
   --shadow-soft: none;
-  --sidebar: #0a0a0a;
-  --sidebar-foreground: #ffffff;
+  --sidebar: #0b1220;
+  --sidebar-foreground: #f1f5f9;
   --sidebar-primary: #d4ff9f;
   --sidebar-primary-foreground: #0a0a0a;
-  --sidebar-accent: #1b2410;
-  --sidebar-accent-foreground: #d4ff9f;
-  --sidebar-border: #262626;
+  --sidebar-accent: #d4ff9f;
+  --sidebar-accent-foreground: #0a0a0a;
+  --sidebar-border: #26314a;
   --sidebar-ring: #d4ff9f;
 }
 

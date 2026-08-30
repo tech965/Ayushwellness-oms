@@ -8,8 +8,8 @@ import type { KPIValue } from "@/types/analytics"
 
 const TONE_CLASSES: Record<StatusTone, string> = {
   neutral: "bg-muted text-muted-foreground",
-  info: "bg-neutral-100 text-neutral-600 dark:bg-neutral-500/10 dark:text-neutral-400",
-  success: "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400",
+  info: "bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400",
+  success: "bg-lime-50 text-lime-700 dark:bg-lime-500/10 dark:text-lime-400",
   warning: "bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-400",
   danger: "bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-400",
   purple: "bg-purple-50 text-purple-600 dark:bg-purple-500/10 dark:text-purple-400",

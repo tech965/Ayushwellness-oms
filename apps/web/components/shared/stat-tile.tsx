@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 
 const ACCENT_CLASSES: Record<string, string> = {
   blue: "bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400",
-  emerald: "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400",
+  emerald: "bg-lime-50 text-lime-700 dark:bg-lime-500/10 dark:text-lime-400",
   amber: "bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-400",
   violet: "bg-violet-50 text-violet-600 dark:bg-violet-500/10 dark:text-violet-400",
   orange: "bg-orange-50 text-orange-600 dark:bg-orange-500/10 dark:text-orange-400",
