@@ -131,6 +131,89 @@ class ShiprocketTrackingNormalizer:
 TRACKING_NORMALIZER = ShiprocketTrackingNormalizer()
 
 
+# --- Tracking webhook (push, inbound) ----------------------------------
+
+# UNVERIFIED — no live Shiprocket webhook delivery has been captured
+# (see docs/integrations/shiprocket.md's Webhooks section for what was
+# and wasn't confirmed). These are the field names third-party
+# integration guides most consistently describe for Shiprocket's
+# "Shipment Webhook" (Settings > API > Webhook) payload; every key is
+# read defensively with a fallback chain, exactly like the rest of this
+# module, so a wrong guess degrades to "field not found" (None) rather
+# than a crash or a fabricated value. Re-confirm this list against a
+# real delivery (see the endpoint's logging) before treating any single
+# alias as authoritative.
+def _first_present(payload: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def extract_webhook_shipment_identifiers(payload: dict[str, Any]) -> dict[str, str | None]:
+    """AWB / Shiprocket shipment id / Shiprocket order id / channel
+    (Shopify) order number — the four identifiers
+    `ShiprocketWebhookService` tries, in that preferred order, to find
+    the OMS `Shipment` a webhook delivery refers to. Never reads
+    anything that isn't one of those four (spec: never guess from
+    name/phone/address).
+    """
+    awb = _first_present(payload, "awb", "awb_code")
+    shipment_id = _first_present(payload, "shipment_id", "sr_shipment_id")
+    order_id = _first_present(payload, "order_id", "sr_order_id")
+    channel_order_id = _first_present(
+        payload, "channel_order_id", "channel_order_number", "reference_number"
+    )
+    courier_name = _first_present(payload, "courier_name", "courier")
+    return {
+        "awb": str(awb) if awb is not None else None,
+        "shiprocket_shipment_id": (str(shipment_id) if shipment_id is not None else None),
+        "shiprocket_order_id": (str(order_id) if order_id is not None else None),
+        "channel_order_id": (str(channel_order_id) if channel_order_id is not None else None),
+        "courier_name": str(courier_name) if courier_name is not None else None,
+    }
+
+
+class ShiprocketWebhookTrackingNormalizer:
+    """One flat webhook body (no `scans`/`shipment_track_activities`
+    list — see `extract_tracking_events`, tried first by the caller for
+    a payload that does have one, in which case `TRACKING_NORMALIZER`
+    handles it instead) -> the same kwargs shape
+    `ShipmentService.add_tracking_event` expects.
+
+    Deliberately never reads a body-level `id`/`shipment_id` as
+    `external_event_id` — unlike a `shipment_track_activities` list item
+    (where `id` genuinely identifies one scan), a webhook body's `id`
+    identifies the *shipment*, not this one status-change event; treating
+    it as a per-event id would make a later, genuinely different status
+    update for the same shipment collide with an earlier one and silently
+    disappear. `external_event_id` is always `None` here instead, which
+    is exactly the case `ShipmentEventRepository.find_duplicate` already
+    handles by falling back to a `(status, event_timestamp)` check (see
+    `app.models.shipment`'s module docstring) — a genuine retry of the
+    same event is still deduplicated; a real, later status change is not.
+    """
+
+    def normalize_event(self, raw: dict[str, Any]) -> dict[str, Any]:
+        raw_status = _first_present(raw, "current_status", "status", "shipment_status")
+        return {
+            "external_event_id": None,
+            "status": raw_status or "",
+            "mapped_status": normalize_shipment_status(raw_status),
+            "location": _first_present(raw, "current_location", "location", "city"),
+            "event_timestamp": _parse_datetime(
+                _first_present(raw, "current_timestamp", "updated_at", "status_updated_at", "date")
+            ),
+            "description": _first_present(raw, "current_status_label", "activity") or raw_status,
+            "courier_name": _first_present(raw, "courier_name", "courier"),
+            "raw_payload": raw,
+        }
+
+
+WEBHOOK_TRACKING_NORMALIZER = ShiprocketWebhookTrackingNormalizer()
+
+
 # --- Shipments (pull) --------------------------------------------------
 
 

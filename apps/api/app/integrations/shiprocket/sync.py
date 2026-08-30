@@ -26,7 +26,7 @@ from app.services.rto_service import RTOService
 from app.services.shipment_service import ShipmentService
 from app.services.sync_service import SyncService
 
-_RTO_STATUS_FROM_SHIPMENT_STATUS: dict[ShipmentStatus, RTOStatus] = {
+RTO_STATUS_FROM_SHIPMENT_STATUS: dict[ShipmentStatus, RTOStatus] = {
     ShipmentStatus.RTO_INITIATED: RTOStatus.INITIATED,
     ShipmentStatus.RTO_DELIVERED: RTOStatus.RECEIVED,
 }
@@ -36,6 +36,66 @@ _TERMINAL_STATUSES = (
     ShipmentStatus.CANCELLED,
     ShipmentStatus.RTO_DELIVERED,
 )
+
+
+async def apply_tracking_event(
+    session: AsyncSession,
+    shipment: Shipment,
+    normalized: dict,
+    *,
+    shipment_service: ShipmentService,
+    rto_service: RTOService,
+    source: str = "shiprocket",
+) -> bool:
+    """One normalized tracking event (the shape `TRACKING_NORMALIZER.
+    normalize_event`/a webhook-flavored equivalent both produce) -> the
+    same three OMS writes every tracking source needs: append the
+    `ShipmentEvent` (idempotent), advance `Shipment.current_status` when
+    the event maps to a known status, and derive an `RTO` row when that
+    status is `RTO_INITIATED`/`RTO_DELIVERED`. Shared by `refresh_tracking`
+    (pull) and `app.services.shiprocket_webhook_service` (push/webhook) so
+    the two ingestion paths can never silently diverge in behaviour.
+    Returns True only when a genuinely new `ShipmentEvent` was created —
+    a duplicate replay (same external_event_id, or same
+    (status, event_timestamp) when no id is available) returns False.
+    """
+    if normalized["event_timestamp"] is None:
+        return False
+
+    _, created = await shipment_service.add_tracking_event(
+        shipment.id,
+        external_event_id=normalized["external_event_id"],
+        status=normalized["status"],
+        location=normalized["location"],
+        event_timestamp=normalized["event_timestamp"],
+        description=normalized["description"],
+        courier_name=normalized["courier_name"],
+        source=source,
+        raw_payload=normalized["raw_payload"],
+    )
+
+    mapped_status = normalized["mapped_status"]
+    if mapped_status is not None:
+        await shipment_service.update_shipment(
+            shipment.id, actor=None, current_status=mapped_status
+        )
+
+    rto_status = RTO_STATUS_FROM_SHIPMENT_STATUS.get(mapped_status)
+    if rto_status is not None:
+        # No dedicated RTO listing endpoint was confirmed for Shiprocket
+        # (see docs/integrations/shiprocket.md) — RTO records are derived
+        # from tracking events instead of a separate, unverified sync path.
+        await rto_service.upsert_synced_rto(
+            source_system="shiprocket",
+            external_id=shipment.awb,
+            shipment_id=shipment.id,
+            order_id=shipment.order_id,
+            courier_id=shipment.courier_id,
+            status=rto_status,
+            external_reason=normalized["description"],
+        )
+
+    return created
 
 
 async def refresh_tracking(
@@ -61,43 +121,14 @@ async def refresh_tracking(
 
             for raw_event in extract_tracking_events(raw_response):
                 normalized = TRACKING_NORMALIZER.normalize_event(raw_event)
-                if normalized["event_timestamp"] is None:
-                    continue
-
-                _, created = await shipment_service.add_tracking_event(
-                    shipment.id,
-                    external_event_id=normalized["external_event_id"],
-                    status=normalized["status"],
-                    location=normalized["location"],
-                    event_timestamp=normalized["event_timestamp"],
-                    description=normalized["description"],
-                    courier_name=normalized["courier_name"],
-                    source="shiprocket",
-                    raw_payload=normalized["raw_payload"],
+                created = await apply_tracking_event(
+                    session,
+                    shipment,
+                    normalized,
+                    shipment_service=shipment_service,
+                    rto_service=rto_service,
                 )
                 any_new_event = any_new_event or created
-
-                mapped_status = normalized["mapped_status"]
-                if mapped_status is not None:
-                    await shipment_service.update_shipment(
-                        shipment.id, actor=None, current_status=mapped_status
-                    )
-
-                rto_status = _RTO_STATUS_FROM_SHIPMENT_STATUS.get(mapped_status)
-                if rto_status is not None:
-                    # No dedicated RTO listing endpoint was confirmed for
-                    # Shiprocket (see docs/integrations/shiprocket.md) — RTO
-                    # records are derived from tracking events instead of a
-                    # separate, unverified sync path.
-                    await rto_service.upsert_synced_rto(
-                        source_system="shiprocket",
-                        external_id=shipment.awb,
-                        shipment_id=shipment.id,
-                        order_id=shipment.order_id,
-                        courier_id=shipment.courier_id,
-                        status=rto_status,
-                        external_reason=normalized["description"],
-                    )
 
             if any_new_event:
                 updated_count += 1

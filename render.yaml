@@ -49,6 +49,13 @@ services:
         sync: false
       - key: SHIPROCKET_PICKUP_LOCATION
         sync: false
+      # Verifies POST /api/v1/webhooks/shiprocket/tracking (see
+      # app.integrations.shiprocket.webhooks) — the same value entered as
+      # the "Webhook Secret" in Shiprocket's dashboard (Settings > API >
+      # Webhook). Web service only: this endpoint is handled synchronously
+      # in the request, never by the worker.
+      - key: SHIPROCKET_WEBHOOK_SECRET
+        sync: false
 
   - type: worker
     name: ayushwellness-oms-worker

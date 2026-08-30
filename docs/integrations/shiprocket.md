@@ -177,23 +177,116 @@ retried via `app.integrations.retry`'s exponential backoff
 forced re-login + retry (not the generic backoff loop), since the fix
 for "token expired" is a fresh login, not a delay.
 
-## Webhooks — none implemented (spec §19/§20)
+## Webhooks — tracking status updates (spec §19/§20)
 
-No reliable webhook/callback contract for shipment status, NDR, or RTO
-updates could be confirmed in available Shiprocket documentation without
-a live account. Per the explicit instruction not to invent one,
-`app/api/v1/webhooks/shiprocket.py` remains an empty router, and
-`ShiprocketAdapter.process_webhook()` exists only to satisfy the
-`IntegrationAdapter` interface — it always returns a documented no-op
-(`{"entity_type": None, "normalized": None}`). **Polling is the sync
-strategy instead**: the tracking-refresh task above, triggered manually
-today (`POST /sync/{integration_id}/trigger`) and available for a
-future scheduled Celery beat job without any further architecture
-change. If Shiprocket's dashboard is later confirmed to support
-outbound webhooks/callbacks for these events, this document and
-`app/api/v1/webhooks/shiprocket.py` are where that gets implemented —
-reusing the same `WebhookService`/`WebhookEvent` idempotency layer
-Shopify's webhook already proves out.
+Status: **IMPLEMENTED**, payload shape **UNVERIFIED against a live
+delivery**.
+
+    POST /api/v1/webhooks/shiprocket/tracking
+
+Shiprocket's tracking-webhook payload schema and secret-transport
+mechanism are not published in any documentation this integration's
+research could confirm (see the "Webhook research" note below) — unlike
+the Shopify webhook, which verifies a documented, confirmed
+`X-Shopify-Hmac-Sha256` HMAC. Rather than inventing a payload shape,
+this endpoint is built to be **tolerant of every commonly-cited
+variant**, and every field it reads is marked in code as unverified
+until confirmed against a real delivery:
+
+- **Parsing** (`app.integrations.shiprocket.normalizer`):
+  `extract_webhook_shipment_identifiers` reads `awb`/`awb_code`,
+  `shipment_id`/`sr_shipment_id`, `order_id`/`sr_order_id`,
+  `channel_order_id`/`channel_order_number`/`reference_number`, and
+  `courier_name`/`courier` — trying each alias in order, never guessing
+  a value that isn't present. `ShiprocketWebhookTrackingNormalizer`
+  reads the status/timestamp/location fields the same way. If the body
+  instead carries a nested `shipment_track_activities`/`scans` list (the
+  same shape `GET .../track/awb/{awb}` returns), the existing
+  `TRACKING_NORMALIZER`/`extract_tracking_events` handle it unchanged —
+  full reuse, not a second parser.
+- **Security** (`app.integrations.shiprocket.webhooks`):
+  `SHIPROCKET_WEBHOOK_SECRET` (already present in `app.core.config`,
+  previously unused) is checked against **either** an `X-Api-Key`
+  request header **or** a `token`/`secret`/`webhook_secret`/
+  `webhook_token` field inside the JSON body — the two transports most
+  consistently described for the single "Webhook Secret" field
+  Shiprocket's dashboard (Settings > API > Webhook) exposes. An
+  unconfigured secret always rejects (never "skip verification"),
+  exactly like the Shopify webhook's HMAC check.
+- **Matching** (`app.services.shiprocket_webhook_service.
+  ShiprocketWebhookService`): AWB -> Shiprocket shipment id (by
+  `(source_system="shiprocket", external_id=...)`, the same identity
+  every Shiprocket `Shipment` row is already keyed by) -> Shiprocket
+  order id (via the same live `GET /orders/show/{id}` fallback
+  `app.integrations.entity_sync._upsert_shipment` already uses for the
+  pull-sync path — reused, not reimplemented) -> channel/Shopify order
+  number. Never falls back to name/phone/address. An order that resolves
+  with zero existing `Shipment` rows gets one created via the same
+  `upsert_synced_shipment` idempotent create-or-update the pull-sync path
+  uses; an order with *more than one* existing shipment is treated as
+  unmatched rather than guessed.
+- **Applying the update**: `app.integrations.shiprocket.sync.
+  apply_tracking_event` — extracted from `refresh_tracking` specifically
+  so the poll and webhook paths can never silently diverge — appends a
+  `ShipmentEvent`, advances `Shipment.current_status` via the existing
+  `_SHIPMENT_STATUS_MAP`, and derives an `RTO` row exactly like a poll
+  refresh would.
+- **Idempotency**: routed through the same generic
+  `WebhookService.ingest()` Shopify's webhook uses. No stable Shiprocket
+  webhook event id could be confirmed, so `external_event_id` is always
+  `None`, which makes `WebhookService` fall back to
+  `compute_fallback_event_id` — a deterministic hash of
+  (integration, event_type, payload). A byte-identical retry collides on
+  the same hash and is a no-op; a genuinely different status update for
+  the same shipment hashes differently and is processed. Within one
+  webhook delivery, per-event application also falls back to
+  `ShipmentEvent`'s existing `(status, event_timestamp)` dedup when no
+  event id is present (see `app.models.shipment`'s module docstring) —
+  the same mechanism the poll path already relies on.
+- **Unmatched events**: never fabricated. The `WebhookEvent` row is
+  marked `IGNORED` with a sanitized `match_strategy` reason (e.g.
+  `no_matching_shipment:unmatched`,
+  `no_matching_shipment:ambiguous_multiple_shipments_for_order`) for
+  reconciliation via the raw `payload` already stored on that row
+  (`GET /api/v1/webhook-events/{id}` for anyone with DB access; the API
+  itself never returns the raw payload — spec §18). The endpoint still
+  acks 200 so Shiprocket doesn't retry an event it already understood.
+- **Errors**: malformed/non-object JSON -> 400. Invalid/missing token ->
+  401 (checked before the body is even parsed for a body-embedded token,
+  so an unauthenticated caller never learns whether their JSON was
+  well-formed). A genuine processing failure (database error) rolls back,
+  marks the `WebhookEvent` `FAILED`, and returns 502/500 so Shiprocket's
+  own retry behaviour can recover it — **never fabricated as a 200**.
+
+### Webhook research
+
+Extensive documentation research (Shiprocket's own `apidocs.shiprocket.in`
+and `support.shiprocket.in`, third-party integration guides, public
+Postman workspaces) found that Shiprocket's dashboard exposes a
+"Shipment Webhook Settings" configuration (Settings > API > Webhook —
+URL + Secret) but **no source could be found publishing the exact JSON
+payload schema or confirming the secret's transport mechanism**. Nothing
+above was fabricated to fill that gap — every field name is a
+commonly-cited convention, explicitly marked UNVERIFIED in the relevant
+module's docstring, and the parser degrades to "field not found" (never
+a crash or an invented value) for any alias that turns out wrong.
+**Before this is trusted in production, a real Shiprocket webhook
+delivery must be captured and compared against the field lists above**
+— see "Post-deployment verification steps" in the PR/handoff notes for
+exactly how to do that safely (log the raw payload once, temporarily,
+never store it beyond that).
+
+### Why the scheduled sync stays
+
+This webhook is an **additional real-time ingestion path**, not a
+replacement. `refresh_tracking`/the scheduled Celery beat sync
+(`app.tasks.shiprocket_sync`) still run unchanged — the cursor-based
+crawl, the 8-minute per-run time budget, the stale-job reaper, and the
+confirmed-unmatched `SyncError` cache are all untouched by this work.
+If Shiprocket's webhook payload turns out to use field names none of the
+aliases above cover, or a delivery is ever dropped in transit, the next
+scheduled poll still catches it up — exactly the fallback/reconciliation
+role the business requirement asked this to keep.
 
 ## Credentials {#credentials}
 
