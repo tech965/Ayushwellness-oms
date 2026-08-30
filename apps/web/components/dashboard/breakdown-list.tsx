@@ -18,7 +18,7 @@ interface BreakdownListProps {
 
 const BAR_TONE_BG: Record<string, string> = {
   neutral: "bg-muted-foreground/40",
-  info: "bg-blue-500",
+  info: "bg-neutral-500",
   success: "bg-emerald-500",
   warning: "bg-amber-500",
   danger: "bg-red-500",

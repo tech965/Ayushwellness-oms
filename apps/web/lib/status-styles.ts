@@ -3,7 +3,7 @@ export type StatusTone =
 
 export const STATUS_TONE_CLASSES: Record<StatusTone, string> = {
   neutral: "bg-muted text-muted-foreground",
-  info: "bg-blue-100 text-blue-800 dark:bg-blue-500/15 dark:text-blue-400",
+  info: "bg-neutral-200 text-neutral-700 dark:bg-neutral-500/15 dark:text-neutral-300",
   success: "bg-emerald-100 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-400",
   warning: "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-400",
   danger: "bg-red-100 text-red-800 dark:bg-red-500/15 dark:text-red-400",
