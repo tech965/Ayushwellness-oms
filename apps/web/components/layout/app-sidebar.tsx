@@ -28,7 +28,7 @@ export function AppSidebar() {
   return (
     <aside
       className={cn(
-        "border-sidebar-border bg-sidebar hidden shrink-0 flex-col border-r transition-[width] duration-200 md:flex",
+        "border-sidebar-border bg-sidebar hidden h-dvh shrink-0 flex-col overflow-hidden border-r transition-[width] duration-200 md:flex",
         // Suppress the collapse transition on first paint so the sidebar
         // doesn't visibly animate from expanded -> collapsed on every
         // hard refresh while the stored preference is being read.
@@ -36,7 +36,7 @@ export function AppSidebar() {
         collapsed ? "w-16" : "w-64"
       )}
     >
-      <div className="border-sidebar-border flex h-14 items-center gap-2 border-b px-4">
+      <div className="border-sidebar-border flex h-14 shrink-0 items-center gap-2 border-b px-4">
         <Link href="/dashboard" className="flex items-center gap-2 font-semibold">
           <span className="bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-lg text-sm font-bold">
             A
@@ -48,10 +48,16 @@ export function AppSidebar() {
           )}
         </Link>
       </div>
-      <ScrollArea className="flex-1">
+      {/* `min-h-0` is required here: `<aside>` is a flex column, and a
+          flex item's default min-height is `auto` (content-based), which
+          lets this grow past the available space instead of shrinking to
+          it — the classic reason `flex-1` + `overflow-y-auto` silently
+          fails to scroll and instead gets clipped by the ancestor's
+          `overflow-hidden`, cutting off the bottom nav items. */}
+      <ScrollArea className="min-h-0 flex-1">
         <SidebarNav collapsed={collapsed} />
       </ScrollArea>
-      <div className="border-sidebar-border border-t p-2">
+      <div className="border-sidebar-border shrink-0 border-t p-2">
         <Button
           variant="ghost"
           size="sm"
