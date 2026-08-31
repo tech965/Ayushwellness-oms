@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # must use GraphQL. Quarterly release, e.g. "2026-01". Verify against
     # https://shopify.dev/docs/api/admin-graphql before bumping.
     SHOPIFY_API_VERSION: str = "2026-01"
+    # This deployment's own public URL for `POST /api/v1/webhooks/shopify`
+    # (e.g. "https://oms.example.com/api/v1/webhooks/shopify") — read only
+    # by scripts/register_shopify_webhooks.py, never by the running API
+    # itself, to register/verify Shopify's webhook subscriptions point at
+    # this environment and not a stale one (a previous deploy's URL, or a
+    # developer's local tunnel).
+    SHOPIFY_WEBHOOK_CALLBACK_URL: str | None = None
 
     # --- Shiprocket (optional — connected starting Phase 2.3 when
     # credentials are present; the API never fails to start without them) ---

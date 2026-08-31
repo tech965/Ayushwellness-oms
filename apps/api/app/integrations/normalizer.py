@@ -41,3 +41,7 @@ class OrderNormalizer(Normalizer):
 
 class ShipmentNormalizer(Normalizer):
     entity_type = "shipments"
+
+
+class RefundNormalizer(Normalizer):
+    entity_type = "refunds"

@@ -99,12 +99,42 @@ Shopify POSTs (topic in X-Shopify-Topic)
      -> WebhookEvent marked PROCESSED / FAILED
 ```
 
-Subscribed topics: `orders/create`, `orders/updated`, `orders/cancelled`,
+Subscribed topics (`app.integrations.shopify.webhooks.SUPPORTED_WEBHOOK_TOPICS`
+— the single source of truth for what `scripts/register_shopify_webhooks.py`
+registers on Shopify): `orders/create`, `orders/updated`, `orders/cancelled`,
+`orders/fulfilled`, `orders/partially_fulfilled`, `refunds/create`,
 `customers/create`, `customers/update`, `products/create`,
 `products/update`. `entity_type` is derived from the topic
 (`topic.split("/")[0]`) — a convention specific to Shopify's topic
 naming, applied in the task layer, not baked into the generic
-`WebhookService`.
+`WebhookService`. `orders/fulfilled`/`orders/partially_fulfilled` need no
+special-casing — Shopify delivers the full order resource for both
+(entity_type `"orders"`), so they reuse the exact same normalizer/upsert
+path as `orders/updated`. `refunds/create` is the one genuinely new entity
+type: `ShopifyRefundNormalizer` (`normalizer.py`) reads the REST refund
+resource directly (no GraphQL pull-sync equivalent exists for refunds, so
+unlike orders/customers/products there's no `webhook_shapes.py`
+translation step), and `entity_sync._upsert_refund` resolves the parent
+`Order`/`Payment` by the refund's `order_id` before upserting the
+`Refund` row — a refund for an order this OMS hasn't synced yet raises
+`NotFoundError` rather than being silently dropped or fabricated.
+
+**Webhook registration**: `scripts/register_shopify_webhooks.py` lists the
+store's existing `webhookSubscription`s and, for each topic above, creates
+one pointed at `SHOPIFY_WEBHOOK_CALLBACK_URL` if none exists, repoints an
+existing one if it points elsewhere, or does nothing if it's already
+correct — idempotent and safe to rerun, never creates a duplicate
+subscription for a topic. Requires an Admin API credential with the
+`write_webhooks` scope (see "Client Credentials Grant" below).
+
+**Out-of-order delivery**: Shopify guarantees at-least-once delivery, not
+ordering. `OrderService.upsert_synced_order` compares the incoming
+payload's `external_updated_at` against the already-stored order's before
+overwriting — a delivery strictly older than what's already applied is
+dropped as stale (returns the existing row unchanged) rather than rolling
+back newer data. `None` on either side always means "apply it" (a
+first-ever sync, or a payload with no timestamp), so this can only ever
+skip a delivery *proven* older, never one that might actually be newer.
 
 ## Idempotency
 
@@ -178,6 +208,34 @@ SHOPIFY_ACCESS_TOKEN=shpat_...
 SHOPIFY_WEBHOOK_SECRET=...
 SHOPIFY_API_VERSION=2026-01   # optional, defaults to 2026-01
 ```
+
+**Webhook delivery needs no Admin API credential at all** — HMAC
+verification only checks the raw body against `SHOPIFY_WEBHOOK_SECRET`
+(or, as a fallback, `SHOPIFY_CLIENT_SECRET`; see `app/api/v1/webhooks/
+shopify.py`), so the real-time sync path (Shopify → webhook → FastAPI →
+Neon) works independently of which Admin API auth mode is configured, or
+even if neither is. Only the historical import and reconciliation paths
+call the Admin API and need a working credential.
+
+**Client Credentials Grant `shop_not_permitted` (400)**: if
+`SHOPIFY_CLIENT_ID`/`SHOPIFY_CLIENT_SECRET` are set but the token
+endpoint returns `400 shop_not_permitted`, this means the Dev Dashboard
+app is not installed/permitted for client-credentials grant on
+`SHOPIFY_STORE_DOMAIN` — a Shopify-side app-configuration state, not
+something fixable by changing the Client ID/Secret values or any code
+here (`ShopifyTokenManager`/`ShopifyClient` already retry every
+*retryable* failure and classify every *non-retryable* one, including
+this, without a workaround). Do not guess at new credential values.
+Until the app is correctly installed/permitted, unblock historical
+import/reconciliation by switching to the other supported auth mode —
+generate a **custom-app access token** in Shopify Admin → Settings →
+Apps and sales channels → Develop apps → (your app) → API credentials,
+grant it `read_customers`/`read_products`/`read_orders`, and set
+`SHOPIFY_ACCESS_TOKEN` (leaving `SHOPIFY_CLIENT_ID`/`SHOPIFY_CLIENT_SECRET`
+unset, or `ShopifyConfig.from_settings()` prefers the Client Credentials
+Grant whenever both are present). Webhook registration
+(`scripts/register_shopify_webhooks.py`) needs the same working
+credential (`write_webhooks` scope) — see that script's docstring.
 
 Until `SHOPIFY_STORE_DOMAIN`/`SHOPIFY_ACCESS_TOKEN` are set, every health
 check reports `"Not Configured"` (`GET /api/v1/integrations/{id}/health`,

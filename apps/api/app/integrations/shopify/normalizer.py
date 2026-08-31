@@ -20,8 +20,15 @@ from app.integrations.normalizer import (
     Normalizer,
     OrderNormalizer,
     ProductNormalizer,
+    RefundNormalizer,
 )
-from app.models.enums import FulfillmentStatus, PaymentStatus, PaymentType, ProductStatus
+from app.models.enums import (
+    FulfillmentStatus,
+    PaymentStatus,
+    PaymentType,
+    ProductStatus,
+    RefundStatus,
+)
 from app.models.mixins import SourceSystem
 
 
@@ -379,12 +386,73 @@ class ShopifyOrderNormalizer(OrderNormalizer):
         }
 
 
+# --- Refund ----------------------------------------------------------------
+
+# `refunds/create` is the only webhook topic for this entity and Shopify
+# always delivers the REST Admin API refund resource for it (there is no
+# GraphQL pull-sync path for refunds in this integration, unlike
+# orders/customers/products) -- this normalizer reads the REST shape
+# directly, so no `webhook_shapes.py` translation step is needed.
+
+
+def _refund_status(transactions: list[dict[str, Any]]) -> RefundStatus:
+    statuses = {(t.get("status") or "").lower() for t in transactions if t.get("status")}
+    if not statuses:
+        return RefundStatus.PENDING
+    if statuses & {"failure", "error"}:
+        return RefundStatus.FAILED
+    if statuses == {"success"}:
+        return RefundStatus.COMPLETED
+    return RefundStatus.PROCESSING
+
+
+class ShopifyRefundNormalizer(RefundNormalizer):
+    def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
+        transactions = raw.get("transactions") or []
+        line_items = raw.get("refund_line_items") or []
+        if transactions:
+            amount = sum((_decimal(t.get("amount")) for t in transactions), Decimal("0"))
+        else:
+            # No transaction data on this delivery (e.g. a store-credit-only
+            # refund) -- fall back to summing the refunded line subtotals
+            # rather than recording a refund of ₹0.
+            amount = sum((_decimal(li.get("subtotal")) for li in line_items), Decimal("0"))
+
+        status = _refund_status(transactions)
+        created_at = _parse_datetime(raw.get("created_at"))
+        processed_at = _parse_datetime(raw.get("processed_at")) or created_at
+
+        return {
+            "source_system": SourceSystem.SHOPIFY,
+            "external_id": _gid_to_external_id(raw.get("id")),
+            # Not this normalizer's own external_id -- consumed by
+            # `app.integrations.entity_sync._upsert_refund` to resolve the
+            # OMS `Order`/`Payment` this refund belongs to, then discarded
+            # before the `Refund` row itself is written.
+            "order_external_id": _gid_to_external_id(raw.get("order_id")),
+            "amount": amount,
+            "reason": _clean_text(raw.get("note"), max_len=255),
+            "status": status,
+            "initiated_at": created_at,
+            "completed_at": processed_at if status == RefundStatus.COMPLETED else None,
+            "external_created_at": created_at,
+            "external_updated_at": created_at,
+            "refund_metadata": {
+                "restock": raw.get("restock"),
+                "refund_line_items": raw.get("refund_line_items"),
+            },
+            "raw_external_payload": _sanitize_raw_payload(raw),
+        }
+
+
 CUSTOMER_NORMALIZER: Normalizer = ShopifyCustomerNormalizer()
 PRODUCT_NORMALIZER: Normalizer = ShopifyProductNormalizer()
 ORDER_NORMALIZER: Normalizer = ShopifyOrderNormalizer()
+REFUND_NORMALIZER: Normalizer = ShopifyRefundNormalizer()
 
 ENTITY_NORMALIZERS: dict[str, Normalizer] = {
     "customers": CUSTOMER_NORMALIZER,
     "products": PRODUCT_NORMALIZER,
     "orders": ORDER_NORMALIZER,
+    "refunds": REFUND_NORMALIZER,
 }

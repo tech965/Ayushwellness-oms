@@ -286,6 +286,26 @@ class OrderService:
             source_system=source_system, external_id=external_id
         )
 
+        if existing is not None:
+            incoming_updated_at = data.get("external_updated_at")
+            # Webhooks are not guaranteed to arrive in the order Shopify
+            # generated them (e.g. a delayed retry of an older
+            # orders/updated landing after a newer delivery already
+            # applied). The provider's own `updated_at` is the one signal
+            # that's monotonic per order regardless of delivery order, so a
+            # delivery strictly older than what's already stored is
+            # dropped as stale instead of overwriting newer data with
+            # older data. `None` on either side (a payload with no
+            # timestamp, or a row synced before this field existed) always
+            # means "apply it" — this can only ever skip a delivery proven
+            # older, never skip one that might actually be newer.
+            if (
+                incoming_updated_at is not None
+                and existing.external_updated_at is not None
+                and incoming_updated_at < existing.external_updated_at
+            ):
+                return existing, False
+
         if existing is None:
             initial_status = (
                 OrderStatus.CANCELLED

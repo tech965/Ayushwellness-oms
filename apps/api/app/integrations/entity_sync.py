@@ -22,6 +22,8 @@ from app.core.logging import get_logger
 from app.integrations.registry import get_adapter
 from app.models.integration import IntegrationCode
 from app.repositories.order import OrderRepository
+from app.repositories.payment import PaymentRepository
+from app.repositories.refund import RefundRepository
 from app.repositories.shipment import ShipmentRepository
 from app.repositories.sync_error import SyncErrorRepository
 from app.services.customer_service import CustomerService
@@ -49,6 +51,49 @@ async def _upsert_order(session: AsyncSession, data: dict[str, Any]) -> tuple[An
 
 async def _upsert_ndr(session: AsyncSession, data: dict[str, Any]) -> tuple[Any, bool]:
     return await NDRService(session).upsert_synced_ndr(**data)
+
+
+async def _upsert_refund(session: AsyncSession, data: dict[str, Any]) -> tuple[Any, bool]:
+    """A `refunds/create` webhook only ever carries the refund's OWN id
+    plus its parent order's Shopify id (`order_external_id`, popped below
+    -- never passed through to `Refund` itself, which has no such
+    column) -- never an OMS UUID. Resolves both the `Order` and, when one
+    exists, the `Payment` the refund applies against via the same
+    `(source_system, external_id)` identity every other Shopify-synced
+    row uses (`Payment.external_id` is set to the order's own external_id
+    by `OrderService.upsert_synced_order`, so the same lookup value
+    resolves both). A refund for an order this OMS hasn't synced yet
+    raises `NotFoundError` -- exactly like `_upsert_shipment`'s unmatched-
+    order case -- so `SyncService`/`process_webhook_event_task` record it
+    as a retryable error instead of fabricating an orphaned refund.
+    """
+    source_system = data.pop("source_system")
+    external_id = data.pop("external_id")
+    order_external_id = data.pop("order_external_id", None)
+
+    order = (
+        await OrderRepository(session).get_by_source_external_id(
+            source_system=source_system, external_id=order_external_id
+        )
+        if order_external_id
+        else None
+    )
+    if order is None:
+        raise NotFoundError(
+            f"No OMS order found for Shopify refund (order_id={order_external_id!r})."
+        )
+
+    payment = await PaymentRepository(session).get_by_source_external_id(
+        source_system=source_system, external_id=order_external_id
+    )
+
+    return await RefundRepository(session).upsert_by_external_id(
+        source_system=source_system,
+        external_id=external_id,
+        order_id=order.id,
+        payment_id=payment.id if payment else None,
+        **data,
+    )
 
 
 async def _resolve_order_by_channel_order_id(
@@ -297,4 +342,5 @@ ENTITY_UPSERT_HANDLERS: dict[str, UpsertHandler] = {
     "orders": _upsert_order,
     "ndr": _upsert_ndr,
     "shipments": _upsert_shipment,
+    "refunds": _upsert_refund,
 }

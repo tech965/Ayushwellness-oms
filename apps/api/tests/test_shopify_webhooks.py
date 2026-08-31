@@ -781,3 +781,370 @@ async def test_webhook_events_endpoint_never_returns_raw_payload(
         response = await authed_client.get("/api/v1/webhook-events")
         assert response.status_code == 200
         assert "should-not-leak" not in response.text
+
+
+# --- orders/fulfilled, orders/partially_fulfilled, refunds/create -----------
+# These three topics reuse the existing generic order-webhook pipeline
+# (orders/fulfilled and orders/partially_fulfilled resolve to entity_type
+# "orders" exactly like orders/create/updated/cancelled) plus, for
+# refunds/create, the new "refunds" normalizer/upsert handler.
+
+_BASE_ORDER_PAYLOAD = {
+    "id": 910000,
+    "name": "#TOPIC-TEST",
+    "created_at": "2026-08-27T10:00:00+05:30",
+    "updated_at": "2026-08-27T10:00:00+05:30",
+    "cancelled_at": None,
+    "currency": "INR",
+    "financial_status": "paid",
+    "fulfillment_status": None,
+    "subtotal_price": "500.00",
+    "total_tax": "0.00",
+    "total_discounts": "0.00",
+    "total_price": "500.00",
+    "payment_gateway_names": ["razorpay"],
+    "customer": {},
+    "line_items": [],
+    "shipping_lines": [],
+    "shipping_address": None,
+    "billing_address": None,
+}
+
+
+async def _deliver_webhook(
+    db_session: AsyncSession,
+    adapter: ShopifyAdapter,
+    integration_id,
+    topic: str,
+    payload: dict,
+    webhook_id: str,
+):
+    webhook_service = WebhookService(db_session)
+    event, created = await webhook_service.ingest(
+        integration_id=integration_id,
+        event_type=topic,
+        payload=payload,
+        external_event_id=webhook_id,
+    )
+    assert created is True
+    result = await adapter.process_webhook(event.event_type, event.payload)
+    handler = ENTITY_UPSERT_HANDLERS[result["entity_type"]]
+    return await handler(db_session, result["normalized"])
+
+
+async def test_orders_fulfilled_webhook_updates_fulfillment_status(
+    db_session: AsyncSession,
+) -> None:
+    from app.models.enums import FulfillmentStatus
+    from app.repositories.order import OrderRepository
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+    adapter = ShopifyAdapter(client=None)
+
+    payload = {
+        **_BASE_ORDER_PAYLOAD,
+        "id": 910001,
+        "name": "#FULFILLED-1",
+        "fulfillment_status": "fulfilled",
+    }
+    await _deliver_webhook(
+        db_session, adapter, integration.id, "orders/fulfilled", payload, "wh_fulfilled_1"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="910001"
+    )
+    assert order is not None
+    assert order.fulfillment_status == FulfillmentStatus.FULFILLED
+
+
+async def test_orders_partially_fulfilled_webhook_updates_fulfillment_status(
+    db_session: AsyncSession,
+) -> None:
+    from app.models.enums import FulfillmentStatus
+    from app.repositories.order import OrderRepository
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+    adapter = ShopifyAdapter(client=None)
+
+    payload = {
+        **_BASE_ORDER_PAYLOAD,
+        "id": 910002,
+        "name": "#PARTIAL-1",
+        "fulfillment_status": "partial",
+    }
+    await _deliver_webhook(
+        db_session, adapter, integration.id, "orders/partially_fulfilled", payload, "wh_partial_1"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="910002"
+    )
+    assert order is not None
+    assert order.fulfillment_status == FulfillmentStatus.PARTIAL
+
+
+async def test_orders_fulfilled_webhook_returns_200_via_http_endpoint(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 940002, "name": "#F-HTTP-1"}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "orders/fulfilled",
+            "X-Shopify-Hmac-Sha256": _sign(body),
+            "X-Shopify-Webhook-Id": "wh_fulfilled_http_1",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
+async def test_refunds_create_webhook_creates_refund_linked_to_order(
+    db_session: AsyncSession,
+) -> None:
+    from app.models.enums import RefundStatus
+    from app.repositories.order import OrderRepository
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+    adapter = ShopifyAdapter(client=None)
+
+    order_payload = {**_BASE_ORDER_PAYLOAD, "id": 920001, "name": "#REFUND-ORDER-1"}
+    await _deliver_webhook(
+        db_session, adapter, integration.id, "orders/create", order_payload, "wh_refund_order_1"
+    )
+
+    refund_payload = {
+        "id": 55001,
+        "order_id": 920001,
+        "created_at": "2026-08-27T12:00:00+05:30",
+        "processed_at": "2026-08-27T12:00:05+05:30",
+        "note": "Customer requested refund",
+        "restock": True,
+        "transactions": [{"id": 1, "amount": "200.00", "status": "success", "kind": "refund"}],
+        "refund_line_items": [],
+    }
+    refund, refund_created = await _deliver_webhook(
+        db_session, adapter, integration.id, "refunds/create", refund_payload, "wh_refund_1"
+    )
+
+    assert refund_created is True
+    assert refund.amount == Decimal("200.00")
+    assert refund.status == RefundStatus.COMPLETED
+    assert refund.reason == "Customer requested refund"
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="920001"
+    )
+    assert refund.order_id == order.id
+    assert refund.payment_id is not None
+
+
+async def test_refund_upsert_is_idempotent(db_session: AsyncSession) -> None:
+    """Redelivering the same refunds/create event (e.g. via the stuck-
+    webhook recovery task) must update the same `Refund` row, never create
+    a second one — mirrors the resync-does-not-duplicate guarantee every
+    other Shopify entity already has (see test_shopify_sync.py).
+    """
+    from app.models.refund import Refund
+    from app.repositories.order import OrderRepository
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+    adapter = ShopifyAdapter(client=None)
+
+    order_payload = {**_BASE_ORDER_PAYLOAD, "id": 920002, "name": "#REFUND-ORDER-2"}
+    await _deliver_webhook(
+        db_session, adapter, integration.id, "orders/create", order_payload, "wh_refund_order_2"
+    )
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="920002"
+    )
+    assert order is not None
+
+    refund_payload = {
+        "id": 55002,
+        "order_id": 920002,
+        "created_at": "2026-08-27T12:00:00+05:30",
+        "transactions": [{"id": 1, "amount": "100.00", "status": "success"}],
+    }
+    normalized = adapter.normalize("refunds", refund_payload)
+
+    first, created_first = await ENTITY_UPSERT_HANDLERS["refunds"](db_session, dict(normalized))
+    second, created_second = await ENTITY_UPSERT_HANDLERS["refunds"](db_session, dict(normalized))
+
+    assert created_first is True
+    assert created_second is False
+    assert first.id == second.id
+
+    total = await db_session.execute(
+        select(func.count()).select_from(Refund).where(Refund.external_id == "55002")
+    )
+    assert total.scalar_one() == 1
+
+
+async def test_refund_for_unknown_order_raises_instead_of_being_dropped(
+    db_session: AsyncSession,
+) -> None:
+    """A refund for an order this OMS hasn't synced yet must not be
+    silently ignored — the handler raises `NotFoundError` so the caller
+    (SyncService / the webhook-processing task) records/retries it instead
+    of fabricating an orphaned refund. Mirrors
+    `entity_sync._upsert_shipment`'s unmatched-order behavior.
+    """
+    from app.core.exceptions import NotFoundError
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+    adapter = ShopifyAdapter(client=None)
+
+    refund_payload = {
+        "id": 55099,
+        "order_id": 999999,
+        "created_at": "2026-08-27T12:00:00+05:30",
+        "transactions": [{"id": 1, "amount": "50.00", "status": "success"}],
+    }
+    webhook_service = WebhookService(db_session)
+    event, created = await webhook_service.ingest(
+        integration_id=integration.id,
+        event_type="refunds/create",
+        payload=refund_payload,
+        external_event_id="wh_refund_orphan",
+    )
+    assert created is True
+
+    result = await adapter.process_webhook(event.event_type, event.payload)
+    with pytest.raises(NotFoundError):
+        await ENTITY_UPSERT_HANDLERS[result["entity_type"]](db_session, result["normalized"])
+
+
+async def test_webhook_processing_task_marks_event_failed_when_handler_raises(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full task-level failure path (`app.tasks.webhook_processing.
+    _process_webhook_event`): an unresolvable refund must leave the
+    `WebhookEvent` at FAILED with the error recorded and its retry count
+    incremented, and the exception must still propagate so Celery's own
+    retry mechanism fires — never a silent swallow.
+    """
+    from app.models.enums import WebhookEventStatus
+    from app.tasks import webhook_processing
+
+    class _db_session_cm:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+
+        async def __aenter__(self) -> AsyncSession:
+            return self._session
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+
+    refund_payload = {
+        "id": 55098,
+        "order_id": 888888,
+        "created_at": "2026-08-27T12:00:00+05:30",
+        "transactions": [{"id": 1, "amount": "50.00", "status": "success"}],
+    }
+    webhook_service = WebhookService(db_session)
+    event, created = await webhook_service.ingest(
+        integration_id=integration.id,
+        event_type="refunds/create",
+        payload=refund_payload,
+        external_event_id="wh_refund_task_fail",
+    )
+    assert created is True
+    # Captured before `_process_webhook_event` runs: its `session.rollback()`
+    # expires every object in the shared test session, and a plain
+    # attribute access on an expired object (e.g. `event.id` below) outside
+    # an awaited SQLAlchemy call tries a synchronous lazy-load with no
+    # active async bridge — this id is a plain UUID value, unaffected by
+    # the later expiry.
+    event_id = event.id
+
+    monkeypatch.setattr(webhook_processing, "AsyncSessionLocal", lambda: _db_session_cm(db_session))
+
+    from app.core.exceptions import NotFoundError
+
+    with pytest.raises(NotFoundError):
+        await webhook_processing._process_webhook_event(str(event_id))
+
+    refreshed = (
+        await db_session.execute(select(WebhookEvent).where(WebhookEvent.id == event_id))
+    ).scalar_one()
+    assert refreshed.status == WebhookEventStatus.FAILED
+    assert refreshed.retry_count == 1
+    assert refreshed.error_message is not None
+
+
+async def test_refunds_create_webhook_returns_200_via_http_endpoint(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 55100, "order_id": 940001, "transactions": []}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "refunds/create",
+            "X-Shopify-Hmac-Sha256": _sign(body),
+            "X-Shopify-Webhook-Id": "wh_refund_http_1",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
+# --- Out-of-order delivery ---------------------------------------------
+
+
+async def test_out_of_order_orders_updated_webhook_does_not_overwrite_newer_data(
+    db_session: AsyncSession,
+) -> None:
+    """Shopify (like most webhook providers) guarantees at-least-once
+    delivery, not ordering — a delayed retry of an OLDER orders/updated
+    delivery arriving AFTER a newer one must not roll back already-applied
+    newer data.
+    """
+    from app.repositories.order import OrderRepository
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+    adapter = ShopifyAdapter(client=None)
+
+    base_order = {
+        **_BASE_ORDER_PAYLOAD,
+        "id": 930001,
+        "name": "#OUT-OF-ORDER-1",
+        "financial_status": "pending",
+    }
+    await _deliver_webhook(
+        db_session, adapter, integration.id, "orders/create", base_order, "wh_ooo_create"
+    )
+
+    newer = {**base_order, "financial_status": "paid", "updated_at": "2026-08-27T12:00:00+05:30"}
+    await _deliver_webhook(
+        db_session, adapter, integration.id, "orders/updated", newer, "wh_ooo_newer"
+    )
+
+    # A stale retry of an OLDER update, delivered late.
+    stale = {**base_order, "financial_status": "pending", "updated_at": "2026-08-27T11:00:00+05:30"}
+    await _deliver_webhook(
+        db_session, adapter, integration.id, "orders/updated", stale, "wh_ooo_stale"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="930001"
+    )
+    # The stale (older) delivery must NOT have rolled payment_status back.
+    assert order.payment_status == PaymentStatus.PAID

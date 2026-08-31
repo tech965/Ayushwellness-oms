@@ -39,14 +39,25 @@ async def _process_webhook_event(webhook_event_id: str) -> None:
     async with AsyncSessionLocal() as session:
         service = WebhookService(session)
         event = await service.get_event(uuid.UUID(webhook_event_id))
-        await service.mark_processing(event.id)
+        # Captured once, up front: a handler that performs a real SELECT
+        # before raising (e.g. `entity_sync._upsert_refund`/`_upsert_shipment`
+        # looking up the parent order and finding none) leaves `session.
+        # rollback()` below to expire every attribute on `event`, including
+        # its own `id` — a bare `event.id` read after that point is a plain
+        # synchronous attribute access with no active SQLAlchemy async
+        # bridge to service the resulting lazy reload, which raises
+        # `MissingGreenlet` instead of the real error and leaves the event
+        # stuck at PROCESSING forever. `event_id` is a plain UUID value,
+        # immune to this regardless of when it's read.
+        event_id = event.id
+        await service.mark_processing(event_id)
 
         integration = await IntegrationRepository(session).get_by_id(event.integration_id)
         adapter = get_adapter(integration.code) if integration else None
 
         if adapter is None:
             await service.mark_ignored(
-                event.id,
+                event_id,
                 reason=(
                     "No adapter registered for integration "
                     f"'{integration.code if integration else event.integration_id}'."
@@ -62,17 +73,17 @@ async def _process_webhook_event(webhook_event_id: str) -> None:
 
             if handler is None or normalized is None:
                 await service.mark_ignored(
-                    event.id, reason=f"Unhandled webhook topic '{event.event_type}'."
+                    event_id, reason=f"Unhandled webhook topic '{event.event_type}'."
                 )
                 return
 
             await handler(session, normalized)
         except Exception as exc:  # noqa: BLE001 - persisted before re-raising for Celery's retry
             await session.rollback()
-            await service.mark_failed(event.id, error_message=str(exc))
+            await service.mark_failed(event_id, error_message=str(exc))
             raise
         else:
-            await service.mark_processed(event.id)
+            await service.mark_processed(event_id)
 
 
 @celery_app.task(name="webhooks.process_event", bind=True, max_retries=5)

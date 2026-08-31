@@ -17,13 +17,24 @@ import hmac
 # about not exposing anything resembling the real secret.
 _FINGERPRINT_HEX_LENGTH = 8
 
-# entity_type ("customers"/"products"/"orders") is `topic.split("/", 1)[0]`
-# — see app.integrations.shopify.adapter.ShopifyAdapter.process_webhook.
+# entity_type ("customers"/"products"/"orders"/"refunds") is
+# `topic.split("/", 1)[0]` — see
+# app.integrations.shopify.adapter.ShopifyAdapter.process_webhook. This is
+# the single source of truth for which topics this app registers with
+# Shopify (see scripts/register_shopify_webhooks.py) — the receiving
+# endpoint itself stays topic-agnostic (any topic whose entity_type has a
+# registered normalizer is processed; anything else is marked IGNORED,
+# never a hard failure, so an unexpected/legacy subscription can never
+# break the webhook ack), but registration is always driven by this
+# explicit list, never a vague "everything fulfillment-related" wildcard.
 SUPPORTED_WEBHOOK_TOPICS: frozenset[str] = frozenset(
     {
         "orders/create",
         "orders/updated",
         "orders/cancelled",
+        "orders/fulfilled",
+        "orders/partially_fulfilled",
+        "refunds/create",
         "customers/create",
         "customers/update",
         "products/create",

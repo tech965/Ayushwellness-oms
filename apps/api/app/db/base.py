@@ -60,13 +60,32 @@ class GUID(TypeDecorator):
 class AwareDateTime(TypeDecorator):
     """`DateTime(timezone=True)` that always returns a tz-aware (UTC)
     datetime on load. SQLite silently drops tzinfo on round-trip (it has
-    no native timezone-aware storage), which breaks any comparison
-    against `datetime.now(UTC)` — e.g. `RefreshToken.is_active`. Postgres
-    already returns aware datetimes, so this is a no-op there.
+    no native timezone-aware storage, and stores whatever naive wall-clock
+    value it's handed), which breaks any comparison against
+    `datetime.now(UTC)` — e.g. `RefreshToken.is_active`. Postgres already
+    stores/returns aware datetimes correctly (`timestamptz` normalizes to
+    UTC internally regardless of the offset written), so both methods
+    below are a no-op there.
+
+    `process_bind_param` converting to UTC *before* SQLite stores it is
+    what makes `process_result_value`'s `replace(tzinfo=UTC)` on load
+    correct: without it, a non-UTC-offset value (e.g. a Shopify webhook's
+    IST timestamp) round-trips through SQLite with its wall-clock digits
+    unchanged but its offset silently discarded — reading it back and
+    reattaching UTC then produces a *different instant* than what was
+    written, corrupting any later chronological comparison (confirmed
+    live: this is what broke the out-of-order webhook guard in
+    `OrderService.upsert_synced_order` under the SQLite test suite before
+    this fix).
     """
 
     impl = DateTime(timezone=True)
     cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None and value.tzinfo is not None:
+            return value.astimezone(UTC)
+        return value
 
     def process_result_value(self, value, dialect):
         if value is not None and value.tzinfo is None:
