@@ -248,6 +248,67 @@ async def test_webhook_still_verifies_when_old_secret_is_not_configured(
     assert response.status_code == 200
 
 
+# Client Credentials Grant migration: SHOPIFY_CLIENT_SECRET is a safe
+# fallback webhook-signing secret when SHOPIFY_WEBHOOK_SECRET itself
+# isn't configured (for this app, they're the same underlying Shopify
+# value) — but an explicitly configured SHOPIFY_WEBHOOK_SECRET must
+# always win, never be silently overridden by the client secret.
+async def test_webhook_falls_back_to_client_secret_when_webhook_secret_is_not_configured(
+    db_session: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "SHOPIFY_WEBHOOK_SECRET", None)
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_SECRET", "the-app-client-secret")
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 601, "email": "fallback@example.com"}).encode()
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "orders/create",
+            "X-Shopify-Hmac-Sha256": _sign(body, secret="the-app-client-secret"),
+            "X-Shopify-Webhook-Id": "wh_client_secret_fallback",
+        },
+    )
+    assert response.status_code == 200
+
+
+async def test_webhook_prefers_explicit_webhook_secret_over_client_secret_fallback(
+    db_session: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_SECRET", "a-different-client-secret")
+    await _make_shopify_integration(db_session)
+    body = json.dumps({"id": 602}).encode()
+
+    # Signed with SHOPIFY_WEBHOOK_SECRET (_SECRET, set by the module
+    # fixture) -- must succeed even though a different SHOPIFY_CLIENT_SECRET
+    # is also configured.
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "orders/create",
+            "X-Shopify-Hmac-Sha256": _sign(body, secret=_SECRET),
+            "X-Shopify-Webhook-Id": "wh_prefers_explicit_secret",
+        },
+    )
+    assert response.status_code == 200
+
+    # And a signature made with the (unused, fallback-only) client secret
+    # must NOT be accepted while SHOPIFY_WEBHOOK_SECRET is explicitly set.
+    body2 = json.dumps({"id": 603}).encode()
+    response2 = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body2,
+        headers={
+            "X-Shopify-Topic": "orders/create",
+            "X-Shopify-Hmac-Sha256": _sign(body2, secret="a-different-client-secret"),
+            "X-Shopify-Webhook-Id": "wh_client_secret_not_used_when_explicit",
+        },
+    )
+    assert response2.status_code == 401
+
+
 # 22. Invalid webhook rejection
 async def test_invalid_webhook_signature_is_rejected(
     db_session: AsyncSession, client: AsyncClient

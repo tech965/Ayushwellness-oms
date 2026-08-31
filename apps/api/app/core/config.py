@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     # are present; the API never fails to start without them) ---
     SHOPIFY_API_KEY: str | None = None
     SHOPIFY_API_SECRET: str | None = None
+    # Client Credentials Grant (Shopify's current Dev Dashboard app model)
+    # — preferred over SHOPIFY_ACCESS_TOKEN whenever both are configured;
+    # see app.integrations.shopify.config.ShopifyConfig.from_settings.
+    SHOPIFY_CLIENT_ID: str | None = None
+    SHOPIFY_CLIENT_SECRET: str | None = None
+    # Legacy: a manually-generated, permanent custom-app access token.
+    # Kept for backward compatibility — used only when CLIENT_ID/SECRET
+    # above are not configured.
     SHOPIFY_ACCESS_TOKEN: str | None = None
     SHOPIFY_WEBHOOK_SECRET: str | None = None
     # Temporary, optional: during a Shopify Client Secret rotation,
@@ -105,11 +113,14 @@ class Settings(BaseSettings):
     # --- Cashfree (optional — connected when credentials are present; the
     # API never fails to start without them). Payments API version
     # 2025-01-01; base URL defaults to sandbox so a missing/unset value
-    # can never accidentally point at production. ---
+    # can never accidentally point at production. Named CASHFREE_API_URL
+    # (not *_BASE_URL) to match the naming convention SHIPROCKET_API_URL
+    # already established above, and the exact env var name provisioned
+    # in Render. ---
     CASHFREE_CLIENT_ID: str | None = None
     CASHFREE_CLIENT_SECRET: str | None = None
     CASHFREE_API_VERSION: str = "2025-01-01"
-    CASHFREE_BASE_URL: str = "https://sandbox.cashfree.com/pg"
+    CASHFREE_API_URL: str = "https://sandbox.cashfree.com/pg"
     # Optional override for webhook signature verification. Cashfree's
     # documented webhook signing key IS the Payment Gateway client secret
     # (CASHFREE_CLIENT_SECRET) — no separate key is issued for most

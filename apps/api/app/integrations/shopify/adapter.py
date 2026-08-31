@@ -35,7 +35,8 @@ class ShopifyAdapter(IntegrationAdapter):
         if config is None:
             raise IntegrationError(
                 "Shopify integration is not configured "
-                "(missing SHOPIFY_STORE_DOMAIN/SHOPIFY_ACCESS_TOKEN).",
+                "(missing SHOPIFY_STORE_DOMAIN and either "
+                "SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET or SHOPIFY_ACCESS_TOKEN).",
                 details={"error_type": "not_configured"},
             )
         self._client = ShopifyClient(config)
@@ -76,7 +77,8 @@ class ShopifyAdapter(IntegrationAdapter):
                 connected=False,
                 error_message=(
                     "Shopify integration is not configured "
-                    "(missing SHOPIFY_STORE_DOMAIN/SHOPIFY_ACCESS_TOKEN)."
+                    "(missing SHOPIFY_STORE_DOMAIN and either "
+                    "SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET or SHOPIFY_ACCESS_TOKEN)."
                 ),
             )
 

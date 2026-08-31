@@ -73,8 +73,11 @@ def _isolate_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for attr in (
         "SHOPIFY_ACCESS_TOKEN",
+        "SHOPIFY_CLIENT_ID",
+        "SHOPIFY_CLIENT_SECRET",
         "SHOPIFY_STORE_DOMAIN",
         "SHOPIFY_WEBHOOK_SECRET",
+        "SHOPIFY_WEBHOOK_SECRET_OLD",
         "SHIPROCKET_EMAIL",
         "SHIPROCKET_PASSWORD",
         "SHIPROCKET_PICKUP_LOCATION",

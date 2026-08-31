@@ -69,7 +69,24 @@ async def receive_shopify_webhook(
     # the byte sequence HMAC is keyed with — stripping incidental
     # whitespace here does not weaken verification (Shopify secrets never
     # intentionally contain leading/trailing whitespace).
-    secret = (settings.SHOPIFY_WEBHOOK_SECRET or "").strip()
+    #
+    # SHOPIFY_WEBHOOK_SECRET is the primary, explicit webhook-signing
+    # secret. SHOPIFY_CLIENT_SECRET (the Dev Dashboard app's Client
+    # Secret — also used to obtain access tokens via the Client
+    # Credentials Grant, see app.integrations.shopify.auth) is the same
+    # value Shopify actually signs webhooks with for an app-owned webhook
+    # subscription, so it's a safe fallback when SHOPIFY_WEBHOOK_SECRET
+    # itself isn't set — never the other way around, so an explicitly
+    # configured SHOPIFY_WEBHOOK_SECRET always wins.
+    configured_secret = settings.SHOPIFY_WEBHOOK_SECRET or settings.SHOPIFY_CLIENT_SECRET
+    webhook_secret_source = (
+        "SHOPIFY_WEBHOOK_SECRET"
+        if settings.SHOPIFY_WEBHOOK_SECRET
+        else "SHOPIFY_CLIENT_SECRET"
+        if settings.SHOPIFY_CLIENT_SECRET
+        else "none"
+    )
+    secret = (configured_secret or "").strip()
     # Optional, temporary: during a Shopify Client Secret rotation,
     # Shopify signs with the OLDEST unrevoked secret until it's revoked
     # — see app.integrations.shopify.webhooks.verify_webhook_hmac_with_rotation.
@@ -88,6 +105,7 @@ async def receive_shopify_webhook(
         content_length_header=content_length_header,
         content_length_matches_body=length_matches,
         raw_body_sha256=raw_body_sha256,
+        webhook_secret_source=webhook_secret_source,
         **diagnostics,
     )
 

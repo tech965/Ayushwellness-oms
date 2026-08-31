@@ -59,6 +59,58 @@ async def test_health_check_reports_not_configured_with_no_client_or_settings() 
     assert "not configured" in result.error_message.lower()
 
 
+# Client Credentials Grant migration: `_get_client()` must accept EITHER
+# auth mode via `ShopifyConfig.from_settings()` alone -- never a second,
+# adapter-local credential check that could drift out of sync with it.
+async def test_get_client_succeeds_with_only_client_credentials_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+    from app.integrations.shopify.client import ShopifyClient
+
+    monkeypatch.setattr(settings, "SHOPIFY_STORE_DOMAIN", "aayushveda.myshopify.com")
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_ID", "cid")
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setattr(settings, "SHOPIFY_ACCESS_TOKEN", None)
+
+    adapter = ShopifyAdapter()
+
+    client = adapter._get_client()  # noqa: SLF001 -- exercising the actual validation path
+
+    assert isinstance(client, ShopifyClient)
+
+
+async def test_adapter_reports_configured_with_only_client_credentials_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SHOPIFY_STORE_DOMAIN", "aayushveda.myshopify.com")
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_ID", "cid")
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setattr(settings, "SHOPIFY_ACCESS_TOKEN", None)
+
+    adapter = ShopifyAdapter()
+
+    assert adapter._configured is True  # noqa: SLF001
+
+
+async def test_get_client_still_raises_when_neither_auth_mode_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SHOPIFY_STORE_DOMAIN", "aayushveda.myshopify.com")
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_ID", None)
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_SECRET", None)
+    monkeypatch.setattr(settings, "SHOPIFY_ACCESS_TOKEN", None)
+
+    adapter = ShopifyAdapter()
+
+    with pytest.raises(IntegrationError):
+        adapter._get_client()  # noqa: SLF001
+
+
 async def test_health_check_reports_connected() -> None:
     adapter = ShopifyAdapter(client=_StubClient([{"shop": {"name": "Test Shop"}}]))
     result = await adapter.health_check()
