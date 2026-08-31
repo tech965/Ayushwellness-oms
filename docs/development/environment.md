@@ -18,6 +18,7 @@ frontend directly with `npm run dev`. **Never commit `.env` or
 | `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` / `SHOPIFY_ACCESS_TOKEN` / `SHOPIFY_WEBHOOK_SECRET` / `SHOPIFY_STORE_DOMAIN` | API | 2 | Leave blank until Shopify credentials are issued — the app starts fine without them |
 | `SHIPROCKET_EMAIL` / `SHIPROCKET_PASSWORD` / `SHIPROCKET_API_URL` / `SHIPROCKET_WEBHOOK_SECRET` | API | 2 | Same |
 | `BLUE_DART_API_URL` / `BLUE_DART_API_KEY` / `BLUE_DART_CLIENT_ID` / `BLUE_DART_CLIENT_SECRET` | API | 2 | Same |
+| `CASHFREE_CLIENT_ID` / `CASHFREE_CLIENT_SECRET` / `CASHFREE_API_VERSION` / `CASHFREE_API_URL` / `CASHFREE_WEBHOOK_SECRET` / `CASHFREE_RETURN_URL` | API | 2 | Same — see docs/integrations/cashfree.md |
 | `WHATSAPP_API_URL` / `WHATSAPP_ACCESS_TOKEN` | API | 5 | Not read by any code yet |
 | `META_APP_ID` / `META_APP_SECRET` / `META_ACCESS_TOKEN` | API | 6 | Not read by any code yet |
 

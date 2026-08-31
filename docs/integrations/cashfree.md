@@ -33,7 +33,7 @@ what to do before trusting this in production.
    ```
    CASHFREE_CLIENT_ID=<sandbox client id>
    CASHFREE_CLIENT_SECRET=<sandbox client secret>
-   CASHFREE_BASE_URL=https://sandbox.cashfree.com/pg   # default — safe to omit
+   CASHFREE_API_URL=https://sandbox.cashfree.com/pg   # default — safe to omit
    ```
 4. Local development works with no credentials at all — every payment
    check reports "not configured" rather than failing the API or
@@ -44,10 +44,10 @@ what to do before trusting this in production.
 ## 3. Production setup
 
 1. In Cashfree's live dashboard, generate **production** Client ID/Secret.
-2. In Render (see §17): set `CASHFREE_BASE_URL=https://api.cashfree.com/pg`
+2. In Render (see §17): set `CASHFREE_API_URL=https://api.cashfree.com/pg`
    and the production `CASHFREE_CLIENT_ID`/`CASHFREE_CLIENT_SECRET`.
 3. Configure the production webhook (see §6).
-4. **Do not** switch `CASHFREE_BASE_URL` to production until §9's live
+4. **Do not** switch `CASHFREE_API_URL` to production until §9's live
    verification steps have been completed against sandbox first.
 
 ## 4. Environment variables
@@ -57,7 +57,7 @@ what to do before trusting this in production.
 | `CASHFREE_CLIENT_ID` | For any Cashfree call | `None` (unconfigured) | Payments API auth (`x-client-id`) |
 | `CASHFREE_CLIENT_SECRET` | For any Cashfree call | `None` (unconfigured) | Payments API auth (`x-client-secret`) **and** the webhook signing key (see §8) |
 | `CASHFREE_API_VERSION` | No | `2025-01-01` | `x-api-version` header on every request |
-| `CASHFREE_BASE_URL` | No | `https://sandbox.cashfree.com/pg` (sandbox-safe default) | `https://api.cashfree.com/pg` for production |
+| `CASHFREE_API_URL` | No | `https://sandbox.cashfree.com/pg` (sandbox-safe default) | `https://api.cashfree.com/pg` for production |
 | `CASHFREE_WEBHOOK_SECRET` | No | unset → falls back to `CASHFREE_CLIENT_SECRET` | Only needed if this specific Cashfree account has a webhook signing key distinct from its client secret |
 | `CASHFREE_RETURN_URL` | No | unset (checkout works without it) | `order_meta.return_url` template; a `{order_id}` placeholder is substituted with the OMS order id |
 

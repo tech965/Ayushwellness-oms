@@ -73,7 +73,7 @@ services:
         sync: false
       # https://api.cashfree.com/pg for production, defaults to the
       # sandbox URL if unset — see app.core.config.
-      - key: CASHFREE_BASE_URL
+      - key: CASHFREE_API_URL
         sync: false
       # Optional order_meta.return_url template (a "{order_id}"
       # placeholder is substituted) — checkout works without it.

@@ -44,7 +44,7 @@ class CashfreeConfig:
             client_id=settings.CASHFREE_CLIENT_ID,
             client_secret=settings.CASHFREE_CLIENT_SECRET,
             api_version=settings.CASHFREE_API_VERSION,
-            base_url=settings.CASHFREE_BASE_URL,
+            base_url=settings.CASHFREE_API_URL,
             webhook_secret=settings.CASHFREE_WEBHOOK_SECRET,
             return_url=settings.CASHFREE_RETURN_URL,
         )

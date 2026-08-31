@@ -178,6 +178,32 @@ async def test_create_order_raises_on_authentication_failure() -> None:
     assert exc_info.value.error_type == "authentication_error"
 
 
+async def test_authentication_failure_never_leaks_the_client_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The client secret must never appear in the raised exception's
+    message/args, nor in anything logged while handling the failure —
+    even on the exact failure path (a 401) that would tempt a debug log
+    to dump the auth headers that were sent.
+    """
+    import logging
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Confirms the real secret WAS sent (so this test can't pass by
+        # accident because the secret was never used) while proving it
+        # never leaks back out through the error path below.
+        assert request.headers.get("x-client-secret") == "test-client-secret"
+        return httpx.Response(401, json={"message": "invalid credentials"})
+
+    client = _client_with(handler)
+    with caplog.at_level(logging.WARNING), pytest.raises(CashfreeApiError) as exc_info:
+        await client.create_order({"order_id": "X"})
+
+    assert "test-client-secret" not in str(exc_info.value)
+    assert "test-client-secret" not in exc_info.value.message
+    assert "test-client-secret" not in caplog.text
+
+
 async def test_get_order_raises_not_found_for_unknown_order() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"message": "order not found"})
@@ -296,3 +322,42 @@ async def test_config_from_settings_defaults_to_sandbox_base_url(
     config = CashfreeConfig.from_settings()
     assert config is not None
     assert config.base_url == "https://sandbox.cashfree.com/pg"
+
+
+async def test_config_from_settings_reads_cashfree_api_url_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test: the deployed Render environment provisions the base
+    URL under `CASHFREE_API_URL` (matching `SHIPROCKET_API_URL`'s naming
+    convention already used for the other courier/commerce integration),
+    not `CASHFREE_BASE_URL`. `Settings.CASHFREE_API_URL` must be the field
+    `CashfreeConfig.from_settings()` actually reads, or a configured
+    production URL silently falls back to the sandbox default.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "CASHFREE_CLIENT_ID", "id")
+    monkeypatch.setattr(settings, "CASHFREE_CLIENT_SECRET", "secret")
+    monkeypatch.setattr(settings, "CASHFREE_API_URL", "https://api.cashfree.com/pg")
+    config = CashfreeConfig.from_settings()
+    assert config is not None
+    assert config.base_url == "https://api.cashfree.com/pg"
+    assert config.environment == "production"
+
+
+async def test_config_from_settings_reads_all_three_provisioned_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CASHFREE_API_URL / CASHFREE_CLIENT_ID / CASHFREE_CLIENT_SECRET are
+    exactly the three variables provisioned in Render — never hardcoded.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "CASHFREE_CLIENT_ID", "render-client-id")
+    monkeypatch.setattr(settings, "CASHFREE_CLIENT_SECRET", "render-client-secret")
+    monkeypatch.setattr(settings, "CASHFREE_API_URL", "https://api.cashfree.com/pg")
+    config = CashfreeConfig.from_settings()
+    assert config is not None
+    assert config.client_id == "render-client-id"
+    assert config.client_secret == "render-client-secret"
+    assert config.base_url == "https://api.cashfree.com/pg"
