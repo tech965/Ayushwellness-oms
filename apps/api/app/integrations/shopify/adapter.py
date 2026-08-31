@@ -47,9 +47,9 @@ class ShopifyAdapter(IntegrationAdapter):
         singleton (registered once at worker startup), but each Celery
         task runs its own `asyncio.run(...)` — a client's connections
         opened under one task's event loop break once that loop closes,
-        so this must run after every task (see `app.db.session.
-        dispose_engine_sync`, which has the identical problem for the DB
-        engine).
+        so this must run after every task, inside that SAME loop (see
+        `app.db.session.run_with_cleanup`, which has the identical
+        problem for the DB engine and disposes both together).
 
         Drops the reference *before* attempting the close, not after —
         `client.aclose()` closing an already-broken connection can

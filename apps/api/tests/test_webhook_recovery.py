@@ -151,7 +151,6 @@ async def test_recovery_task_reprocesses_a_stuck_event_end_to_end(
     await db_session.commit()
 
     monkeypatch.setattr(webhook_processing, "AsyncSessionLocal", lambda: _db_session_cm(db_session))
-    monkeypatch.setattr(webhook_processing, "dispose_engine_sync", lambda: None)
 
     # `_recover_stuck_webhook_events` finds the event and calls
     # `process_webhook_event_task.delay(...)`, which in production hands
@@ -199,7 +198,6 @@ async def test_recovery_task_ignores_events_still_within_the_grace_window(
     monkeypatch.setattr(
         webhook_processing, "AsyncSessionLocal", lambda: _db_session_cm(db_session)
     )
-    monkeypatch.setattr(webhook_processing, "dispose_engine_sync", lambda: None)
     monkeypatch.setattr(
         webhook_processing.process_webhook_event_task, "delay", lambda event_id: None
     )

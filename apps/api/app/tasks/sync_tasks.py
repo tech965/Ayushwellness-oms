@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.core.logging import get_logger
-from app.db.session import AsyncSessionLocal, dispose_engine_sync
+from app.db.session import AsyncSessionLocal, run_with_cleanup
 from app.integrations.registry import get_adapter
 from app.models.enums import SyncType
 from app.models.integration import Integration, IntegrationCode
@@ -76,10 +76,7 @@ def execute_sync_task(sync_job_id: str) -> None:
     since it already created the job synchronously to return its id.
     """
     logger.info("sync_task_started", sync_job_id=sync_job_id)
-    try:
-        asyncio.run(_execute_sync(sync_job_id))
-    finally:
-        dispose_engine_sync()
+    asyncio.run(run_with_cleanup(_execute_sync(sync_job_id)))
 
 
 async def _run_sync(integration_id: str, sync_type: str, entity_type: str) -> None:
@@ -101,10 +98,7 @@ def run_sync_task(integration_id: str, sync_type: str, entity_type: str) -> None
     beat, `app.tasks.retry_processing`) that don't already have a job id.
     """
     logger.info("sync_task_started", integration_id=integration_id, entity_type=entity_type)
-    try:
-        asyncio.run(_run_sync(integration_id, sync_type, entity_type))
-    finally:
-        dispose_engine_sync()
+    asyncio.run(run_with_cleanup(_run_sync(integration_id, sync_type, entity_type)))
 
 
 async def _run_scheduled_sync() -> list[tuple[str, str]]:
@@ -146,11 +140,8 @@ def run_scheduled_sync_task() -> None:
     webhook is missed, fails, or was never configured.
     """
     logger.info("scheduled_sync_started")
-    try:
-        enqueued = asyncio.run(_run_scheduled_sync())
-        logger.info("scheduled_sync_enqueued", jobs=enqueued)
-    finally:
-        dispose_engine_sync()
+    enqueued = asyncio.run(run_with_cleanup(_run_scheduled_sync()))
+    logger.info("scheduled_sync_enqueued", jobs=enqueued)
 
 
 async def _reap_stale_sync_jobs() -> list[str]:
@@ -212,10 +203,7 @@ def reap_stale_sync_jobs_task() -> list[str]:
     duplicates and cleans up whatever's already stuck.
     """
     logger.info("reap_stale_sync_jobs_started")
-    try:
-        reaped = asyncio.run(_reap_stale_sync_jobs())
-    finally:
-        dispose_engine_sync()
+    reaped = asyncio.run(run_with_cleanup(_reap_stale_sync_jobs()))
     if reaped:
         logger.warning("stale_sync_jobs_reaped", count=len(reaped), job_ids=reaped)
     return reaped

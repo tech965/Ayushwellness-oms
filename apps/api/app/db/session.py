@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -36,30 +35,39 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-async def _cleanup_after_task() -> None:
-    await engine.dispose()
-    await aclose_all_adapters()
+async def run_with_cleanup[T](coro: Awaitable[T]) -> T:
+    """Runs `coro` to completion, then disposes the shared `engine`'s
+    connection pool and every registered integration adapter's HTTP
+    client — all inside THIS SAME event loop — before returning (or
+    re-raising) whatever `coro` produced.
 
+    `engine` (this module) and every `IntegrationAdapter`
+    (`app.integrations.registry`) are process-lifetime singletons shared
+    across every Celery task. A pooled asyncpg connection or httpx
+    connection opened while some event loop is running stores a direct
+    reference to that specific loop internally, for scheduling its own
+    eventual close. Every Celery task entry point must therefore run its
+    work AND dispose these singletons inside the SAME `asyncio.run(...)`
+    call — never two separate ones.
 
-def dispose_engine_sync() -> None:
-    """Discard everything left over from a closed event loop: pooled DB
-    connections and any registered integration adapter's HTTP client.
+    A previous version of this cleanup ran the task's own work under one
+    `asyncio.run(...)`, then disposed `engine` under a SECOND, freshly
+    created `asyncio.run(...)` called afterward in a `finally` — but by
+    then the first loop (and every connection opened on it) was already
+    closed. Disposing a connection still bound to that dead loop is
+    exactly what produced real production log lines on
+    `shiprocket.refresh_tracking` and `webhooks.recover_stuck`:
 
-    Every Celery task calls `asyncio.run(...)`, which creates a fresh
-    event loop and closes it when the task finishes. `engine` (this
-    module) and every `IntegrationAdapter` (`app.integrations.registry`)
-    are single per-process objects shared across tasks, so a connection
-    either one opened under one task's loop can't be reused once that
-    loop is gone — the next task hitting either one gets a "different
-    loop"/"event loop is closed" error (asyncpg/SQLAlchemy for the DB,
-    httpx for Shopify/Shiprocket). Call this right after each
-    `asyncio.run(...)` (in a `finally`) so the next task always starts
-    with clean, unused connections instead of stale, loop-bound ones.
+        RuntimeError: Task <Task pending ... _cleanup_after_task() ...>
+        got Future <Future pending ...> attached to a different loop
+        RuntimeError: Event loop is closed
 
-    Uses its own short-lived `asyncio.run(...)` rather than
-    `engine.sync_engine.dispose()` — asyncpg's connection.close() still
-    needs a greenlet/event-loop context to do its async close handshake,
-    which a plain sync call outside any loop can't provide (raises
-    `MissingGreenlet`). A fresh loop just for disposal gives it one.
+    Every task now wraps its own work coroutine in this helper and calls
+    `asyncio.run()` exactly once, so disposal always happens on the
+    identical loop the connections were actually opened on.
     """
-    asyncio.run(_cleanup_after_task())
+    try:
+        return await coro
+    finally:
+        await engine.dispose()
+        await aclose_all_adapters()

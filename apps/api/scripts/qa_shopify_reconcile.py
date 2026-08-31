@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from app.db.session import AsyncSessionLocal, dispose_engine_sync
+from app.db.session import AsyncSessionLocal, run_with_cleanup
 from app.integrations.shopify.adapter import ShopifyAdapter
 from app.services.order_service import OrderService
 
@@ -84,7 +84,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    finally:
-        dispose_engine_sync()
+    asyncio.run(run_with_cleanup(main()))

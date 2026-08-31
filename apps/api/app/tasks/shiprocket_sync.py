@@ -15,7 +15,7 @@ import uuid
 
 from app.core.exceptions import IntegrationError
 from app.core.logging import get_logger
-from app.db.session import AsyncSessionLocal, dispose_engine_sync
+from app.db.session import AsyncSessionLocal, run_with_cleanup
 from app.integrations.registry import get_adapter
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.sync import refresh_tracking
@@ -75,7 +75,4 @@ async def _execute_tracking_refresh(sync_job_id: str) -> None:
 )
 def refresh_tracking_task(sync_job_id: str) -> None:
     logger.info("shiprocket_tracking_refresh_started", sync_job_id=sync_job_id)
-    try:
-        asyncio.run(_execute_tracking_refresh(sync_job_id))
-    finally:
-        dispose_engine_sync()
+    asyncio.run(run_with_cleanup(_execute_tracking_refresh(sync_job_id)))

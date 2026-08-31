@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from app.core.logging import get_logger
-from app.db.session import AsyncSessionLocal, dispose_engine_sync
+from app.db.session import AsyncSessionLocal, run_with_cleanup
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import get_adapter
 from app.repositories.integration import IntegrationRepository
@@ -79,14 +79,12 @@ async def _process_webhook_event(webhook_event_id: str) -> None:
 def process_webhook_event_task(self, webhook_event_id: str) -> None:
     logger.info("webhook_event_task_started", webhook_event_id=webhook_event_id)
     try:
-        asyncio.run(_process_webhook_event(webhook_event_id))
+        asyncio.run(run_with_cleanup(_process_webhook_event(webhook_event_id)))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "webhook_event_task_failed", webhook_event_id=webhook_event_id, error=str(exc)
         )
         raise self.retry(exc=exc, countdown=60 * (2**self.request.retries)) from exc
-    finally:
-        dispose_engine_sync()
 
 
 async def _recover_stuck_webhook_events() -> list[str]:
@@ -117,10 +115,7 @@ def recover_stuck_webhook_events_task() -> list[str]:
     itself retains a successfully-enqueued message until a worker is
     available, so that case already recovers with no extra code.
     """
-    try:
-        recovered = asyncio.run(_recover_stuck_webhook_events())
-    finally:
-        dispose_engine_sync()
+    recovered = asyncio.run(run_with_cleanup(_recover_stuck_webhook_events()))
     if recovered:
         logger.warning("stuck_webhook_events_recovered", count=len(recovered), event_ids=recovered)
     return recovered

@@ -14,7 +14,7 @@ import asyncio
 from sqlalchemy import select
 
 from app.core.logging import get_logger
-from app.db.session import AsyncSessionLocal, dispose_engine_sync
+from app.db.session import AsyncSessionLocal, run_with_cleanup
 from app.integrations.retry import should_retry
 from app.models.integration import SyncError
 from app.repositories.sync_error import SyncErrorRepository
@@ -56,9 +56,6 @@ async def _retry_failed_syncs() -> int:
 
 @celery_app.task(name="sync.retry_failed")
 def retry_failed_syncs_task() -> int:
-    try:
-        count = asyncio.run(_retry_failed_syncs())
-    finally:
-        dispose_engine_sync()
+    count = asyncio.run(run_with_cleanup(_retry_failed_syncs()))
     logger.info("retry_failed_syncs_completed", retried=count)
     return count
