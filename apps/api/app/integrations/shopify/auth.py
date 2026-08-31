@@ -51,6 +51,23 @@ _RETRYABLE_ERROR_TYPES = {
 }
 
 
+def _extract_oauth_error_detail(response: httpx.Response) -> str | None:
+    """Shopify's token endpoint follows the standard OAuth2 error-response
+    shape on failure: `{"error": "...", "error_description": "..."}`.
+    Both fields are Shopify-authored, human-readable text -- never a
+    credential value -- so surfacing them turns a guess about *why* a
+    request was rejected into Shopify's own stated reason.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    parts = [str(body[key]) for key in ("error", "error_description") if body.get(key)]
+    return "; ".join(parts) or None
+
+
 def _classify_token_endpoint_error(exc: httpx.HTTPStatusError) -> ShopifyApiError:
     """Same `ShopifyApiError`/`error_type` vocabulary `classify_http_error`
     uses, but with wording accurate to the token endpoint — reusing that
@@ -59,17 +76,19 @@ def _classify_token_endpoint_error(exc: httpx.HTTPStatusError) -> ShopifyApiErro
     client_id/client_secret pair itself is wrong, not an access token.
     """
     status = exc.response.status_code
+    detail = _extract_oauth_error_detail(exc.response)
+    suffix = f" Shopify said: {detail}" if detail else ""
     if status == 400:
         return ShopifyApiError(
             "Shopify rejected the client-credentials request "
-            "(malformed request, or invalid SHOPIFY_CLIENT_ID format).",
+            "(malformed request, or invalid SHOPIFY_CLIENT_ID format)." + suffix,
             error_type="validation_error",
             status_code=status,
         )
     if status == 401:
         return ShopifyApiError(
             "Shopify rejected SHOPIFY_CLIENT_ID/SHOPIFY_CLIENT_SECRET "
-            "(invalid client credentials).",
+            "(invalid client credentials)." + suffix,
             error_type="authentication_error",
             status_code=status,
         )
@@ -77,7 +96,7 @@ def _classify_token_endpoint_error(exc: httpx.HTTPStatusError) -> ShopifyApiErro
         return ShopifyApiError(
             "Shopify refused to issue a token for this app on this store "
             "(app not installed on SHOPIFY_STORE_DOMAIN, or client "
-            "credentials grant not permitted for this app/store).",
+            "credentials grant not permitted for this app/store)." + suffix,
             error_type="authorization_error",
             status_code=status,
         )

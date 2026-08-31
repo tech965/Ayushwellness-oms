@@ -124,6 +124,30 @@ def test_config_falls_back_to_access_token_when_client_credentials_absent(
     assert config.access_token == "shpat_static"
 
 
+def test_config_strips_incidental_whitespace_from_client_id_and_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real production bug this guards: a credential pasted into Render's
+    dashboard can silently pick up a trailing newline/space -- invisible
+    when eyeballing the value, but it makes the byte sequence sent to
+    Shopify's token endpoint wrong, producing a 400 ("malformed request")
+    that looks identical to a genuinely wrong client_id. The same class of
+    bug was already fixed once for SHOPIFY_WEBHOOK_SECRET.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SHOPIFY_STORE_DOMAIN", " aayushveda.myshopify.com\n")
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_ID", "cid\n")
+    monkeypatch.setattr(settings, "SHOPIFY_CLIENT_SECRET", " csecret ")
+
+    config = ShopifyConfig.from_settings()
+
+    assert config is not None
+    assert config.shop_domain == "aayushveda.myshopify.com"
+    assert config.client_id == "cid"
+    assert config.client_secret == "csecret"
+
+
 def test_config_returns_none_when_nothing_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.core.config import settings
 
@@ -240,6 +264,39 @@ async def test_invalid_client_credentials_raise_authentication_error() -> None:
 
     assert exc_info.value.error_type == "authentication_error"
     assert "test-client-secret" not in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_token_endpoint_oauth_error_detail_is_surfaced_without_leaking_secrets() -> None:
+    """Shopify's token endpoint returns a standard OAuth2 error body on
+    failure (`{"error": ..., "error_description": ...}`) -- that text is
+    Shopify's own stated reason, safe to surface, and turns a generic
+    guess ("malformed request, or invalid SHOPIFY_CLIENT_ID format") into
+    an actionable message for the next diagnosis.
+    """
+    client = _StubHttpxClient(
+        **{
+            TOKEN_URL_MARKER: [
+                _http_response(
+                    400,
+                    {
+                        "error": "invalid_request",
+                        "error_description": "Unsupported grant_type parameter value",
+                    },
+                )
+            ]
+        }
+    )
+    manager = _make_token_manager(client)
+
+    with pytest.raises(ShopifyApiError) as exc_info:
+        await manager.get_access_token()
+
+    assert exc_info.value.error_type == "validation_error"
+    assert "invalid_request" in exc_info.value.message
+    assert "Unsupported grant_type parameter value" in exc_info.value.message
+    assert "test-client-secret" not in exc_info.value.message
+    assert "test-client-id" not in exc_info.value.message
 
 
 @pytest.mark.asyncio

@@ -44,19 +44,31 @@ class ShopifyConfig:
 
     @classmethod
     def from_settings(cls) -> ShopifyConfig | None:
-        if not settings.SHOPIFY_STORE_DOMAIN:
+        # .strip(): the same class of bug already fixed once for
+        # SHOPIFY_WEBHOOK_SECRET (see app/api/v1/webhooks/shopify.py) --
+        # a credential pasted into Render's dashboard can silently pick
+        # up a trailing newline/space that's invisible when eyeballing
+        # the value but makes it byte-for-byte wrong. Applied to every
+        # Shopify credential/domain setting here, not just the two new
+        # ones, since SHOPIFY_STORE_DOMAIN feeds directly into the token
+        # endpoint's URL.
+        store_domain = (settings.SHOPIFY_STORE_DOMAIN or "").strip() or None
+        if not store_domain:
             return None
-        if settings.SHOPIFY_CLIENT_ID and settings.SHOPIFY_CLIENT_SECRET:
+        client_id = (settings.SHOPIFY_CLIENT_ID or "").strip() or None
+        client_secret = (settings.SHOPIFY_CLIENT_SECRET or "").strip() or None
+        if client_id and client_secret:
             return cls(
-                shop_domain=settings.SHOPIFY_STORE_DOMAIN,
+                shop_domain=store_domain,
                 api_version=settings.SHOPIFY_API_VERSION,
-                client_id=settings.SHOPIFY_CLIENT_ID,
-                client_secret=settings.SHOPIFY_CLIENT_SECRET,
+                client_id=client_id,
+                client_secret=client_secret,
             )
-        if settings.SHOPIFY_ACCESS_TOKEN:
+        access_token = (settings.SHOPIFY_ACCESS_TOKEN or "").strip() or None
+        if access_token:
             return cls(
-                shop_domain=settings.SHOPIFY_STORE_DOMAIN,
+                shop_domain=store_domain,
                 api_version=settings.SHOPIFY_API_VERSION,
-                access_token=settings.SHOPIFY_ACCESS_TOKEN,
+                access_token=access_token,
             )
         return None
