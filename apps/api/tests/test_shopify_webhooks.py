@@ -85,6 +85,42 @@ async def test_verify_webhook_hmac_rejects_missing_header_or_secret() -> None:
     assert verify_webhook_hmac(raw_body=body, signature_header=_sign(body), secret="") is False
 
 
+async def test_verify_webhook_hmac_is_sensitive_to_byte_formatting_shopify_would_never_change() -> (
+    None
+):
+    """Guards against a future regression where the body is parsed and
+    re-serialized (e.g. `json.dumps(json.loads(raw_body))`) before hashing
+    instead of hashed as the exact bytes received. `json.loads` treats
+    these two payloads as equal, but they are different byte sequences —
+    a signature computed over one must never verify against the other,
+    which is only true if verification genuinely hashes raw bytes end to
+    end rather than a value derived from parsing them.
+    """
+    canonical = json.dumps({"id": 1, "email": "a@example.com"}).encode()
+    # Same JSON value, different bytes: extra whitespace + key order +
+    # a trailing newline, all of which `json.loads` ignores/normalizes
+    # but a byte-for-byte HMAC must not.
+    reformatted = b'{\n  "email":  "a@example.com",\n  "id":   1\n}\n'
+    assert json.loads(canonical) == json.loads(reformatted)
+    assert canonical != reformatted
+
+    signature_for_reformatted = _sign(reformatted)
+    assert (
+        verify_webhook_hmac(
+            raw_body=reformatted, signature_header=signature_for_reformatted, secret=_SECRET
+        )
+        is True
+    )
+    # The same signature must NOT verify against the canonical
+    # re-serialization of the identical JSON value.
+    assert (
+        verify_webhook_hmac(
+            raw_body=canonical, signature_header=signature_for_reformatted, secret=_SECRET
+        )
+        is False
+    )
+
+
 # Client-secret rotation: Shopify signs with the oldest unrevoked secret
 # during a rotation window, so verification must accept either.
 async def test_rotation_accepts_signature_from_current_secret() -> None:
@@ -157,6 +193,37 @@ async def test_valid_webhook_signature_is_accepted(
             "X-Shopify-Topic": "customers/update",
             "X-Shopify-Hmac-Sha256": _sign(body),
             "X-Shopify-Webhook-Id": "wh_1",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+
+async def test_webhook_endpoint_verifies_against_the_true_raw_body_not_a_reparsed_one(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """End-to-end version of
+    `test_verify_webhook_hmac_is_sensitive_to_byte_formatting_shopify_would_never_change`
+    — proves `receive_shopify_webhook` itself (not just the helper
+    function in isolation) hashes `await request.body()`'s exact bytes,
+    with no parse/reformat step in between. Uses a body with irregular
+    whitespace and non-canonical key order that `json.loads` normalizes
+    away but a byte-for-byte HMAC must not — a body-reformatting
+    regression would make this 401 even though the JSON *value* is
+    unchanged.
+    """
+    await _make_shopify_integration(db_session)
+    body = b'{\n  "email":  "spacing@example.com",\n  "id":   987654\n}\n'
+
+    response = await client.post(
+        "/api/v1/webhooks/shopify",
+        content=body,
+        headers={
+            "X-Shopify-Topic": "customers/update",
+            "X-Shopify-Hmac-Sha256": _sign(body),
+            "X-Shopify-Webhook-Id": "wh_raw_body_fidelity",
             "Content-Type": "application/json",
         },
     )
