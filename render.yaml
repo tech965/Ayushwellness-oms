@@ -79,6 +79,56 @@ services:
       # placeholder is substituted) — checkout works without it.
       - key: CASHFREE_RETURN_URL
         sync: false
+      # Widen this (dashboard value, comma-separated) to include the
+      # ayushwellness-oms-web service's real *.onrender.com origin once
+      # it exists below — Render only assigns that URL after the service
+      # is first created, so there is nothing correct to hardcode here
+      # ahead of time. See app.core.config.CORS_ORIGINS.
+
+  - type: web
+    name: ayushwellness-oms-web
+    runtime: node
+    rootDir: apps/web
+    # Next.js frontend. The Shopify App URL must point HERE, never at
+    # ayushwellness-oms-api above — Shopify loads the App URL inside an
+    # iframe in Shopify Admin, and a JSON API with no root page and
+    # X-Frame-Options: DENY can only ever produce "refused to connect"
+    # there (confirmed live: curl https://ayushwellness-oms.onrender.com/
+    # returns 404 application/json with that header). This service never
+    # receives webhook traffic — POST /api/v1/webhooks/shopify stays on
+    # the FastAPI service above, unchanged.
+    #
+    # `output: "standalone"` (apps/web/next.config.ts, active whenever
+    # `VERCEL` isn't set) produces a self-contained server at
+    # .next/standalone/server.js, but Next deliberately does not copy
+    # static assets or `public/` into it (documented standalone
+    # behavior) — docker/web.Dockerfile handles this with explicit
+    # `COPY` layers; the `cp -r` steps below do the equivalent here,
+    # since this is Render's native Node runtime, not that Docker image.
+    # Verified locally before writing this: a clean `npm run build`
+    # followed by these exact copy steps and `node .next/standalone/
+    # server.js` served /login (200) and / (307 -> /dashboard) correctly.
+    buildCommand: npm ci && npm run build && cp -r .next/static .next/standalone/.next/static && cp -r public .next/standalone/public
+    # The generated server.js reads `process.env.PORT` (defaulting to
+    # 3000) and binds `process.env.HOSTNAME || '0.0.0.0'` on its own —
+    # confirmed by reading the actual generated file, not assumed — so
+    # no --port/--hostname flags are needed; Render injects $PORT into
+    # every web service automatically, the same way the uvicorn
+    # startCommand above relies on it.
+    startCommand: node .next/standalone/server.js
+    envVars:
+      # NEXT_PUBLIC_* vars are inlined into the client bundle at BUILD
+      # time (Next.js semantics), not read at runtime — Render exposes
+      # configured env vars to buildCommand as well as the running
+      # process, which is what makes this actually reach the built JS.
+      # Not a secret (this is the same public API origin every browser
+      # already calls directly), so a literal value here is fine — unlike
+      # every `sync: false` entry elsewhere in this file, which really
+      # are secrets.
+      - key: NEXT_PUBLIC_API_URL
+        value: https://ayushwellness-oms.onrender.com/api/v1
+      - key: NODE_ENV
+        value: production
 
   - type: worker
     name: ayushwellness-oms-worker
