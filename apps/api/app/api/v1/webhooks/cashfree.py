@@ -20,6 +20,15 @@ order, amount mismatch, already paid, unrecognized event type; the
 `WebhookEvent` is marked IGNORED with the reason, never fabricated) — so
 Cashfree never retries a delivery this endpoint already understood. Only
 a genuine processing failure (e.g. a database error) returns 5xx.
+
+`data.order.order_id` is required — and its absence is a hard 400 — only
+for the three recognized payment-outcome types
+(`app.integrations.cashfree.normalizer.RECOGNIZED_WEBHOOK_TYPES`). A
+signature-valid delivery of any other `type` (an event this integration
+doesn't yet process, or Cashfree dashboard's undocumented, non-standard
+"Test" delivery) is treated like any other unrecognized event: acked
+200, recorded IGNORED. This never weakens validation for a genuine
+payment webhook, which still requires its order id.
 """
 
 from __future__ import annotations
@@ -111,8 +120,20 @@ async def receive_cashfree_payment_webhook(
     event_type = payload.get("type")
     order_data = extract_order_data(payload)
     payment_data = extract_payment_data(payload)
-    cashfree_order_id = order_data.get("order_id")
-    if not cashfree_order_id or not isinstance(cashfree_order_id, str):
+    raw_order_id = order_data.get("order_id")
+    cashfree_order_id = raw_order_id if isinstance(raw_order_id, str) and raw_order_id else None
+
+    # `data.order.order_id` is only required for the three recognized
+    # payment-outcome types below — genuinely enforced, never weakened,
+    # for those. A signature-valid request with a different (or absent)
+    # `type` — including Cashfree dashboard's "Test" delivery, which is
+    # not one of the three documented payment webhook types and doesn't
+    # carry a `data.order` at all — is handled exactly like any other
+    # unrecognized event a few lines down: acked 200, recorded IGNORED,
+    # never a hard 400. A payload that *claims* to be a real payment
+    # outcome but is missing its order id is still rejected here, since
+    # that's a genuine anomaly worth surfacing, not a test/unknown event.
+    if event_type in RECOGNIZED_WEBHOOK_TYPES and cashfree_order_id is None:
         logger.warning("cashfree_webhook_malformed_payload", reason="missing_order_id")
         raise HTTPException(status_code=400, detail="Payload is missing data.order.order_id.")
 
@@ -130,7 +151,8 @@ async def receive_cashfree_payment_webhook(
         # cf_payment_id and process it only once, regardless of retries
         # — see app.integrations.cashfree.normalizer/docs/integrations/
         # cashfree.md. Falls back to the generic content-hash idempotency
-        # key (WebhookService.compute_fallback_event_id) when absent.
+        # key (WebhookService.compute_fallback_event_id) when absent —
+        # e.g. for a test/unrecognized delivery with no cf_payment_id.
         external_event_id=str(cf_payment_id) if cf_payment_id is not None else None,
         external_resource_id=cashfree_order_id,
     )
@@ -144,6 +166,11 @@ async def receive_cashfree_payment_webhook(
         )
         logger.warning("cashfree_webhook_unrecognized_type", event_type=event_type)
         return {"success": True}
+
+    # Guaranteed non-None: `event_type` is one of the three recognized
+    # payment-outcome types, and the check above already rejected (400)
+    # a recognized type with no order_id before this point.
+    assert cashfree_order_id is not None
 
     await webhook_service.mark_processing(event.id)
 

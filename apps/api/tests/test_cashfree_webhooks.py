@@ -331,6 +331,57 @@ async def test_payload_missing_order_id_is_rejected(
     assert response.status_code == 400
 
 
+async def test_unrecognized_type_without_order_id_is_acked_not_rejected(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """Production incident: Cashfree's dashboard "Test" delivery (and any
+    other signature-valid `type` this integration doesn't process) is not
+    one of the three documented payment-outcome webhooks and carries no
+    `data.order` at all -- it must be acked 200 and recorded IGNORED, the
+    same as any other unrecognized event, rather than a hard 400. This
+    must never require `data.order.order_id`, which only a genuine
+    payment-outcome webhook needs (see
+    `test_payload_missing_order_id_is_rejected` above, still a 400).
+    """
+    await _make_cashfree_integration(db_session)
+    payload = {
+        "type": "SOME_NON_PAYMENT_EVENT",
+        "event_time": "2026-02-01T10:00:05+05:30",
+        "data": {},
+    }
+    response = await _post(client, payload)
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+    event = await db_session.scalar(select(WebhookEvent))
+    assert event is not None
+    assert event.status == "ignored"
+    assert event.external_resource_id is None
+
+
+async def test_payload_with_no_type_field_and_no_order_id_is_acked(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """A signature-valid delivery with no `type` field at all (another
+    plausible shape for Cashfree's undocumented dashboard "Test" action)
+    must not 400 either -- `event_type` resolves to `None`, which is not
+    one of the three recognized payment-outcome types, so it's ignored
+    exactly like `test_unrecognized_type_without_order_id_is_acked_not_rejected`.
+    """
+    await _make_cashfree_integration(db_session)
+    payload = {"event_time": "2026-02-01T10:00:05+05:30", "data": {}}
+    response = await _post(client, payload)
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+
+    event = await db_session.scalar(select(WebhookEvent))
+    assert event is not None
+    assert event.event_type == "unknown"
+    assert event.status == "ignored"
+
+
 async def test_integration_not_configured_returns_404(
     db_session: AsyncSession, client: AsyncClient
 ) -> None:
