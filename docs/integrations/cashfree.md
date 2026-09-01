@@ -284,12 +284,14 @@ next step — not implemented here to avoid speculative complexity.
   exist yet — run `scripts/seed.py` against the target database.
 - **Webhook returns 200 but the order never updates**: check
   `GET /api/v1/webhook-events` for that delivery's `status`. `ignored`
-  with reason `unknown_cashfree_order` means the `order_id` Cashfree
-  webhooked back doesn't match any `Payment.external_id` the OMS
-  created — almost always means checkout was created through a path
-  other than `POST .../create` (not expected in this integration).
-  `amount_mismatch`/`currency_mismatch` means exactly what it says —
-  investigate before ever manually marking the order paid.
+  with reason `unknown_cashfree_order` means the webhook's `order_id`
+  doesn't match any existing `Payment.external_id` **and** couldn't be
+  resolved to an OMS `Order` either (see
+  `CashfreePaymentService._create_payment_from_external_cashfree_order`)
+  — i.e. no `Order.order_number` equal to the order_id or `"#" +
+  order_id` exists. `amount_mismatch`/`currency_mismatch` means exactly
+  what it says — investigate before ever manually marking the order
+  paid.
 - **Checkout creation fails with "no customer phone number on file"**:
   Cashfree requires `customer_details.customer_phone`; the order's
   shipping address / linked customer has none. Add one before retrying.
@@ -306,6 +308,15 @@ next step — not implemented here to avoid speculative complexity.
   one via an Alembic `ALTER TYPE ... ADD VALUE` migration for a purely
   descriptive column.
 - Reconciliation is on-demand only (§13) — no scheduled task.
+- A webhook for a Cashfree order created entirely outside this OMS (the
+  confirmed Shopify -> Cashfree -> webhook architecture) now creates a
+  `Payment` on first arrival by resolving `Order.order_number` from the
+  webhook's `order_id` (exact match, or with a `"#"` prepended) — the
+  verified convention the external checkout also follows. `reconcile_payment`
+  (`POST .../orders/{id}/reconcile`) has NOT been extended the same way:
+  it still requires a `Payment` to already exist for the order
+  (`get_payment_for_order` 404s otherwise), so it cannot yet bootstrap a
+  first-ever record for an order whose webhook was missed entirely.
 
 **Do not claim this integration is fully working in production until a
 real Cashfree payment has been completed and a real Cashfree webhook has

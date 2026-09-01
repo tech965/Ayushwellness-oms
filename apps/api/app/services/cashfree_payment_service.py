@@ -11,6 +11,16 @@ is the ONE place a Cashfree payment result is ever applied to
 `reconcile_payment` (an authenticated, direct Cashfree API lookup) — the
 frontend/browser is never a caller and never a trusted source (spec:
 never mark an order paid from anything but a verified Cashfree result).
+
+A Cashfree payment is not always created through this OMS's own
+`create_or_reuse_checkout` first — the confirmed architecture for this
+integration is Shopify order -> Cashfree payment (created entirely
+outside the OMS) -> this webhook, so `apply_payment_event` also creates
+the `Payment` row itself on first arrival when none exists yet, resolving
+the OMS `Order` from the webhook's `order_id` via `Order.order_number`
+(see `_create_payment_from_external_cashfree_order`). Never fabricates a
+match it can't verify: an `order_id` that resolves to no `Order` is still
+`unknown_cashfree_order`, exactly as before.
 """
 
 from __future__ import annotations
@@ -243,6 +253,55 @@ class CashfreePaymentService:
 
     # --- Applying a trusted Cashfree result (webhook / reconciliation) -
 
+    async def _create_payment_from_external_cashfree_order(
+        self, cashfree_order_id: str
+    ) -> Payment | None:
+        """A Cashfree order_id with no matching `Payment` row is not
+        necessarily unknown to the OMS: the confirmed architecture for
+        this integration is Shopify order -> Cashfree payment (created
+        entirely outside this OMS, e.g. by a Shopify-side checkout) ->
+        this webhook, so this delivery is often the FIRST trusted signal
+        this OMS ever sees for that payment — `create_or_reuse_checkout`
+        is never called for such an order.
+
+        Resolves the OMS `Order` the same way `build_cashfree_order_id`
+        derives a Cashfree order_id from `Order.order_number` in the
+        first place (strip a leading '#') — the verified convention the
+        external checkout also follows. Returns `None` (never raises,
+        never guesses at a match) when no such order exists, so the
+        caller falls back to the existing `unknown_cashfree_order`
+        outcome exactly as before this order_id was ever seen.
+        """
+        order = await self.orders.get_by_order_number(
+            cashfree_order_id
+        ) or await self.orders.get_by_order_number(f"#{cashfree_order_id}")
+        if order is None:
+            return None
+
+        payment, created = await self.payments.upsert_by_external_id(
+            source_system=SourceSystem.CASHFREE,
+            external_id=cashfree_order_id,
+            order_id=order.id,
+            payment_type=order.payment_type,
+            status=PaymentStatus.PENDING,
+            amount=order.total_amount,
+            currency=order.currency,
+            provider="cashfree",
+            payment_metadata={
+                "cashfree_order_id": cashfree_order_id,
+                "created_from": "webhook",
+            },
+        )
+        await self.session.commit()
+        logger.info(
+            "cashfree_payment_created_from_webhook",
+            order_id=str(order.id),
+            payment_id=str(payment.id),
+            cashfree_order_id=cashfree_order_id,
+            created=created,
+        )
+        return payment
+
     async def apply_payment_event(
         self,
         *,
@@ -262,6 +321,8 @@ class CashfreePaymentService:
         payment = await self.payments.get_by_source_external_id(
             source_system=SourceSystem.CASHFREE, external_id=cashfree_order_id
         )
+        if payment is None:
+            payment = await self._create_payment_from_external_cashfree_order(cashfree_order_id)
         if payment is None:
             logger.warning(
                 "cashfree_payment_event_unmatched", cashfree_order_id=cashfree_order_id

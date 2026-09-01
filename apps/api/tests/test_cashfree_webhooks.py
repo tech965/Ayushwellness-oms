@@ -728,6 +728,153 @@ async def test_unknown_cashfree_order_id_does_not_fabricate_a_match(
     assert "unknown_cashfree_order" in event.error_message
 
 
+async def test_success_webhook_creates_payment_for_order_with_no_prior_checkout(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """The confirmed architecture: a Cashfree payment created entirely
+    outside this OMS (e.g. a Shopify-side checkout) has no `Payment` row
+    yet when its webhook first arrives -- this must create one and apply
+    the result, not discard the event as `unknown_cashfree_order`.
+    """
+    order = await _make_order(db_session, order_number="#AWL6001", total_amount=Decimal("500.00"))
+    await _make_cashfree_integration(db_session)
+
+    payload = _webhook_payload(
+        event_type="PAYMENT_SUCCESS_WEBHOOK",
+        order_id="AWL6001",
+        cf_payment_id="pay_ext_1",
+        payment_status="SUCCESS",
+        amount="500.00",
+    )
+    response = await _post(client, payload)
+    assert response.status_code == 200
+
+    payment = await db_session.scalar(
+        select(Payment).where(Payment.order_id == order.id, Payment.provider == "cashfree")
+    )
+    assert payment is not None
+    assert payment.status == PaymentStatus.PAID
+    assert payment.external_id == "AWL6001"
+    assert payment.external_transaction_id == "pay_ext_1"
+
+    refreshed_order = await db_session.get(Order, order.id)
+    assert refreshed_order.payment_status == PaymentStatus.PAID
+
+    event = await db_session.scalar(select(WebhookEvent))
+    assert event.status == "processed"
+
+
+async def test_failed_webhook_creates_payment_for_order_with_no_prior_checkout(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    order = await _make_order(db_session, order_number="#AWL6002")
+    await _make_cashfree_integration(db_session)
+
+    payload = _webhook_payload(
+        event_type="PAYMENT_FAILED_WEBHOOK",
+        order_id="AWL6002",
+        cf_payment_id="pay_ext_2",
+        payment_status="FAILED",
+        error={"error_code": "payment_declined", "error_description": "Declined by bank"},
+    )
+    response = await _post(client, payload)
+    assert response.status_code == 200
+
+    payment = await db_session.scalar(
+        select(Payment).where(Payment.order_id == order.id, Payment.provider == "cashfree")
+    )
+    assert payment is not None
+    assert payment.status == PaymentStatus.FAILED
+
+    refreshed_order = await db_session.get(Order, order.id)
+    assert refreshed_order.payment_status == PaymentStatus.PENDING
+
+
+async def test_newly_created_payment_still_rejects_amount_mismatch(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """The amount/currency safety check must apply identically whether
+    the `Payment` row pre-existed or was just created by this webhook --
+    never marked paid on a mismatch either way.
+    """
+    order = await _make_order(db_session, order_number="#AWL6003", total_amount=Decimal("999.00"))
+    await _make_cashfree_integration(db_session)
+
+    payload = _webhook_payload(
+        event_type="PAYMENT_SUCCESS_WEBHOOK",
+        order_id="AWL6003",
+        cf_payment_id="pay_ext_3",
+        payment_status="SUCCESS",
+        amount="1.00",
+    )
+    response = await _post(client, payload)
+    assert response.status_code == 200
+
+    payment = await db_session.scalar(
+        select(Payment).where(Payment.order_id == order.id, Payment.provider == "cashfree")
+    )
+    assert payment is not None
+    assert payment.status == PaymentStatus.PENDING  # created, but never marked paid
+
+    refreshed_order = await db_session.get(Order, order.id)
+    assert refreshed_order.payment_status == PaymentStatus.PENDING
+
+    event = await db_session.scalar(select(WebhookEvent))
+    assert event.status == "ignored"
+    assert "amount_mismatch" in event.error_message
+
+
+async def test_second_delivery_for_same_new_order_updates_not_duplicates(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """A dropped attempt followed by a successful retry, for an order
+    whose first-ever Cashfree signal is this webhook, must resolve to
+    exactly one `Payment` row -- the second delivery finds the row the
+    first one created rather than creating a second one.
+    """
+    order = await _make_order(db_session, order_number="#AWL6004", total_amount=Decimal("300.00"))
+    await _make_cashfree_integration(db_session)
+
+    dropped_payload = _webhook_payload(
+        event_type="PAYMENT_USER_DROPPED_WEBHOOK",
+        order_id="AWL6004",
+        cf_payment_id="pay_ext_4a",
+        payment_status="USER_DROPPED",
+        amount="300.00",
+    )
+    response_1 = await _post(client, dropped_payload)
+    assert response_1.status_code == 200
+
+    success_payload = _webhook_payload(
+        event_type="PAYMENT_SUCCESS_WEBHOOK",
+        order_id="AWL6004",
+        cf_payment_id="pay_ext_4b",
+        payment_status="SUCCESS",
+        amount="300.00",
+    )
+    response_2 = await _post(client, success_payload)
+    assert response_2.status_code == 200
+
+    payments = (
+        (
+            await db_session.execute(
+                select(Payment).where(Payment.order_id == order.id, Payment.provider == "cashfree")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(payments) == 1
+    assert payments[0].status == PaymentStatus.PAID
+
+    transactions = (
+        await db_session.execute(
+            select(PaymentTransaction).where(PaymentTransaction.payment_id == payments[0].id)
+        )
+    ).scalars().all()
+    assert len(transactions) == 2
+
+
 # --- G. State transitions (see also idempotency tests above) -----------
 
 

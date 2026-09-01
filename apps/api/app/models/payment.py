@@ -5,8 +5,11 @@ Payment information may originate from Shopify or a payment provider.
 manually-created order, and — starting the Cashfree integration — also
 created/looked-up on demand by `app.services.cashfree_payment_service.
 CashfreePaymentService` when a checkout session is initiated for any
-order (`(source_system="cashfree", external_id=<deterministic Cashfree
-order_id>)`, the same generic `SyncMetadataMixin` identity every other
+order, OR when a Cashfree webhook arrives for an order whose payment was
+created entirely outside this OMS and has no `Payment` row yet (see
+`CashfreePaymentService._create_payment_from_external_cashfree_order`) —
+either way `(source_system="cashfree", external_id=<Cashfree order_id>)`,
+the same generic `SyncMetadataMixin` identity every other
 provider-synced row already uses — see `BaseRepository.
 upsert_by_external_id`). `PaymentTransaction` is an append-only per-event
 log (never updated) of every gateway callback/lookup applied to a
