@@ -490,6 +490,40 @@ async def test_a_graphql_error_mid_page_fails_the_job_with_a_recorded_error(
     assert total_orders.scalar_one() == 0  # nothing was ever inserted from the failed page
 
 
+async def test_an_unexpected_non_integration_error_still_fails_the_job_and_releases_the_lock(
+    db_session: AsyncSession,
+) -> None:
+    """Only `IntegrationError` used to be caught around `_run_entity_sync`
+    -- anything else (e.g. a malformed page response the adapter didn't
+    wrap, like a `KeyError` on a missing `node` key) propagated straight
+    out of `execute_sync`. Since `mark_running` had already flipped the
+    job to RUNNING, nothing was ever left to mark it FAILED, so it stayed
+    RUNNING forever and `start_sync`'s one-active-job guard blocked every
+    later attempt to sync this entity type -- until the 20-minute stale
+    reaper eventually caught up. This proves the fix: any exception, not
+    just `IntegrationError`, now fails the job immediately.
+    """
+    client = _StubClient([KeyError("node")])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    service = SyncService(db_session)
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="customers"
+    )
+
+    assert job.status == SyncJobStatus.FAILED
+    assert job.error_count == 1
+
+    # The lock was released -- a new customers sync can start immediately,
+    # with no need to wait for the stale-job reaper.
+    new_job = await service.start_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="customers"
+    )
+    assert new_job.id != job.id
+    assert new_job.status == "queued"
+
+
 # 26. RBAC
 async def test_sync_jobs_and_integrations_endpoints_are_permission_gated(
     db_session: AsyncSession, make_authenticated_client

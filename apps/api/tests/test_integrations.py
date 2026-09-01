@@ -4,9 +4,10 @@ import uuid
 
 import pytest
 from app.integrations.credentials import EnvCredentialProvider
-from app.models.enums import IntegrationStatus, IntegrationType
-from app.models.integration import Integration, IntegrationCode, WebhookEvent
+from app.models.enums import IntegrationStatus, IntegrationType, SyncJobStatus, SyncType
+from app.models.integration import Integration, IntegrationCode, SyncJob, WebhookEvent
 from app.repositories.integration import IntegrationRepository
+from app.repositories.sync_job import SyncJobRepository
 from app.services.integration_service import IntegrationService
 from app.services.sync_service import SyncService
 from app.services.webhook_service import WebhookService, compute_fallback_event_id
@@ -463,6 +464,164 @@ async def test_start_sync_allows_concurrent_jobs_for_different_entity_types(
     assert orders_job.id != customers_job.id
 
 
+async def test_full_customer_sync_allowed_when_no_active_customer_sync(
+    db_session: AsyncSession,
+) -> None:
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    job = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    assert job.status == "queued"
+
+
+async def test_full_customer_sync_allowed_after_a_failed_customer_sync(
+    db_session: AsyncSession,
+) -> None:
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    await service.complete_sync(job1.id, success=False)
+
+    job2 = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    assert job2.id != job1.id
+    assert job2.status == "queued"
+
+
+async def test_full_customer_sync_allowed_after_a_completed_customer_sync(
+    db_session: AsyncSession,
+) -> None:
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    job1 = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    await service.complete_sync(job1.id, success=True)
+
+    job2 = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    assert job2.id != job1.id
+    assert job2.status == "queued"
+
+
+async def test_sync_history_keeps_old_completed_and_failed_jobs_visible(
+    db_session: AsyncSession,
+) -> None:
+    """Completed/failed/partial/cancelled rows are never deleted -- only
+    `status` distinguishes an old, finished job from a currently-active
+    one; sync history must keep showing every one of them.
+    """
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    completed = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    await service.complete_sync(completed.id, success=True)
+    failed = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    await service.complete_sync(failed.id, success=False)
+    cancelled = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    await service.cancel_sync(cancelled.id)
+
+    history = (
+        (await db_session.execute(select(SyncJob).where(SyncJob.integration_id == integration.id)))
+        .scalars()
+        .all()
+    )
+    assert {job.id for job in history} == {completed.id, failed.id, cancelled.id}
+    assert {job.status.value for job in history} == {"completed", "failed", "cancelled"}
+
+
+async def test_partial_unique_index_rejects_a_second_active_job_created_outside_start_sync(
+    db_session: AsyncSession,
+) -> None:
+    """DB-level backstop for `start_sync`'s check-then-create race window
+    (two near-simultaneous trigger requests can both pass the
+    `get_active_for_entity` check before either commits). Bypasses
+    `start_sync` entirely and inserts two active rows directly through
+    the repository, proving `uq_sync_jobs_one_active_per_entity` itself
+    -- not just the application-level check -- refuses a second QUEUED/
+    RUNNING row for the same (integration, entity_type).
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    integration = await _make_integration(db_session)
+    repo = SyncJobRepository(db_session)
+
+    await repo.create(
+        integration_id=integration.id,
+        sync_type=SyncType.FULL,
+        entity_type="customers",
+        status=SyncJobStatus.QUEUED,
+    )
+    await db_session.commit()
+
+    with pytest.raises(IntegrityError):
+        await repo.create(
+            integration_id=integration.id,
+            sync_type=SyncType.FULL,
+            entity_type="customers",
+            status=SyncJobStatus.RUNNING,
+        )
+        await db_session.commit()
+    await db_session.rollback()
+
+
+async def test_start_sync_converts_the_race_backstop_into_a_conflict_error(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If two requests somehow both pass `get_active_for_entity` (the
+    genuine race `uq_sync_jobs_one_active_per_entity` exists for),
+    `start_sync` must still surface the same `ConflictError` the normal
+    path raises -- never a raw 500 from an uncaught `IntegrityError`.
+    Simulated by monkeypatching the guard check to force the race window
+    rather than relying on real thread-level concurrency timing.
+    """
+    from app.core.exceptions import ConflictError
+
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+
+    existing = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+
+    # Force only the *first* check (the one `start_sync` makes before
+    # attempting the insert) to miss the already-active job, simulating
+    # the real race -- another request's job committed in the gap between
+    # that check and this one's insert. The post-rollback re-check must
+    # go through to the real method and find it, exactly as it would in
+    # production once the concurrent insert has actually landed.
+    real_get_active_for_entity = service.sync_jobs.get_active_for_entity
+    calls = {"count": 0}
+
+    async def _miss_once_then_real(**kwargs: object) -> object:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return None
+        return await real_get_active_for_entity(**kwargs)
+
+    monkeypatch.setattr(service.sync_jobs, "get_active_for_entity", _miss_once_then_real)
+
+    with pytest.raises(ConflictError) as exc_info:
+        await service.start_sync(
+            integration_id=integration.id, sync_type="full", entity_type="customers"
+        )
+    assert exc_info.value.details["sync_job_id"] == str(existing.id)
+
+
 async def test_run_sync_returns_the_existing_active_job_instead_of_erroring(
     db_session: AsyncSession,
 ) -> None:
@@ -516,6 +675,51 @@ async def test_reap_stale_sync_jobs_fails_a_job_with_no_recent_progress(
     assert str(job.id) in reaped
     refreshed = await service.sync_jobs.get_by_id(job.id)
     assert refreshed.status == "failed"
+
+
+async def test_stale_running_customer_sync_does_not_permanently_block_a_new_full_sync(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported bug, reproduced directly: a `customers` job stuck
+    RUNNING (worker died mid-sync, or an unexpected exception before this
+    session's `execute_sync` fix) must not block Full Sync forever -- the
+    stale-job reaper clears it and a fresh sync is immediately allowed.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.exceptions import ConflictError
+    from app.tasks import sync_tasks
+
+    integration = await _make_integration(db_session)
+    service = SyncService(db_session)
+    stuck_job = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    await service.mark_running(stuck_job.id)
+
+    with pytest.raises(ConflictError):
+        await service.start_sync(
+            integration_id=integration.id, sync_type="full", entity_type="customers"
+        )
+
+    stale_time = datetime.now(UTC) - timedelta(minutes=30)
+    await SyncJobRepository(db_session).update(stuck_job, updated_at=stale_time)
+    await db_session.commit()
+
+    monkeypatch.setattr(
+        sync_tasks, "AsyncSessionLocal", lambda: db_session_cm_for_reaper(db_session)
+    )
+    reaped = await sync_tasks._reap_stale_sync_jobs()
+    assert str(stuck_job.id) in reaped
+
+    refreshed = await service.sync_jobs.get_by_id(stuck_job.id)
+    assert refreshed.status == "failed"
+
+    new_job = await service.start_sync(
+        integration_id=integration.id, sync_type="full", entity_type="customers"
+    )
+    assert new_job.id != stuck_job.id
+    assert new_job.status == "queued"
 
 
 async def test_reap_stale_sync_jobs_leaves_a_recently_updated_job_alone(

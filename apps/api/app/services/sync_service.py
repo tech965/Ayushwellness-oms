@@ -11,6 +11,7 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, IntegrationError, NotFoundError
@@ -115,13 +116,40 @@ class SyncService:
                 details={"sync_job_id": str(existing.id), "status": existing.status.value},
             )
 
-        job = await self.sync_jobs.create(
-            integration_id=integration.id,
-            sync_type=SyncType(sync_type),
-            entity_type=entity_type,
-            status=SyncJobStatus.QUEUED,
-            job_metadata=metadata,
-        )
+        try:
+            job = await self.sync_jobs.create(
+                integration_id=integration.id,
+                sync_type=SyncType(sync_type),
+                entity_type=entity_type,
+                status=SyncJobStatus.QUEUED,
+                job_metadata=metadata,
+            )
+        except IntegrityError as exc:
+            # Race backstop: two near-simultaneous trigger requests can
+            # both pass the `get_active_for_entity` check above before
+            # either commits — `uq_sync_jobs_one_active_per_entity` (the
+            # partial unique index on (integration_id, entity_type) WHERE
+            # status IN ('queued','running')) then rejects the loser's
+            # insert instead of silently creating a second concurrent
+            # job. Surfaced as the exact same `ConflictError` the normal
+            # check above raises, not a raw 500.
+            await self.session.rollback()
+            # `integration_id` (the plain UUID parameter), never
+            # `integration.id` here -- `session.rollback()` just expired
+            # every attribute on the `integration` ORM object loaded
+            # earlier in this method, and a plain (non-awaited) attribute
+            # access on an expired attribute raises `MissingGreenlet`
+            # under `AsyncSession` (see `_persist_sync_cursor`'s docstring
+            # above for the same caution elsewhere in this file).
+            existing = await self.sync_jobs.get_active_for_entity(
+                integration_id=integration_id, entity_type=entity_type
+            )
+            if existing is None:
+                raise
+            raise ConflictError(
+                f"A {entity_type} sync is already {existing.status.value} for this " "integration.",
+                details={"sync_job_id": str(existing.id), "status": existing.status.value},
+            ) from exc
         await self.audit.record(
             user=actor,
             action="sync.started",
@@ -384,11 +412,36 @@ class SyncService:
             # A page-level failure (auth/permission/rate-limit/network) —
             # not a single bad record, which is instead caught inside
             # `_run_entity_sync` and recorded without aborting the job.
+            await self.session.rollback()
             await self.record_error(
                 job_id,
                 entity_type=entity_type,
                 error_type=exc.details.get("error_type", "integration_error"),
                 error_message=exc.message,
+            )
+            return await self.complete_sync(job_id, success=False)
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Real gap this closes: only `IntegrationError` was caught
+            # above, so any *other* exception raised outside the
+            # per-record loop (e.g. a malformed page response the
+            # adapter didn't wrap — `_fetch_page` builds `nodes` from
+            # `edge["node"]` before the per-record try/except ever runs)
+            # propagated straight out of this method. `mark_running` had
+            # already flipped the job to RUNNING, so with nothing left to
+            # ever call `complete_sync`, the job stayed RUNNING
+            # indefinitely — `start_sync`'s one-active-job guard then
+            # blocked every later attempt to sync this entity type until
+            # the 20-minute stale-job reaper eventually caught up. This
+            # makes the lock release immediate instead of waiting on that
+            # fallback, without weakening it — the reaper stays in place
+            # for whatever this still can't catch (e.g. the worker
+            # process itself being killed).
+            await self.session.rollback()
+            await self.record_error(
+                job_id,
+                entity_type=entity_type,
+                error_type="unexpected_error",
+                error_message=str(exc),
             )
             return await self.complete_sync(job_id, success=False)
 

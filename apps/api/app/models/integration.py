@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import AwareDateTime, Base, JSONType, TimestampMixin, UUIDPrimaryKeyMixin
@@ -78,6 +78,23 @@ class Integration(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class SyncJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "sync_jobs"
+    __table_args__ = (
+        # Defense-in-depth for "at most one active (QUEUED/RUNNING) sync
+        # per (integration, entity_type)" — `SyncService.start_sync`
+        # enforces this with a check-then-create, which has a genuine
+        # race window between two near-simultaneous trigger requests; this
+        # is the DB-level backstop that makes the second insert fail
+        # instead of silently creating two concurrent jobs. Mirrors
+        # `OrderAssignment`'s identical "one active per X" partial index.
+        Index(
+            "uq_sync_jobs_one_active_per_entity",
+            "integration_id",
+            "entity_type",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+            sqlite_where=text("status IN ('queued', 'running')"),
+        ),
+    )
 
     integration_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("integrations.id", ondelete="CASCADE"), nullable=False, index=True
