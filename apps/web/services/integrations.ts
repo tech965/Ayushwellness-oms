@@ -136,6 +136,10 @@ export function useSyncJobs(params: SyncJobListParams) {
 
 interface WebhookEventListParams extends ListParams {
   integrationId?: string
+  /** e.g. a Cashfree `cashfree_order_id` -- narrows to the webhook
+   * deliveries for one gateway order (see the payments detail page).
+   */
+  externalResourceId?: string
 }
 
 async function fetchWebhookEvents(
@@ -148,6 +152,7 @@ async function fetchWebhookEvents(
         page: params.page,
         page_size: params.pageSize,
         integration_id: params.integrationId || undefined,
+        external_resource_id: params.externalResourceId || undefined,
       },
     }
   )

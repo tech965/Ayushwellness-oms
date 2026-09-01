@@ -126,10 +126,17 @@ class WebhookService:
         page_params: PageParams,
         sort_params: SortParams,
         integration_id: uuid.UUID | None = None,
+        external_resource_id: str | None = None,
     ) -> tuple[list[WebhookEvent], int]:
+        """`external_resource_id` is optional and additive — every
+        existing caller that only ever passed `integration_id` (or
+        neither) keeps its exact prior behavior unchanged.
+        """
         query = (
-            self.webhook_events.for_integration(integration_id)
-            if integration_id is not None
+            self.webhook_events.search_query(
+                integration_id=integration_id, external_resource_id=external_resource_id
+            )
+            if integration_id is not None or external_resource_id is not None
             else None
         )
         items, total = await self.webhook_events.list(

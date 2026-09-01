@@ -314,6 +314,47 @@ async def test_monitoring_endpoints(db_session: AsyncSession, make_authenticated
         assert "payload" not in events.json()["data"][0]
 
 
+async def test_webhook_events_filter_by_external_resource_id(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """New, additive filter (backs the Cashfree payment detail page's
+    "Webhook events" section: it needs exactly the deliveries for one
+    `cashfree_order_id`, not the whole integration's event log) —
+    `integration_id`-only filtering, and no filter at all, must keep
+    returning exactly what they did before this was added.
+    """
+    integration = await _make_integration(db_session)
+    webhook_service = WebhookService(db_session)
+    await webhook_service.ingest(
+        integration_id=integration.id,
+        event_type="payment",
+        payload={"data": {"order": {"order_id": "AWL1"}}},
+        external_event_id="evt_1",
+        external_resource_id="AWL1",
+    )
+    await webhook_service.ingest(
+        integration_id=integration.id,
+        event_type="payment",
+        payload={"data": {"order": {"order_id": "AWL2"}}},
+        external_event_id="evt_2",
+        external_resource_id="AWL2",
+    )
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["webhooks.read"]
+    ) as client:
+        filtered = await client.get(
+            "/api/v1/webhook-events", params={"external_resource_id": "AWL1"}
+        )
+        assert filtered.status_code == 200
+        assert filtered.json()["meta"]["total_items"] == 1
+        assert filtered.json()["data"][0]["external_event_id"] == "evt_1"
+
+        unfiltered = await client.get("/api/v1/webhook-events")
+        assert unfiltered.status_code == 200
+        assert unfiltered.json()["meta"]["total_items"] == 2
+
+
 async def test_trigger_sync_creates_queued_job_and_requires_manage_permission(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:

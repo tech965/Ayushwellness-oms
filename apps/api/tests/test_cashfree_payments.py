@@ -285,3 +285,315 @@ async def test_reconcile_endpoint_applies_the_latest_cashfree_state(
 
 async def _noop():
     return None
+
+
+# --- I. Connection status endpoints -----------------------------------
+
+
+async def test_status_endpoint_reports_configured_environment_and_api_url(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get("/api/v1/payments/cashfree/status")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["configured"] is True
+    assert body["environment"] == "sandbox"
+    assert body["api_url"] == "https://sandbox.cashfree.com/pg"
+    assert body["api_version"] == "2025-01-01"
+    # Never the client secret, in any form.
+    assert _SECRET not in response.text
+
+
+async def test_status_endpoint_reports_not_configured_when_credentials_missing(
+    db_session: AsyncSession, make_authenticated_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "CASHFREE_CLIENT_ID", None)
+    monkeypatch.setattr(settings, "CASHFREE_CLIENT_SECRET", None)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get("/api/v1/payments/cashfree/status")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["configured"] is False
+    assert body["environment"] == "not_configured"
+    assert body["api_url"] is None
+
+
+async def test_status_endpoint_requires_permission(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    response = await client.get("/api/v1/payments/cashfree/status")
+    assert response.status_code == 401
+
+
+async def test_status_endpoint_reports_production_environment_from_api_url(
+    db_session: AsyncSession, make_authenticated_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "CASHFREE_API_URL", "https://api.cashfree.com/pg")
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get("/api/v1/payments/cashfree/status")
+
+    assert response.json()["data"]["environment"] == "production"
+
+
+async def test_test_connection_reports_connected_on_a_404_sentinel_response(
+    db_session: AsyncSession, make_authenticated_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 404 on the deliberately-nonexistent sentinel order id means the
+    request reached Cashfree and the credentials were accepted -- the
+    exact contract already verified against real Cashfree production via
+    a Render shell.
+    """
+    from app.integrations.cashfree.errors import CashfreeApiError
+
+    async def _fake_get_order(self, order_id):  # noqa: ANN001
+        assert order_id == "oms-connectivity-check-000000"
+        raise CashfreeApiError(
+            "Cashfree order/payment not found.", error_type="not_found", status_code=404
+        )
+
+    monkeypatch.setattr(CashfreeClient, "get_order", _fake_get_order)
+    monkeypatch.setattr(CashfreeClient, "aclose", lambda self: _noop())
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["integrations.test"]
+    ) as authed_client:
+        response = await authed_client.post("/api/v1/payments/cashfree/status/test-connection")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["connected"] is True
+    assert body["configured"] is True
+    assert body["error_type"] == "not_found"
+    assert body["status_code"] == 404
+    assert _SECRET not in response.text
+
+
+async def test_test_connection_reports_not_connected_on_authentication_failure(
+    db_session: AsyncSession, make_authenticated_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.integrations.cashfree.errors import CashfreeApiError
+
+    async def _fake_get_order(self, order_id):  # noqa: ANN001
+        raise CashfreeApiError(
+            "Cashfree rejected the credentials.", error_type="authentication_error", status_code=401
+        )
+
+    monkeypatch.setattr(CashfreeClient, "get_order", _fake_get_order)
+    monkeypatch.setattr(CashfreeClient, "aclose", lambda self: _noop())
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["integrations.test"]
+    ) as authed_client:
+        response = await authed_client.post("/api/v1/payments/cashfree/status/test-connection")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["connected"] is False
+    assert body["error_type"] == "authentication_error"
+    assert body["status_code"] == 401
+    # Never leaks the credentials that were rejected.
+    assert _SECRET not in response.text
+    assert "test-client-id" not in response.text
+
+
+async def test_test_connection_reports_not_configured_without_calling_cashfree(
+    db_session: AsyncSession,
+    make_authenticated_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "CASHFREE_CLIENT_ID", None)
+    monkeypatch.setattr(settings, "CASHFREE_CLIENT_SECRET", None)
+
+    calls = {"n": 0}
+
+    async def _fake_get_order(self, order_id):  # noqa: ANN001
+        calls["n"] += 1
+        raise AssertionError("must never call Cashfree when unconfigured")
+
+    monkeypatch.setattr(CashfreeClient, "get_order", _fake_get_order)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["integrations.test"]
+    ) as authed_client:
+        response = await authed_client.post("/api/v1/payments/cashfree/status/test-connection")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["configured"] is False
+    assert body["connected"] is False
+    assert calls["n"] == 0
+
+
+async def test_test_connection_requires_integrations_test_permission(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.post("/api/v1/payments/cashfree/status/test-connection")
+    assert response.status_code == 403
+
+
+# --- J. Payment analytics endpoints -----------------------------------
+
+
+async def _make_cashfree_payment(
+    session: AsyncSession,
+    *,
+    order_number: str,
+    status: PaymentStatus,
+    amount: Decimal = Decimal("500.00"),
+    payment_method: str | None = None,
+):
+    order_id = await _make_order(session, order_number=order_number, total_amount=amount)
+    metadata = {"payment_method": payment_method} if payment_method else None
+    payment = await PaymentRepository(session).create(
+        order_id=order_id,
+        payment_type=PaymentType.PREPAID,
+        status=status,
+        amount=amount,
+        currency="INR",
+        provider="cashfree",
+        source_system="cashfree",
+        external_id=f"cf_{order_number}",
+        payment_metadata=metadata,
+    )
+    await session.commit()
+    return payment
+
+
+async def test_payment_overview_counts_and_amounts_are_cashfree_scoped(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    await _make_cashfree_payment(
+        db_session, order_number="OV1", status=PaymentStatus.PAID, amount=Decimal("100.00")
+    )
+    await _make_cashfree_payment(
+        db_session, order_number="OV2", status=PaymentStatus.PAID, amount=Decimal("200.00")
+    )
+    await _make_cashfree_payment(
+        db_session, order_number="OV3", status=PaymentStatus.PENDING, amount=Decimal("50.00")
+    )
+    await _make_cashfree_payment(
+        db_session, order_number="OV4", status=PaymentStatus.FAILED, amount=Decimal("75.00")
+    )
+    # A plain COD/manual order (no Cashfree payment at all) must never be
+    # counted here -- only its own auto-created "manual" baseline payment
+    # exists, which has `provider=None`, not "cashfree".
+    await _make_order(db_session, order_number="#NOTCASHFREE")
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get("/api/v1/payments/cashfree/analytics/overview")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["total_payments"]["current"] == "4"
+    assert body["paid_payments"]["current"] == "2"
+    assert body["pending_payments"]["current"] == "1"
+    assert body["failed_payments"]["current"] == "1"
+    assert body["total_amount"]["current"] == "300.00"
+    assert body["pending_amount"]["current"] == "50.00"
+    statuses = {item["status"]: item["count"] for item in body["status_breakdown"]}
+    assert statuses["paid"] == 2
+    assert statuses["pending"] == 1
+    assert statuses["failed"] == 1
+
+
+async def test_payment_overview_requires_permission(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    response = await client.get("/api/v1/payments/cashfree/analytics/overview")
+    assert response.status_code == 401
+
+
+async def test_payment_trend_buckets_by_day(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    payment = await _make_cashfree_payment(
+        db_session, order_number="TR1", status=PaymentStatus.PAID, amount=Decimal("150.00")
+    )
+    await PaymentRepository(db_session).update(payment, created_at=datetime.now(UTC))
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get(
+            "/api/v1/payments/cashfree/analytics/trend", params={"interval": "day"}
+        )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["interval"] == "day"
+    assert len(body["points"]) == 1
+    point = body["points"][0]
+    assert point["total_count"] == 1
+    assert point["paid_count"] == 1
+    assert point["paid_amount"] == "150.00"
+
+
+async def test_payment_trend_rejects_an_invalid_interval(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get(
+            "/api/v1/payments/cashfree/analytics/trend", params={"interval": "fortnight"}
+        )
+    assert response.status_code == 422
+
+
+async def test_payment_method_breakdown_groups_by_method(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    await _make_cashfree_payment(
+        db_session,
+        order_number="MB1",
+        status=PaymentStatus.PAID,
+        amount=Decimal("100.00"),
+        payment_method="upi",
+    )
+    await _make_cashfree_payment(
+        db_session,
+        order_number="MB2",
+        status=PaymentStatus.PAID,
+        amount=Decimal("200.00"),
+        payment_method="upi",
+    )
+    await _make_cashfree_payment(
+        db_session,
+        order_number="MB3",
+        status=PaymentStatus.PAID,
+        amount=Decimal("50.00"),
+        payment_method="card",
+    )
+    # No payment_method recorded yet (e.g. still PENDING) -- must not
+    # appear in the breakdown as a fake "None" method.
+    await _make_cashfree_payment(db_session, order_number="MB4", status=PaymentStatus.PENDING)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get("/api/v1/payments/cashfree/analytics/method-breakdown")
+
+    assert response.status_code == 200
+    items = {item["payment_method"]: item for item in response.json()["data"]["items"]}
+    assert items["upi"]["count"] == 2
+    assert items["upi"]["amount"] == "300.00"
+    assert items["card"]["count"] == 1
+    assert items["card"]["amount"] == "50.00"
+    assert None not in items

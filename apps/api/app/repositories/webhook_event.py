@@ -16,6 +16,26 @@ class WebhookEventRepository(BaseRepository[WebhookEvent]):
     def for_integration(self, integration_id: uuid.UUID) -> Select:
         return select(WebhookEvent).where(WebhookEvent.integration_id == integration_id)
 
+    def search_query(
+        self,
+        *,
+        integration_id: uuid.UUID | None = None,
+        external_resource_id: str | None = None,
+    ) -> Select:
+        """Superset of `for_integration` — adds an optional
+        `external_resource_id` filter (e.g. a Cashfree `cashfree_order_id`,
+        already stored on every webhook `receive_cashfree_payment_webhook`
+        ingests — see `app.api.v1.webhooks.cashfree`) so a payment's
+        detail view can show exactly the webhook deliveries for that one
+        gateway order, not the whole integration's event log.
+        """
+        stmt = select(WebhookEvent)
+        if integration_id is not None:
+            stmt = stmt.where(WebhookEvent.integration_id == integration_id)
+        if external_resource_id is not None:
+            stmt = stmt.where(WebhookEvent.external_resource_id == external_resource_id)
+        return stmt
+
     async def get_stuck_received(self, *, received_before: datetime) -> list[WebhookEvent]:
         """Round 4 fix: `receive_shopify_webhook` persists the
         `WebhookEvent` row *before* attempting `process_webhook_event_task.delay()`,

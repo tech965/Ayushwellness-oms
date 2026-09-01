@@ -16,11 +16,13 @@ never mark an order paid from anything but a verified Cashfree result).
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, IntegrationError, NotFoundError, ValidationError
@@ -41,10 +43,28 @@ from app.models.order import Order
 from app.models.payment import Payment
 from app.repositories.order import OrderEventRepository, OrderRepository
 from app.repositories.payment import PaymentRepository, PaymentTransactionRepository
+from app.schemas.analytics import StatusCount
+from app.schemas.cashfree import (
+    CashfreeConnectionTestResponse,
+    CashfreePaymentMethodBreakdownItem,
+    CashfreePaymentMethodBreakdownResponse,
+    CashfreePaymentOverviewResponse,
+    CashfreePaymentTrendPoint,
+    CashfreePaymentTrendResponse,
+    CashfreeStatusResponse,
+)
+from app.services.analytics_service import _bucket_key, _kpi, _previous_range, resolve_range
 from app.services.audit_service import AuditService
 from app.services.order_service import ORDER_STATUS_TRANSITIONS
 
 logger = get_logger(__name__)
+
+# `GET /orders/{order_id}` against an id that can never exist in a real
+# Cashfree account — used only to prove reachability/credentials (a 404
+# `not_found` means "reached Cashfree, credentials accepted"; a 401/403
+# `authentication_error` means "credentials rejected"). Read-only; never
+# creates, modifies, or pays anything.
+_CONNECTIVITY_PROBE_ORDER_ID = "oms-connectivity-check-000000"
 
 
 @dataclass(frozen=True)
@@ -479,3 +499,214 @@ class CashfreePaymentService:
         await self.session.commit()
 
         return await self.get_payment_for_order(order_id)
+
+    # --- Connection status (dashboard "Cashfree connection" card) -----
+
+    def get_status(self) -> CashfreeStatusResponse:
+        """Pure config read — no network call, safe on every dashboard
+        page load. Never returns the client secret/webhook secret.
+        """
+        config = CashfreeConfig.from_settings()
+        if config is None:
+            return CashfreeStatusResponse(
+                configured=False, environment="not_configured", api_url=None, api_version=None
+            )
+        return CashfreeStatusResponse(
+            configured=True,
+            environment=config.environment,
+            api_url=config.base_url,
+            api_version=config.api_version,
+        )
+
+    async def test_connection(self) -> CashfreeConnectionTestResponse:
+        """One on-demand, read-only Cashfree API call via the existing,
+        unmodified `CashfreeClient` — never creates/modifies anything.
+        `error_type == "not_found"` (a 404 on the sentinel order id) is
+        the *success* case: it proves the request reached Cashfree and
+        the credentials were accepted. `authentication_error` (401/403)
+        means the credentials were rejected. Never logs or returns the
+        client secret/webhook secret/any token — only the classified
+        `error_type`/`status_code` `CashfreeApiError` already carries.
+        """
+        config = CashfreeConfig.from_settings()
+        if config is None:
+            return CashfreeConnectionTestResponse(
+                configured=False,
+                connected=False,
+                environment="not_configured",
+                error_type="not_configured",
+                status_code=None,
+                checked_at=datetime.now(UTC),
+            )
+
+        client = CashfreeClient(config)
+        try:
+            await client.get_order(_CONNECTIVITY_PROBE_ORDER_ID)
+        except CashfreeApiError as exc:
+            logger.info(
+                "cashfree_connection_test",
+                error_type=exc.error_type,
+                status_code=exc.status_code,
+                connected=exc.error_type == "not_found",
+            )
+            return CashfreeConnectionTestResponse(
+                configured=True,
+                connected=exc.error_type == "not_found",
+                environment=config.environment,
+                error_type=exc.error_type,
+                status_code=exc.status_code,
+                checked_at=datetime.now(UTC),
+            )
+        else:
+            # Would only happen if an order genuinely existed with the
+            # sentinel id — still a reachable, authenticated response.
+            logger.info("cashfree_connection_test", error_type=None, connected=True)
+            return CashfreeConnectionTestResponse(
+                configured=True,
+                connected=True,
+                environment=config.environment,
+                error_type=None,
+                status_code=200,
+                checked_at=datetime.now(UTC),
+            )
+        finally:
+            await client.aclose()
+
+    # --- Payment analytics (dashboard cards/charts) --------------------
+    # Scoped to `Payment.provider == "cashfree"` — a COD/manually-recorded
+    # payment is never counted here. All three read `Payment.created_at`
+    # (not `paid_at`, which is `None` until a payment actually succeeds)
+    # so a payment created in the selected window is always represented,
+    # including ones still pending or that failed.
+
+    async def _status_aggregates(
+        self, date_from: datetime, date_to: datetime
+    ) -> dict[PaymentStatus, tuple[int, Decimal]]:
+        stmt = (
+            select(Payment.status, func.count(), func.coalesce(func.sum(Payment.amount), 0))
+            .where(
+                Payment.provider == SourceSystem.CASHFREE,
+                Payment.created_at >= date_from,
+                Payment.created_at <= date_to,
+            )
+            .group_by(Payment.status)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return {status: (count, Decimal(amount)) for status, count, amount in rows}
+
+    async def get_payment_overview(
+        self, date_from: datetime | None, date_to: datetime | None
+    ) -> CashfreePaymentOverviewResponse:
+        r = resolve_range(date_from, date_to)
+        prev = _previous_range(r)
+        current = await self._status_aggregates(r.date_from, r.date_to)
+        previous = await self._status_aggregates(prev.date_from, prev.date_to)
+
+        def count_of(agg: dict[PaymentStatus, tuple[int, Decimal]], status: PaymentStatus) -> int:
+            return agg.get(status, (0, Decimal("0")))[0]
+
+        def amount_of(
+            agg: dict[PaymentStatus, tuple[int, Decimal]], status: PaymentStatus
+        ) -> Decimal:
+            return agg.get(status, (0, Decimal("0")))[1]
+
+        def refunded_count(agg: dict[PaymentStatus, tuple[int, Decimal]]) -> int:
+            return count_of(agg, PaymentStatus.REFUNDED) + count_of(
+                agg, PaymentStatus.PARTIALLY_REFUNDED
+            )
+
+        total_current = sum((c for c, _ in current.values()), 0)
+        total_previous = sum((c for c, _ in previous.values()), 0)
+
+        return CashfreePaymentOverviewResponse(
+            date_from=r.date_from,
+            date_to=r.date_to,
+            total_payments=_kpi(total_current, total_previous),
+            paid_payments=_kpi(
+                count_of(current, PaymentStatus.PAID), count_of(previous, PaymentStatus.PAID)
+            ),
+            pending_payments=_kpi(
+                count_of(current, PaymentStatus.PENDING),
+                count_of(previous, PaymentStatus.PENDING),
+            ),
+            failed_payments=_kpi(
+                count_of(current, PaymentStatus.FAILED), count_of(previous, PaymentStatus.FAILED)
+            ),
+            refunded_payments=_kpi(refunded_count(current), refunded_count(previous)),
+            total_amount=_kpi(
+                amount_of(current, PaymentStatus.PAID), amount_of(previous, PaymentStatus.PAID)
+            ),
+            pending_amount=_kpi(
+                amount_of(current, PaymentStatus.PENDING),
+                amount_of(previous, PaymentStatus.PENDING),
+            ),
+            status_breakdown=[
+                StatusCount(status=status.value, count=count)
+                for status, (count, _amount) in current.items()
+            ],
+        )
+
+    async def get_payment_trend(
+        self, date_from: datetime | None, date_to: datetime | None, interval: str
+    ) -> CashfreePaymentTrendResponse:
+        r = resolve_range(date_from, date_to)
+        stmt = select(Payment.created_at, Payment.status, Payment.amount).where(
+            Payment.provider == SourceSystem.CASHFREE,
+            Payment.created_at >= r.date_from,
+            Payment.created_at <= r.date_to,
+        )
+        rows = (await self.session.execute(stmt)).all()
+
+        buckets: dict[str, dict[str, Decimal | int]] = defaultdict(
+            lambda: {
+                "total_count": 0,
+                "total_amount": Decimal("0"),
+                "paid_count": 0,
+                "paid_amount": Decimal("0"),
+                "pending_count": 0,
+                "failed_count": 0,
+            }
+        )
+        for created_at, status, amount in rows:
+            bucket = buckets[_bucket_key(created_at, interval)]
+            bucket["total_count"] += 1
+            bucket["total_amount"] += amount
+            if status == PaymentStatus.PAID:
+                bucket["paid_count"] += 1
+                bucket["paid_amount"] += amount
+            elif status == PaymentStatus.PENDING:
+                bucket["pending_count"] += 1
+            elif status == PaymentStatus.FAILED:
+                bucket["failed_count"] += 1
+
+        points = [
+            CashfreePaymentTrendPoint(bucket=key, **values)
+            for key, values in sorted(buckets.items())
+        ]
+        return CashfreePaymentTrendResponse(interval=interval, points=points)
+
+    async def get_payment_method_breakdown(
+        self, date_from: datetime | None, date_to: datetime | None
+    ) -> CashfreePaymentMethodBreakdownResponse:
+        r = resolve_range(date_from, date_to)
+        method_expr = Payment.payment_metadata["payment_method"].as_string()
+        stmt = (
+            select(method_expr, func.count(), func.coalesce(func.sum(Payment.amount), 0))
+            .where(
+                Payment.provider == SourceSystem.CASHFREE,
+                Payment.created_at >= r.date_from,
+                Payment.created_at <= r.date_to,
+                method_expr.is_not(None),
+            )
+            .group_by(method_expr)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return CashfreePaymentMethodBreakdownResponse(
+            items=[
+                CashfreePaymentMethodBreakdownItem(
+                    payment_method=method, count=count, amount=Decimal(amount)
+                )
+                for method, count, amount in rows
+                if method
+            ]
+        )

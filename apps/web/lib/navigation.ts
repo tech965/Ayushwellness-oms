@@ -5,6 +5,7 @@ import {
   Boxes,
   CalendarClock,
   ClipboardList,
+  CreditCard,
   FileClock,
   Gauge,
   History,
@@ -46,6 +47,7 @@ export const navGroups: NavGroup[] = [
     label: "Commerce",
     items: [
       { label: "Orders", href: "/orders", icon: ShoppingCart },
+      { label: "Payments", href: "/payments", icon: CreditCard },
       { label: "Customers", href: "/customers", icon: Users },
       { label: "Products", href: "/products", icon: Package },
     ],

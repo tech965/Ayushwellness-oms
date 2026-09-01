@@ -27,13 +27,17 @@ router = APIRouter()
 @router.get("", response_model=PaginatedResponse[WebhookEventResponse])
 async def list_webhook_events(
     integration_id: uuid.UUID | None = None,
+    external_resource_id: str | None = None,
     page_params: PageParams = Depends(pagination_params),
     sort_params: SortParams = Depends(sort_params_dep),
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("webhooks.read")),
 ) -> PaginatedResponse[WebhookEventResponse]:
     items, total = await WebhookService(session).list_events(
-        page_params=page_params, sort_params=sort_params, integration_id=integration_id
+        page_params=page_params,
+        sort_params=sort_params,
+        integration_id=integration_id,
+        external_resource_id=external_resource_id,
     )
     return PaginatedResponse(
         data=[WebhookEventResponse.model_validate(e) for e in items],

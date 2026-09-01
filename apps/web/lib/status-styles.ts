@@ -184,6 +184,20 @@ const RECONCILIATION_RESULT_STATUS_TONES: Record<string, StatusTone> = {
   error: "danger",
 }
 
+// Cashfree `payment_method` values (`data.payment.payment_method`'s one
+// populated key — see `app.integrations.cashfree.normalizer`) — an
+// unmapped/unrecognized method (a new instrument Cashfree adds later)
+// falls back to "neutral" via `getStatusTone`, never breaks.
+const PAYMENT_METHOD_TONES: Record<string, StatusTone> = {
+  upi: "success",
+  card: "info",
+  netbanking: "purple",
+  app: "orange",
+  paylater: "warning",
+  emi: "warning",
+  cardless_emi: "warning",
+}
+
 export type StatusDomain =
   | "order"
   | "payment"
@@ -201,6 +215,7 @@ export type StatusDomain =
   | "reconciliation_run"
   | "reconciliation_result"
   | "telecalling"
+  | "payment_method"
 
 const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   order: ORDER_STATUS_TONES,
@@ -219,6 +234,7 @@ const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   reconciliation_run: RECONCILIATION_RUN_STATUS_TONES,
   reconciliation_result: RECONCILIATION_RESULT_STATUS_TONES,
   telecalling: TELECALLING_STATUS_TONES,
+  payment_method: PAYMENT_METHOD_TONES,
 }
 
 export function getStatusTone(domain: StatusDomain, status: string): StatusTone {

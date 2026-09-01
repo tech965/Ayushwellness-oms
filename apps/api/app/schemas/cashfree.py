@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.models.enums import PaymentStatus
 from app.models.payment import Payment
+from app.schemas.analytics import KPIValue, StatusCount
 
 
 class CashfreeCheckoutResponse(BaseModel):
@@ -91,3 +92,82 @@ def build_status_response(payment: Payment) -> CashfreePaymentStatusResponse:
         updated_at=payment.updated_at,
         paid_at=payment.paid_at,
     )
+
+
+# --- Connection status (config snapshot + on-demand live probe) -----------
+# Deliberately separate from `app.schemas.integration.IntegrationHealthResponse`
+# — Cashfree has no registered `IntegrationAdapter` (it's a payment
+# gateway, not a pull-sync provider; see `app.integrations.bootstrap`), so
+# the generic `/integrations/{id}/health-check` always reports "no adapter
+# registered" for it. These reuse `CashfreeConfig`/`CashfreeClient`
+# directly instead.
+
+
+class CashfreeStatusResponse(BaseModel):
+    """Pure config snapshot — never makes a network call, so it's safe to
+    call on every dashboard page load. Never the client secret/webhook
+    secret.
+    """
+
+    configured: bool
+    environment: str  # "sandbox" | "production" | "not_configured"
+    api_url: str | None
+    api_version: str | None
+
+
+class CashfreeConnectionTestResponse(BaseModel):
+    """One on-demand, read-only Cashfree API call
+    (`CashfreeClient.get_order` against a sentinel id that can never
+    exist) — the exact probe already verified safe from a Render shell:
+    a `not_found`/404 proves the credentials and API URL are both good;
+    an `authentication_error`/401 means the credentials are rejected.
+    Never the client secret/webhook secret/any token.
+    """
+
+    configured: bool
+    connected: bool
+    environment: str
+    error_type: str | None
+    status_code: int | None
+    checked_at: datetime
+
+
+# --- Payment analytics (Cashfree-scoped: Payment.provider == "cashfree") --
+
+
+class CashfreePaymentOverviewResponse(BaseModel):
+    date_from: datetime
+    date_to: datetime
+    total_payments: KPIValue
+    paid_payments: KPIValue
+    pending_payments: KPIValue
+    failed_payments: KPIValue
+    refunded_payments: KPIValue
+    total_amount: KPIValue
+    pending_amount: KPIValue
+    status_breakdown: list[StatusCount]
+
+
+class CashfreePaymentTrendPoint(BaseModel):
+    bucket: str
+    total_count: int
+    total_amount: Decimal
+    paid_count: int
+    paid_amount: Decimal
+    pending_count: int
+    failed_count: int
+
+
+class CashfreePaymentTrendResponse(BaseModel):
+    interval: str
+    points: list[CashfreePaymentTrendPoint]
+
+
+class CashfreePaymentMethodBreakdownItem(BaseModel):
+    payment_method: str
+    count: int
+    amount: Decimal
+
+
+class CashfreePaymentMethodBreakdownResponse(BaseModel):
+    items: list[CashfreePaymentMethodBreakdownItem]

@@ -1,9 +1,9 @@
-"""Renders already-fetched Order rows as a real `.xlsx` workbook.
+"""Renders already-fetched Order/Payment rows as a real `.xlsx` workbook.
 
-Deliberately takes fully-loaded `Order` ORM instances (with `items`,
-`customer`, `shipments` eager-loaded by the caller — see
-`OrderRepository.list_for_export`) rather than touching the session
-itself, so this stays a pure, easily-testable formatting layer.
+Deliberately takes fully-loaded ORM instances (with the relationships the
+caller's `search_query`/`list_for_export` already eager-loaded) rather
+than touching the session itself, so this stays a pure, easily-testable
+formatting layer.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 from app.models.order import Order
+from app.models.payment import Payment
 
 
 class ExportService:
@@ -79,6 +80,58 @@ class ExportService:
             )
 
         for index in range(1, len(self.HEADERS) + 1):
+            sheet.column_dimensions[get_column_letter(index)].width = 22
+
+        buffer = BytesIO()
+        workbook.save(buffer)
+        return buffer.getvalue()
+
+    PAYMENT_HEADERS = [
+        "Order Number",
+        "Customer Name",
+        "Phone",
+        "Email",
+        "Amount",
+        "Currency",
+        "Provider",
+        "Payment Method",
+        "Status",
+        "Cashfree Order ID",
+        "Gateway Transaction ID",
+        "Created At",
+        "Paid At",
+    ]
+
+    def payments_to_xlsx(self, payments: list[Payment]) -> bytes:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Payments"
+        sheet.append(self.PAYMENT_HEADERS)
+
+        for payment in payments:
+            order = payment.order
+            customer = order.customer if order is not None else None
+            metadata = payment.payment_metadata or {}
+
+            sheet.append(
+                [
+                    order.order_number if order is not None else None,
+                    customer.full_name if customer is not None else None,
+                    customer.phone if customer is not None else None,
+                    customer.email if customer is not None else None,
+                    float(payment.amount),
+                    payment.currency,
+                    payment.provider,
+                    metadata.get("payment_method"),
+                    payment.status.value,
+                    payment.external_id,
+                    payment.external_transaction_id,
+                    _naive(payment.created_at),
+                    _naive(payment.paid_at),
+                ]
+            )
+
+        for index in range(1, len(self.PAYMENT_HEADERS) + 1):
             sheet.column_dimensions[get_column_letter(index)].width = 22
 
         buffer = BytesIO()
