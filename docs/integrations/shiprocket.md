@@ -183,6 +183,17 @@ Status: **IMPLEMENTED**, payload shape **UNVERIFIED against a live
 delivery**.
 
     POST /api/v1/webhooks/shiprocket/tracking
+    POST /api/v1/webhooks/shipment-updates/tracking   (alias -- use this one in Shiprocket's dashboard)
+
+Both paths reach the exact same handler (`app.api.v1.webhooks.shiprocket`'s
+router is mounted twice in `router.py`, under two different prefixes) —
+**use the second one** when configuring Shiprocket. Confirmed live:
+Shiprocket's own "Webhooks" dashboard page (Settings > API > Webhook)
+rejects a URL containing the word "shiprocket" with *"Please refrain from
+using keywords like shiprocket, kartrocket, sr, or kr in the webhook
+url"* — which the first path violates. The first path is left registered
+(nothing depends on removing it) purely so nothing that already links to
+it breaks.
 
 Shiprocket's tracking-webhook payload schema and secret-transport
 mechanism are not published in any documentation this integration's

@@ -39,6 +39,7 @@ import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
+import { buildPaymentDrilldownHref } from "@/lib/build-payment-drilldown-href"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useLocalStorageState } from "@/lib/use-local-storage-state"
 import { useUrlFilters } from "@/lib/use-url-filters"
@@ -382,18 +383,7 @@ function PaymentsPageContent() {
   const methodBreakdownQuery = usePaymentMethodBreakdown(analyticsParams)
 
   function hrefFor(extra: Record<string, string>): string {
-    const params = new URLSearchParams()
-    // Mirrors whatever provider the KPI cards themselves are currently
-    // aggregating over (`analyticsParams.provider` above) -- "All
-    // providers" (no filter selected) must drill down to no `provider`
-    // param at all, not a stale hardcoded "cashfree" from when these
-    // cards were Cashfree-only. Never widens/narrows the provider beyond
-    // whatever context the cards are already showing.
-    if (filters.provider) params.set("provider", filters.provider)
-    if (filters.date_from) params.set("date_from", filters.date_from)
-    if (filters.date_to) params.set("date_to", filters.date_to)
-    for (const [key, value] of Object.entries(extra)) params.set(key, value)
-    return `/payments?${params.toString()}`
+    return buildPaymentDrilldownHref(filters, extra)
   }
 
   function handleSortChange(sortKey: string) {

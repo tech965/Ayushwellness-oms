@@ -89,6 +89,19 @@ api_router.include_router(
 api_router.include_router(
     shiprocket_webhooks.router, prefix="/webhooks/shiprocket", tags=["webhooks:shiprocket"]
 )
+# Same router, same handler, mounted a second time under a URL that
+# doesn't contain "shiprocket" -- confirmed live: Shiprocket's own
+# "Webhooks" dashboard page refuses the URL above with "Please refrain
+# from using keywords like shiprocket, kartrocket, sr, or kr in the
+# webhook url." The `/webhooks/shiprocket/...` path stays registered
+# (nothing depends on removing it, and any docs/tests referencing it
+# keep working) -- this is purely an additive alias to actually enter
+# into Shiprocket's dashboard.
+api_router.include_router(
+    shiprocket_webhooks.router,
+    prefix="/webhooks/shipment-updates",
+    tags=["webhooks:shiprocket"],
+)
 api_router.include_router(
     courier_webhooks.router, prefix="/webhooks/couriers", tags=["webhooks:couriers"]
 )

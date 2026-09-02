@@ -626,3 +626,51 @@ async def test_shiprocket_integration_not_configured_returns_404(
         _URL, json={"awb": "AWB-NONE", "current_status": "Delivered"}, headers=_headers()
     )
     assert response.status_code == 404
+
+
+# --- Keyword-safe URL alias -------------------------------------------------
+
+
+async def test_shipment_updates_alias_url_behaves_identically_to_the_shiprocket_path(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """Confirmed live: Shiprocket's own "Webhooks" dashboard page rejects a
+    URL containing "shiprocket" ("Please refrain from using keywords like
+    shiprocket, kartrocket, sr, or kr in the webhook url"), which the
+    original `/webhooks/shiprocket/tracking` path violates. `router.py`
+    mounts the exact same router a second time under
+    `/webhooks/shipment-updates` -- this is the path to actually enter into
+    Shiprocket's dashboard. Same handler, so this only needs to prove the
+    alias reaches it and behaves identically, not re-prove matching logic
+    already covered above.
+    """
+    _, shipment = await _make_shipment(
+        db_session,
+        order_number="#AWL-ALIAS-1",
+        shiprocket_shipment_id="1234",
+        awb="AWB-ALIAS-1",
+        current_status=ShipmentStatus.IN_TRANSIT,
+    )
+    await _make_shiprocket_integration(db_session)
+
+    response = await client.post(
+        "/api/v1/webhooks/shipment-updates/tracking",
+        json={"awb": "AWB-ALIAS-1", "current_status": "Delivered"},
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+
+    refreshed = await db_session.get(Shipment, shipment.id)
+    assert refreshed.current_status == ShipmentStatus.DELIVERED
+
+
+async def test_shipment_updates_alias_url_also_rejects_an_invalid_token(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    await _make_shiprocket_integration(db_session)
+    response = await client.post(
+        "/api/v1/webhooks/shipment-updates/tracking",
+        json={"awb": "AWB1", "current_status": "Delivered"},
+        headers=_headers("wrong-token"),
+    )
+    assert response.status_code == 401
