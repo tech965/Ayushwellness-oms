@@ -192,6 +192,91 @@ async def test_ndr_sync_fails_gracefully_when_no_matching_shipment(
     assert job.status == "partial"
     assert job.error_count == 1
 
+    from app.models.integration import SyncError
+
+    error = await db_session.scalar(select(SyncError).where(SyncError.sync_job_id == job.id))
+    assert error is not None
+    # Regression test: this must be classified as transient/retryable
+    # ("dependency_not_ready"), not the generic, permanently-non-retryable
+    # "validation_error" every other exception in this loop defaults to —
+    # the real production sequence is Shopify order -> shipment created ->
+    # shipment synced -> NDR generated -> NDR synced, and each step can
+    # land in a different sync cycle, so "no shipment yet" is not the
+    # same kind of failure as genuinely malformed data.
+    assert error.error_type == "dependency_not_ready"
+
+    from app.integrations.retry import is_retryable_error_type
+
+    assert is_retryable_error_type(error.error_type) is True
+
+
+async def test_ndr_missed_shipment_is_recovered_once_the_shipment_syncs_via_retry_processing(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end proof of the "safe deferred/reconciliation strategy
+    using existing architecture" requirement: an NDR that failed only
+    because its shipment hadn't synced yet must be automatically
+    recovered by the existing `app.tasks.retry_processing` scheduled
+    task, with no fabricated shipment/order and no new mechanism.
+    """
+    from app.tasks import retry_processing
+
+    class _db_session_cm:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+
+        async def __aenter__(self) -> AsyncSession:
+            return self._session
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+    monkeypatch.setattr(retry_processing, "AsyncSessionLocal", lambda: _db_session_cm(db_session))
+
+    order = await _make_bare_order(db_session, order_number="AWL91800")
+    ndr_client = _StubClient([_ndr_page(ids=["501"], total_pages=1)])
+    register_adapter(ShiprocketAdapter(client=ndr_client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    ndr_job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="ndr"
+    )
+    assert ndr_job.status == "partial"
+    assert ndr_job.error_count == 1
+
+    total_before = await db_session.execute(select(func.count()).select_from(NDR))
+    assert total_before.scalar_one() == 0
+
+    # The shipment the NDR references (`_ndr_page`'s "AWB501") arrives in
+    # a later sync cycle -- the real-world sequence this fix must tolerate.
+    shipment_client = _StubClient(
+        [
+            _shipments_page(
+                records=[{"id": 501, "channel_order_id": "AWL91800", "awb": "AWB501"}]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=shipment_client))
+    shipment_job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+    assert shipment_job.status == "completed"
+
+    # Now `retry_processing`'s scheduled task retries the earlier NDR
+    # failure -- exactly the existing, generic mechanism, never something
+    # NDR-specific.
+    retry_ndr_client = _StubClient([_ndr_page(ids=["501"], total_pages=1)])
+    register_adapter(ShiprocketAdapter(client=retry_ndr_client))
+
+    retried = await retry_processing._retry_failed_syncs()
+    assert retried == 1
+
+    total_after = await db_session.execute(select(func.count()).select_from(NDR))
+    assert total_after.scalar_one() == 1
+
+    ndr = await db_session.scalar(select(NDR))
+    assert ndr.order_id == order.id
+
 
 # --- Shipment sync (fixes the production incident: 102/102 real NDR
 # records failed with "No OMS shipment found" because nothing had ever
@@ -275,6 +360,46 @@ async def test_shipment_sync_is_idempotent_on_rerun(db_session: AsyncSession) ->
 
     total = await db_session.execute(select(func.count()).select_from(Shipment))
     assert total.scalar_one() == 1
+
+
+async def test_multiple_shipments_in_one_page_process_independently(
+    db_session: AsyncSession,
+) -> None:
+    """One unmatched shipment in a page must not stop the rest of that
+    same page from being correctly matched and persisted -- and the job's
+    counts must accurately reflect exactly which ones succeeded.
+    """
+    order = await _make_bare_order(db_session, order_number="AWL91700")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 1, "channel_order_id": "AWL91700", "awb": "AWB-MATCHED-1"},
+                    {"id": 2, "channel_order_id": "AWL-DOES-NOT-EXIST", "awb": "AWB-ORPHAN"},
+                    {"id": 3, "channel_order_id": "AWL91700", "awb": "AWB-MATCHED-2"},
+                ]
+            )
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.records_received == 3
+    assert job.records_created == 2
+    assert job.records_failed == 1
+    assert job.error_count == 1
+
+    from app.models.shipment import Shipment
+
+    matched = (
+        await db_session.execute(select(Shipment).where(Shipment.order_id == order.id))
+    ).scalars().all()
+    assert {s.awb for s in matched} == {"AWB-MATCHED-1", "AWB-MATCHED-2"}
 
 
 async def test_shipment_sync_records_a_sync_error_for_an_unmatched_order_without_fabricating(
@@ -1037,34 +1162,35 @@ async def test_shipment_sync_via_orders_show_fallback_is_idempotent_on_rerun(
     assert shipment.awb == "AWB-NEW"
 
 
-# --- Round 15: the /orders/show fallback is a real, confirmed live fix,
-# but at real account scale (thousands of historical shipments) it meant
-# every 10-minute scheduled sync re-attempted the same already-provably-
-# unmatchable historical records forever -- real production evidence:
-# hitting Shiprocket's rate limit (HTTP 429) mid-sync. A shipment whose
-# `shiprocket_created_at` predates this OMS's earliest-ever synced order
-# can never resolve (its order predates this OMS's Shopify sync coverage
-# entirely -- confirmed live), so the live call is skipped for it. This
-# is purely a performance boundary: `None` on either side always means
-# "don't skip", so it can only narrow which records get the extra live
-# call, never cause a resolvable one to be silently skipped. ------------
+# --- Round 15/17: the /orders/show fallback is a real, confirmed live
+# fix, but at real account scale (thousands of historical shipments) it
+# meant every 10-minute scheduled sync re-attempted the same already-
+# provably-unmatchable historical records forever -- real production
+# evidence: hitting Shiprocket's rate limit (HTTP 429) mid-sync. Round 15
+# tried to bound this by skipping the live call outright for a shipment
+# whose `shiprocket_created_at` predates the OMS's earliest-ever synced
+# order -- but a real production account with thin/still-catching-up
+# order-sync coverage (as few as 11 Shopify orders synced) showed this
+# was an unsafe matching decision in disguise: plenty of shipments older
+# than that thin "earliest order" boundary belonged to real, resolvable
+# orders. Round 17 removed the skip -- a timestamp difference alone must
+# never discard a shipment a strong identifier could still resolve. The
+# Round 16 "already confirmed unmatched" cache (tested above) is what
+# actually bounds repeated live calls now: it only ever skips a call that
+# has already run once and genuinely found nothing, never one that was
+# merely old-looking. ---------------------------------------------------
 
 
-async def test_shipment_sync_skips_orders_show_for_a_shipment_older_than_the_oms_order_history(
+async def test_old_shipment_still_attempts_orders_show_and_matches_via_strong_identifier(
     db_session: AsyncSession,
 ) -> None:
-    """A shipment created well before the OMS's earliest synced order
-    never triggers the live /orders/show call -- the stub client has
-    only the /shipments page queued, so an attempted call would raise
-    IndexError and fail this test. Also asserts the recorded SyncError is
-    a genuine "no match" message, not a crash the per-record try/except
-    happened to catch and misreport as an ordinary failure (a real bug
-    found while writing this test: comparing Shiprocket's naive parsed
-    datetime against the OMS's tz-aware `order_datetime` raised
-    TypeError, which looked identical to a real "no match" from the
-    outside -- same job status, same error_count).
+    """Regression test for the Round 17 fix: a shipment created well
+    before the OMS's earliest synced order must NOT be discarded on that
+    timestamp difference alone -- the live /orders/show call still runs,
+    and when it resolves a real `channel_order_id`, the shipment is
+    correctly matched, exactly as if it weren't "old" at all.
     """
-    await _make_bare_order(
+    order = await _make_bare_order(
         db_session, order_number="#AWL78183"
     )  # sets the OMS's earliest order_datetime to "now" (test creation time)
     client = _StubClient(
@@ -1076,11 +1202,60 @@ async def test_shipment_sync_skips_orders_show_for_a_shipment_older_than_the_oms
                         "channel_order_id": None,
                         "order_id": 12345,
                         "awb": "",
-                        # Long before "now" -- must predate the order above.
+                        # Long before "now" -- predates the order above,
+                        # yet must still resolve via the live lookup below.
                         "created_at": "2020-01-01 00:00:00",
                     }
                 ]
-            )
+            ),
+            _orders_show_response("#AWL78183"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert job.error_count == 0
+    assert job.records_created == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_source_external_id(
+        source_system="shiprocket", external_id="1"
+    )
+    assert shipment is not None
+    assert shipment.order_id == order.id
+
+
+async def test_old_shipment_with_no_real_match_still_fails_cleanly_not_via_typeerror(
+    db_session: AsyncSession,
+) -> None:
+    """The tz-aware/naive datetime comparison behind `predates_oms_coverage`
+    is now purely diagnostic (never gates the live lookup), but it still
+    runs on every old shipment -- it must never itself crash and get
+    misreported as an ordinary "no match" (a real bug found while first
+    writing this coverage: comparing Shiprocket's naive parsed datetime
+    against the OMS's tz-aware `order_datetime` raised a bare TypeError
+    that looked identical to a genuine no-match from the outside -- same
+    job status, same error_count).
+    """
+    await _make_bare_order(db_session, order_number="#AWL78183")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1,
+                        "channel_order_id": None,
+                        "order_id": 12345,
+                        "awb": "",
+                        "created_at": "2020-01-01 00:00:00",
+                    }
+                ]
+            ),
+            _orders_show_response("AWL-STILL-DOES-NOT-EXIST"),
         ]
     )
     register_adapter(ShiprocketAdapter(client=client))
@@ -1493,6 +1668,87 @@ async def test_shipment_sync_stops_early_and_saves_a_resumable_cursor_past_the_t
 
     await db_session.refresh(integration)
     assert integration.configuration["sync_cursors"]["shipments"] == "2"
+
+
+async def test_stale_persisted_cursor_is_reset_instead_of_permanently_failing_the_sync(
+    db_session: AsyncSession,
+) -> None:
+    """Real production incident: a shipments Full Sync failed immediately
+    with records_received=0/error_count=1/status=failed even though
+    `GET /shipments?page=1` worked fine when tested manually -- the job
+    was silently resuming from a page number left over by an earlier
+    interrupted crawl, and Shiprocket rejected that specific page with a
+    validation error (422). The very first fetch of a run must recover
+    from exactly this by clearing the stale cursor and retrying once from
+    page 1, rather than failing the whole job on a self-inflicted, fully
+    recoverable page number.
+    """
+    from app.integrations.shiprocket.errors import ShiprocketApiError
+
+    client = _StubClient(
+        [
+            ShiprocketApiError(
+                "Shiprocket rejected the request payload (validation error).",
+                error_type="validation_error",
+                status_code=422,
+            ),
+            _shipments_page(records=[]),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+    await IntegrationRepository(db_session).update(
+        integration, configuration={"sync_cursors": {"shipments": "9999"}}
+    )
+    await db_session.commit()
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert job.error_count == 0
+
+    assert len(client.calls) == 2
+    first_call, second_call = client.calls
+    assert first_call[2]["page"] == 9999
+    assert second_call[2]["page"] == 1
+
+    await db_session.refresh(integration)
+    assert integration.configuration["sync_cursors"].get("shipments") is None
+
+
+async def test_a_genuine_validation_error_on_a_later_page_still_fails_the_job(
+    db_session: AsyncSession,
+) -> None:
+    """The stale-cursor recovery must be narrowly scoped to the first
+    fetch of a run that was actually resuming from a cursor -- a
+    validation error on a *later* page (not a resume situation) is a
+    real, currently-reachable failure and must still fail the job, per
+    this method's own documented contract ("a failure fetching a page
+    itself... fails the whole job — there's no partial data to salvage").
+    """
+    from app.integrations.shiprocket.errors import ShiprocketApiError
+
+    client = _StubClient(
+        [
+            _shipments_page(records=[{"id": 1, "awb": ""}], total_pages=2),
+            ShiprocketApiError(
+                "Shiprocket rejected the request payload (validation error).",
+                error_type="validation_error",
+                status_code=422,
+            ),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "failed"
+    assert len(client.calls) == 2
 
 
 # --- Incremental mode: once a backlog crawl has completed a full pass

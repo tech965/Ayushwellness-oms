@@ -5,12 +5,15 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
+from app.core.logging import get_logger
 from app.models.auth import User
 from app.models.ndr import NDR
 from app.repositories.ndr import NDRRepository
 from app.repositories.shipment import ShipmentRepository
 from app.schemas.common import PageParams, SortParams
 from app.services.audit_service import AuditService
+
+logger = get_logger(__name__)
 
 
 class NDRService:
@@ -69,16 +72,41 @@ class NDRService:
         both are always reported against an AWB, so the owning `Shipment`
         (and its `order_id`/`courier_id`) is resolved by AWB rather than
         invented (spec §16: "Do not invent NDR data").
+
+        A shipment not yet found by AWB is not necessarily wrong data —
+        the real Shiprocket sequence is Shopify order -> shipment created
+        -> shipment synced -> NDR generated -> NDR synced, and each step
+        can land in a different sync cycle (see `entity_sync._upsert_shipment`'s
+        docstring for the shipment side of this same tolerance). Marking
+        this specific `NotFoundError` with `error_type="dependency_not_ready"`
+        (rather than the default, permanently-non-retryable `"not_found"`)
+        is what makes `app.services.sync_service.SyncService._run_entity_sync`
+        classify it as transient, so `app.tasks.retry_processing`'s scheduled
+        retry naturally re-attempts this exact NDR later via the existing
+        retry/backoff infrastructure — once the shipment has likely synced
+        — instead of it being silently, permanently stranded. Never
+        fabricates a `Shipment`/`Order` to work around a genuine gap.
         """
         source_system = data.pop("source_system")
         external_id = data.pop("external_id")
         awb = data.pop("awb", None)
-        data.pop("shiprocket_order_id", None)
+        shiprocket_order_id = data.pop("shiprocket_order_id", None)
         data.pop("courier_name", None)
 
         shipment = await self.shipments.get_by_awb(awb) if awb else None
         if shipment is None:
-            raise NotFoundError(f"No OMS shipment found for Shiprocket NDR (awb={awb!r}).")
+            logger.warning(
+                "shiprocket_ndr_shipment_resolution",
+                shiprocket_ndr_id=external_id,
+                awb=awb,
+                shiprocket_order_id=shiprocket_order_id,
+                matched=False,
+                reason="no_oms_shipment_for_awb",
+            )
+            raise NotFoundError(
+                f"No OMS shipment found for Shiprocket NDR (awb={awb!r}).",
+                details={"error_type": "dependency_not_ready"},
+            )
 
         clean = {k: v for k, v in data.items() if v is not None}
         ndr, created = await self.ndrs.upsert_by_external_id(

@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, IntegrationError, NotFoundError
+from app.core.exceptions import ConflictError, IntegrationError, NotFoundError, OMSError
 from app.core.logging import get_logger
 from app.integrations.base import IntegrationAdapter
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS, UpsertHandler
@@ -504,14 +504,60 @@ class SyncService:
         )
         cursor: str | None = None if incremental_mode else resume_cursor
         deadline = datetime.now(UTC) + _MAX_ENTITY_SYNC_DURATION
+        is_first_page = True
         while True:
-            if incremental_mode:
-                assert since is not None  # narrowed by `incremental_mode` above
-                page = await adapter.fetch_incremental(
-                    entity_type, since=since, cursor=cursor, limit=50
-                )
-            else:
-                page = await adapter.fetch(entity_type, cursor=cursor, limit=50)
+            try:
+                if incremental_mode:
+                    assert since is not None  # narrowed by `incremental_mode` above
+                    page = await adapter.fetch_incremental(
+                        entity_type, since=since, cursor=cursor, limit=50
+                    )
+                else:
+                    page = await adapter.fetch(entity_type, cursor=cursor, limit=50)
+            except IntegrationError as exc:
+                # A resumed backlog crawl's persisted page number can go
+                # stale (the account's total record count shrank since it
+                # was recorded, or a prior crawl was interrupted far enough
+                # in that the page no longer exists) -- the provider then
+                # rejects that specific page with a validation error, which
+                # would otherwise permanently strand every future sync for
+                # this entity behind a page number nothing can ever fetch
+                # again. Real production incident: a Shiprocket shipments
+                # Full Sync failed immediately with records_received=0,
+                # error_count=1, even though GET /shipments?page=1 worked
+                # fine manually -- the job was silently resuming from a
+                # stale page left over by an earlier interrupted crawl.
+                # Only the very first fetch of this run is eligible (a
+                # later page rejection is a genuine, currently-reachable
+                # failure -- see this method's own docstring on why a
+                # page-fetch failure otherwise correctly fails the whole
+                # job), and only when a resume point was actually in play;
+                # never triggers for a normal page-1 start.
+                if (
+                    is_first_page
+                    and cursor is not None
+                    and exc.details.get("error_type") == "validation_error"
+                ):
+                    logger.warning(
+                        "sync_stale_resume_cursor_reset",
+                        entity_type=entity_type,
+                        stale_cursor=cursor,
+                        error_message=exc.message,
+                    )
+                    await self._persist_sync_cursor(
+                        integration_id=integration_id, entity_type=entity_type, cursor=None
+                    )
+                    cursor = None
+                    if incremental_mode:
+                        assert since is not None  # narrowed by `incremental_mode` above
+                        page = await adapter.fetch_incremental(
+                            entity_type, since=since, cursor=None, limit=50
+                        )
+                    else:
+                        page = await adapter.fetch(entity_type, cursor=None, limit=50)
+                else:
+                    raise
+            is_first_page = False
 
             created_count = 0
             updated_count = 0
@@ -532,13 +578,12 @@ class SyncService:
                     # (auth/permission/network/timeout on a fallback live
                     # call, e.g. Shiprocket's `/orders/show`) — kept
                     # distinct from a genuine "checked, no match"
-                    # `NotFoundError` (which falls through to the generic
-                    # branch below as "validation_error") so a caller
-                    # (e.g. `entity_sync._upsert_shipment`'s "already
-                    # confirmed, don't recheck" cache) can tell "we
-                    # couldn't check" apart from "we checked and there's
-                    # nothing there" — the former must always be retried,
-                    # the latter safely never needs to be re-attempted.
+                    # `NotFoundError` (handled below) so a caller (e.g.
+                    # `entity_sync._upsert_shipment`'s "already confirmed,
+                    # don't recheck" cache) can tell "we couldn't check"
+                    # apart from "we checked and there's nothing there" —
+                    # the former must always be retried, the latter safely
+                    # never needs to be re-attempted.
                     await self.session.rollback()
                     failed_count += 1
                     await self.record_error(
@@ -546,6 +591,32 @@ class SyncService:
                         entity_type=entity_type,
                         external_id=str(external_id) if external_id else None,
                         error_type=exc.details.get("error_type", "integration_error"),
+                        error_message=exc.message,
+                    )
+                except OMSError as exc:
+                    # A domain-level rejection (most commonly `NotFoundError`
+                    # for an unresolved shipment/order dependency — e.g.
+                    # `NDRService.upsert_synced_ndr` when the owning
+                    # `Shipment` hasn't synced yet, per the real sequence
+                    # documented on `entity_sync._upsert_shipment`: a
+                    # Shiprocket shipment can be pulled in well after its
+                    # NDR is generated). `exc.details["error_type"]` lets
+                    # the raiser mark a specific case as transient/
+                    # retryable (e.g. "dependency_not_ready", picked up by
+                    # `app.tasks.retry_processing`'s scheduled retry once
+                    # the dependency likely exists) instead of every
+                    # `NotFoundError` being flattened into the same
+                    # permanently-non-retryable bucket regardless of cause.
+                    # Falls back to the exception's own `error_code`
+                    # (`"not_found"`, `"validation_error"`, ...) when the
+                    # raiser didn't set one explicitly.
+                    await self.session.rollback()
+                    failed_count += 1
+                    await self.record_error(
+                        job_id,
+                        entity_type=entity_type,
+                        external_id=str(external_id) if external_id else None,
+                        error_type=exc.details.get("error_type", exc.error_code),
                         error_message=exc.message,
                     )
                 except Exception as exc:  # noqa: BLE001 - one bad record must not kill the job
