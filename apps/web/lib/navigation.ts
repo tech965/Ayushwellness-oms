@@ -11,6 +11,7 @@ import {
   History,
   LayoutDashboard,
   ListChecks,
+  Map,
   Package,
   PackageX,
   Phone,
@@ -69,7 +70,10 @@ export const navGroups: NavGroup[] = [
   },
   {
     label: "Intelligence",
-    items: [{ label: "Analytics", href: "/analytics", icon: BarChart3 }],
+    items: [
+      { label: "Analytics", href: "/analytics", icon: BarChart3 },
+      { label: "🇮🇳 Supply Intelligence", href: "/supply-intelligence", icon: Map },
+    ],
   },
   {
     label: "Operations",
