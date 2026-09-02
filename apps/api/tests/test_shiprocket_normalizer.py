@@ -12,6 +12,7 @@ from app.integrations.shiprocket.normalizer import (
     SHIPMENT_NORMALIZER,
     TRACKING_NORMALIZER,
     ShiprocketOrderPushNormalizer,
+    extract_webhook_shipment_identifiers,
     normalize_payment_method,
     normalize_shipment_status,
 )
@@ -42,6 +43,60 @@ def test_unknown_shipment_status_returns_none_instead_of_guessing() -> None:
     # spec §14: unknown statuses must be handled safely, never crash and
     # never silently invent a mapping.
     assert normalize_shipment_status("SOME BRAND NEW STATUS SHIPROCKET ADDS LATER") is None
+
+
+# --- Webhook identifier extraction: real production payload shape ------
+# Confirmed live against 20+ real `shipment.tracking_update` deliveries.
+# `order_id` is the channel/merchant order number; `sr_order_id` is
+# Shiprocket's own internal numeric order id. See the module's own
+# comment above `extract_webhook_shipment_identifiers` for the full
+# investigation this fixed.
+
+
+def test_real_payload_shape_maps_order_id_to_channel_order_id_not_shiprocket_order_id() -> None:
+    ids = extract_webhook_shipment_identifiers(
+        {"awb": "SF3897621360KR", "order_id": "AWL91738", "sr_order_id": 1542454019}
+    )
+    assert ids["channel_order_id"] == "AWL91738"
+    assert ids["shiprocket_order_id"] == "1542454019"
+    assert ids["awb"] == "SF3897621360KR"
+
+
+def test_sr_order_id_alone_is_never_mistaken_for_a_channel_order_id() -> None:
+    ids = extract_webhook_shipment_identifiers({"awb": "AWB1", "sr_order_id": 1542454019})
+    assert ids["shiprocket_order_id"] == "1542454019"
+    assert ids["channel_order_id"] is None
+
+
+def test_explicit_channel_order_id_key_still_takes_priority_over_order_id() -> None:
+    """If a future/different webhook variant ever sends an explicit
+    `channel_order_id`, it must win over the `order_id` fallback rather
+    than being silently overridden.
+    """
+    ids = extract_webhook_shipment_identifiers(
+        {"channel_order_id": "EXPLICIT-1", "order_id": "SHOULD-NOT-WIN"}
+    )
+    assert ids["channel_order_id"] == "EXPLICIT-1"
+
+
+def test_identifier_whitespace_is_stripped_before_comparison() -> None:
+    ids = extract_webhook_shipment_identifiers(
+        {"awb": "  AWB-PADDED-1  ", "order_id": " AWL1 ", "sr_order_id": " 123 "}
+    )
+    assert ids["awb"] == "AWB-PADDED-1"
+    assert ids["channel_order_id"] == "AWL1"
+    assert ids["shiprocket_order_id"] == "123"
+
+
+def test_missing_identifiers_return_none_without_guessing() -> None:
+    ids = extract_webhook_shipment_identifiers({})
+    assert ids == {
+        "awb": None,
+        "shiprocket_shipment_id": None,
+        "shiprocket_order_id": None,
+        "channel_order_id": None,
+        "courier_name": None,
+    }
     assert normalize_shipment_status(None) is None
 
 

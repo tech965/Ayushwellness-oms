@@ -295,6 +295,127 @@ async def test_webhook_matches_by_channel_order_id_and_creates_shipment_when_non
     assert shipment.shiprocket_shipment_id == "3003"
 
 
+# --- Real production payload shape (captured from live Shiprocket
+# webhook deliveries): `order_id` is the channel order number, not
+# Shiprocket's internal id -- `sr_order_id` is. No `channel_order_id`
+# key is ever actually present. -----------------------------------------
+
+
+async def test_real_shape_order_id_resolves_as_channel_order_and_creates_shipment(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """Reproduces the exact production scenario that was silently
+    dropping every real webhook: Order exists, no Shipment exists yet
+    (Shiprocket's native Shopify channel created it before OMS pull-sync
+    caught up), and the payload has `order_id` + `awb` + `sr_order_id`
+    but no `channel_order_id` key at all.
+    """
+    order = await _make_order(db_session, order_number="#AWL91738")
+    await _make_shiprocket_integration(db_session)
+
+    response = await client.post(
+        _URL,
+        json={
+            "awb": "SF3897621360KR",
+            "order_id": "AWL91738",
+            "sr_order_id": 1542454019,
+            "courier_name": "Shree Maruti",
+            "current_status": "In Transit",
+        },
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+
+    shipment = await ShipmentRepository(db_session).get_by_awb("SF3897621360KR")
+    assert shipment is not None
+    assert shipment.order_id == order.id
+    assert shipment.current_status == ShipmentStatus.IN_TRANSIT
+
+    event_row = await db_session.scalar(select(WebhookEvent))
+    assert event_row.status == "processed"
+
+
+async def test_real_shape_updates_existing_shipment_matched_by_awb(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    _, shipment = await _make_shipment(
+        db_session,
+        order_number="#AWL90497",
+        shiprocket_shipment_id="1529493721",
+        awb="77924691596",
+        current_status=ShipmentStatus.IN_TRANSIT,
+    )
+    await _make_shiprocket_integration(db_session)
+
+    response = await client.post(
+        _URL,
+        json={
+            "awb": "77924691596",
+            "order_id": "AWL90497",
+            "sr_order_id": 1529493721,
+            "current_status": "Delivered",
+        },
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+
+    refreshed = await db_session.get(Shipment, shipment.id)
+    assert refreshed.current_status == ShipmentStatus.DELIVERED
+
+    total_shipments = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total_shipments.scalar_one() == 1
+
+
+async def test_real_shape_unknown_order_remains_ignored_without_fabricating_shipment(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    await _make_shiprocket_integration(db_session)
+
+    response = await client.post(
+        _URL,
+        json={
+            "awb": "UNKNOWN-AWB-1",
+            "order_id": "NO-SUCH-ORDER",
+            "sr_order_id": 999999999,
+            "current_status": "In Transit",
+        },
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+
+    total_shipments = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total_shipments.scalar_one() == 0
+
+    event = await db_session.scalar(select(WebhookEvent))
+    assert event.status == "ignored"
+    assert "no_matching_shipment" in event.error_message
+
+
+async def test_real_shape_duplicate_delivery_creates_shipment_only_once(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    await _make_order(db_session, order_number="#AWL91738")
+    await _make_shiprocket_integration(db_session)
+    body = {
+        "awb": "SF3897621360KR",
+        "order_id": "AWL91738",
+        "sr_order_id": 1542454019,
+        "current_status": "In Transit",
+    }
+
+    first = await client.post(_URL, json=body, headers=_headers())
+    second = await client.post(_URL, json=body, headers=_headers())
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    total_shipments = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total_shipments.scalar_one() == 1
+
+    total_events = await db_session.execute(select(func.count()).select_from(WebhookEvent))
+    assert total_events.scalar_one() == 1
+
+
 # --- Shiprocket order id matching (live orders/show fallback, reused
 # from the pull-sync path) --------------------------------------------
 
@@ -323,7 +444,10 @@ async def test_webhook_matches_by_shiprocket_order_id_via_orders_show_fallback(
         json={
             "awb": "AWB-ORDERID-1",
             "shipment_id": "9999",
-            "order_id": "9009",
+            # Confirmed live: `sr_order_id` (not `order_id`) is Shiprocket's
+            # own internal numeric order id -- the only field valid for the
+            # live orders/show lookup this test exercises.
+            "sr_order_id": "9009",
             "current_status": "Delivered",
         },
         headers=_headers(),

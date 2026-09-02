@@ -133,16 +133,32 @@ TRACKING_NORMALIZER = ShiprocketTrackingNormalizer()
 
 # --- Tracking webhook (push, inbound) ----------------------------------
 
-# UNVERIFIED — no live Shiprocket webhook delivery has been captured
-# (see docs/integrations/shiprocket.md's Webhooks section for what was
-# and wasn't confirmed). These are the field names third-party
-# integration guides most consistently describe for Shiprocket's
-# "Shipment Webhook" (Settings > API > Webhook) payload; every key is
-# read defensively with a fallback chain, exactly like the rest of this
-# module, so a wrong guess degrades to "field not found" (None) rather
-# than a crash or a fabricated value. Re-confirm this list against a
-# real delivery (see the endpoint's logging) before treating any single
-# alias as authoritative.
+# CONFIRMED against real production webhook deliveries (20+ real
+# `shipment.tracking_update` events, cross-checked field-by-field
+# against the OMS database). Real shape: `awb` (string); `order_id` is
+# the CHANNEL/merchant order number OMS itself supplied when the
+# Shiprocket order was created (e.g. "AWL91738" — matches
+# `Order.order_number` once re-prefixed with "#"; see
+# `ShiprocketOrderPushNormalizer.build_payload`, whose `order_id` field
+# is exactly `str(order.order_number)`); `sr_order_id` is Shiprocket's
+# own internal numeric order id (e.g. 1542454019 — orders of magnitude
+# larger than any channel order number, and only usable for the live
+# `GET /orders/show/{id}` fallback in
+# `ShiprocketWebhookService._resolve_order_via_orders_show`).
+#
+# A previous version of this function read `order_id` as a
+# `shiprocket_order_id` candidate (ahead of `sr_order_id`, which is the
+# only field actually valid for that live lookup) and never considered
+# `order_id` for `channel_order_id` at all — so every real webhook's
+# channel order number was discarded, and the live Shiprocket API was
+# called with an id it doesn't recognize. Every one of the 20+ sampled
+# production events matched instantly, with zero network calls, once
+# `order_id` was read as `channel_order_id` instead.
+#
+# `shipment_id`/`sr_shipment_id` were not present in any sampled event
+# (Shiprocket's tracking webhook doesn't appear to include its own
+# shipment id) — kept as harmless fallbacks in case a different webhook
+# variant sends one.
 def _first_present(payload: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = payload.get(key)
@@ -151,27 +167,39 @@ def _first_present(payload: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _normalize_identifier(value: Any) -> str | None:
+    """Trims incidental whitespace before an identifier is ever compared
+    against the DB. Sampled production values were already clean, but
+    nothing guarantees a re-delivery or a different payload variant
+    won't pad one, and every comparison downstream (`Shipment.awb`,
+    `Order.order_number`, ...) is an exact-match lookup.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def extract_webhook_shipment_identifiers(payload: dict[str, Any]) -> dict[str, str | None]:
     """AWB / Shiprocket shipment id / Shiprocket order id / channel
-    (Shopify) order number — the four identifiers
-    `ShiprocketWebhookService` tries, in that preferred order, to find
-    the OMS `Shipment` a webhook delivery refers to. Never reads
-    anything that isn't one of those four (spec: never guess from
-    name/phone/address).
+    order number — the four identifiers `ShiprocketWebhookService`
+    tries, in that preferred order, to find the OMS `Shipment` a webhook
+    delivery refers to. Never reads anything that isn't one of those
+    four (spec: never guess from name/phone/address).
     """
     awb = _first_present(payload, "awb", "awb_code")
     shipment_id = _first_present(payload, "shipment_id", "sr_shipment_id")
-    order_id = _first_present(payload, "order_id", "sr_order_id")
+    shiprocket_order_id = _first_present(payload, "sr_order_id")
     channel_order_id = _first_present(
-        payload, "channel_order_id", "channel_order_number", "reference_number"
+        payload, "channel_order_id", "channel_order_number", "reference_number", "order_id"
     )
     courier_name = _first_present(payload, "courier_name", "courier")
     return {
-        "awb": str(awb) if awb is not None else None,
-        "shiprocket_shipment_id": (str(shipment_id) if shipment_id is not None else None),
-        "shiprocket_order_id": (str(order_id) if order_id is not None else None),
-        "channel_order_id": (str(channel_order_id) if channel_order_id is not None else None),
-        "courier_name": str(courier_name) if courier_name is not None else None,
+        "awb": _normalize_identifier(awb),
+        "shiprocket_shipment_id": _normalize_identifier(shipment_id),
+        "shiprocket_order_id": _normalize_identifier(shiprocket_order_id),
+        "channel_order_id": _normalize_identifier(channel_order_id),
+        "courier_name": _normalize_identifier(courier_name),
     }
 
 
