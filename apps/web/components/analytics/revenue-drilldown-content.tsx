@@ -55,6 +55,16 @@ export function RevenueDrilldownContent({
     return `/orders?${params.toString()}`
   }
 
+  // COD's "Pending" step drills into a Fulfilled/Unfulfilled breakdown
+  // first (spec: Pending COD -> Fulfilled/Unfulfilled -> orders) rather
+  // than straight to Orders -- Prepaid's Pending keeps the original
+  // straight-to-Orders behavior unchanged, since that flow was never
+  // part of this request.
+  const pendingHref =
+    paymentType === "cod"
+      ? `/revenue/cod/pending?${orderQueryString}`
+      : ordersHref({ payment_status: "pending" })
+
   const breakdownQuery = usePaymentStatusBreakdown({ ...dateParams, payment_type: paymentType })
   const timeseriesQuery = usePaymentStatusTimeseries({
     ...dateParams,
@@ -116,7 +126,7 @@ export function RevenueDrilldownContent({
               value={formatMoney(pending)}
               subtext={pct(pending, total)}
               accent="orange"
-              href={ordersHref({ payment_status: "pending" })}
+              href={pendingHref}
             />
           </section>
 
@@ -138,7 +148,7 @@ export function RevenueDrilldownContent({
                   label: "Pending",
                   value: pending,
                   color: "var(--muted-foreground)",
-                  href: ordersHref({ payment_status: "pending" }),
+                  href: pendingHref,
                 },
               ]}
             />

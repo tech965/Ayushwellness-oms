@@ -10,31 +10,113 @@ is supplied -- the LIVE `GET /orders/show/{id}` response Shiprocket
 itself returns, via the exact same `ShiprocketAdapter.get_order` call
 `_upsert_shipment` makes. Everything here is read-only.
 
+`--full-dump` additionally walks the ENTIRE live response (not just
+`channel_order_id`) and prints every non-PII key/value pair (PII keys --
+matched via the same `_is_pii_key` denylist `adapter.py`'s own diagnostic
+logging already uses -- print as `<redacted>`, never their value), plus
+an explicit search for one or more `--find` values (e.g. the OMS order's
+`external_id`, or the digits from its `order_number`) appearing ANYWHERE
+in the response, under any field name, at any nesting depth -- added
+specifically to answer "does Shiprocket's response contain the real
+Shopify order id under some other field name" without guessing.
+
 Run in a Render Shell (API or worker service -- both have DB + Shiprocket
 credentials):
     python scripts/diagnose_shiprocket_matching.py "#AWL93382"
     python scripts/diagnose_shiprocket_matching.py "#AWL93382" --shiprocket-order-id 123456789
+    python scripts/diagnose_shiprocket_matching.py "#AWL91738" --shiprocket-order-id 1089477745 \\
+        --full-dump --find 6766710554813 --find 91738
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.exceptions import IntegrationError  # noqa: E402
 from app.db.session import AsyncSessionLocal, run_with_cleanup  # noqa: E402
-from app.integrations.shiprocket.adapter import ShiprocketAdapter  # noqa: E402
+from app.integrations.shiprocket.adapter import ShiprocketAdapter, _is_pii_key  # noqa: E402
 from app.models.integration import SyncError  # noqa: E402
 from app.repositories.order import OrderRepository  # noqa: E402
 from app.repositories.shipment import ShipmentRepository  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
+# Only the first this many items of any list (e.g. `shipments`,
+# `package_list`) are dumped -- one real record is enough to see the
+# shape; a large `product_details`-style array shouldn't flood the shell.
+_MAX_LIST_ITEMS_SHOWN = 3
+_MAX_DUMP_DEPTH = 4
 
-async def _run(*, order_number: str, shiprocket_order_id: str | None) -> None:
+
+def _dump_scalar(
+    key: str, value: Any, *, indent: str, targets: list[str], found: list[str]
+) -> None:
+    marker = ""
+    text = str(value)
+    for target in targets:
+        if target and target in text:
+            marker = f"   <-- MATCHES --find {target!r}"
+            found.append(f"{key} = {value!r} (matched {target!r})")
+    print(f"{indent}{key} = {value!r}{marker}")
+
+
+def _dump_value(
+    key: str, value: Any, *, indent: str, targets: list[str], found: list[str], depth: int
+) -> None:
+    if _is_pii_key(key):
+        print(f"{indent}{key} = <redacted, PII key>")
+        return
+
+    if isinstance(value, dict):
+        if depth >= _MAX_DUMP_DEPTH:
+            print(f"{indent}{key}: {{...}}  # max depth reached")
+            return
+        print(f"{indent}{key}: {{")
+        _dump_object(value, indent=indent + "  ", targets=targets, found=found, depth=depth + 1)
+        print(f"{indent}}}")
+        return
+
+    if isinstance(value, list):
+        print(f"{indent}{key}: [  # {len(value)} item(s), showing up to {_MAX_LIST_ITEMS_SHOWN}")
+        for item in value[:_MAX_LIST_ITEMS_SHOWN]:
+            if isinstance(item, dict) and depth < _MAX_DUMP_DEPTH:
+                print(f"{indent}  {{")
+                _dump_object(
+                    item, indent=indent + "    ", targets=targets, found=found, depth=depth + 1
+                )
+                print(f"{indent}  }}")
+            elif isinstance(item, dict):
+                print(f"{indent}  {{...}}  # max depth reached")
+            else:
+                _dump_scalar(f"{key}[]", item, indent=indent + "  ", targets=targets, found=found)
+        print(f"{indent}]")
+        return
+
+    _dump_scalar(key, value, indent=indent, targets=targets, found=found)
+
+
+def _dump_object(
+    obj: dict[str, Any], *, indent: str, targets: list[str], found: list[str], depth: int = 0
+) -> None:
+    for key, value in obj.items():
+        _dump_value(key, value, indent=indent, targets=targets, found=found, depth=depth)
+
+
+async def _run(
+    *,
+    order_number: str,
+    shiprocket_order_id: str | None,
+    full_dump: bool,
+    find: list[str],
+) -> None:
+    targets = list(find)
+
     async with AsyncSessionLocal() as session:
         orders = OrderRepository(session)
         candidates = [order_number]
@@ -58,6 +140,18 @@ async def _run(*, order_number: str, shiprocket_order_id: str | None) -> None:
                 "matching-logic bug."
             )
             return
+
+        # Auto-search for the two obvious real identifiers even if `--find`
+        # wasn't passed: the Shopify order's own internal id (what this OMS
+        # already stores as `external_id`), and the plain digits from the
+        # order number (in case some other field holds those digits without
+        # the "#AWL" formatting).
+        if order.external_id and order.external_id not in targets:
+            targets.append(order.external_id)
+        digits_match = re.search(r"\d+", order.order_number or "")
+        digits_only = digits_match.group() if digits_match else ""
+        if digits_only and digits_only not in targets:
+            targets.append(digits_only)
 
         print(f"id={order.id}")
         print(f"order_number={order.order_number!r}  (this is what matching compares against)")
@@ -120,6 +214,17 @@ async def _run(*, order_number: str, shiprocket_order_id: str | None) -> None:
         if isinstance(body, dict):
             print(f"full response keys: {sorted(body.keys())}")
 
+        if full_dump and isinstance(body, dict):
+            print(f"\n--- Full non-PII field dump (searching for {targets!r}) ---")
+            found: list[str] = []
+            _dump_object(body, indent="  ", targets=targets, found=found)
+            print("\n--- Search results ---")
+            if found:
+                for line in found:
+                    print(f"  FOUND: {line}")
+            else:
+                print(f"  None of {targets!r} appear anywhere in this response.")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -132,10 +237,30 @@ def main() -> None:
             "`order_id` field) -- if given, also runs the live /orders/show check."
         ),
     )
+    parser.add_argument(
+        "--full-dump",
+        action="store_true",
+        help=(
+            "Also print every non-PII field in the live /orders/show response "
+            "(requires --shiprocket-order-id) and search it for the OMS order's "
+            "own external_id / order_number digits, plus any --find values."
+        ),
+    )
+    parser.add_argument(
+        "--find",
+        action="append",
+        default=[],
+        help="Additional value to search for anywhere in the response (repeatable).",
+    )
     args = parser.parse_args()
     asyncio.run(
         run_with_cleanup(
-            _run(order_number=args.order_number, shiprocket_order_id=args.shiprocket_order_id)
+            _run(
+                order_number=args.order_number,
+                shiprocket_order_id=args.shiprocket_order_id,
+                full_dump=args.full_dump,
+                find=args.find,
+            )
         )
     )
 

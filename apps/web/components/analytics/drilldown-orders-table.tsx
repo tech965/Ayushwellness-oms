@@ -55,6 +55,12 @@ interface DrilldownOrdersTableProps {
    * table just avoids sending the user away to see any rows at all.
    */
   ordersHref: string
+  /** Omits the Payment Status column -- for a drill-down whose filters
+   * already pin the payment status (e.g. Pending COD's Fulfilled/
+   * Unfulfilled breakdown), where repeating it on every row is redundant.
+   * Defaults to shown, matching every existing caller.
+   */
+  hidePaymentColumn?: boolean
 }
 
 /** A compact, read-only preview of the orders matching the current
@@ -69,9 +75,13 @@ export function DrilldownOrdersTable({
   title,
   filters,
   ordersHref,
+  hidePaymentColumn = false,
 }: DrilldownOrdersTableProps) {
   const router = useRouter()
   const query = useOrders({ page: 1, pageSize: PREVIEW_PAGE_SIZE, ...filters })
+  const columns = hidePaymentColumn
+    ? COLUMNS.filter((c) => c.id !== "payment_status")
+    : COLUMNS
 
   return (
     <Card>
@@ -98,7 +108,7 @@ export function DrilldownOrdersTable({
           {(data) => (
             <>
               <DataTable
-                columns={COLUMNS}
+                columns={columns}
                 data={data.data}
                 rowKey={(order) => order.id}
                 onRowClick={(order) => router.push(`/orders/${order.id}`)}
