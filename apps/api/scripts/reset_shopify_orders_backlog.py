@@ -53,12 +53,25 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
+from pathlib import Path
 
-from app.db.session import AsyncSessionLocal, run_with_cleanup
-from app.models.integration import IntegrationCode
-from app.repositories.integration import IntegrationRepository
-from app.services.sync_service import SyncService
-from app.tasks.sync_tasks import execute_sync_task
+# Run as `python scripts/reset_shopify_orders_backlog.py`, this script's
+# own directory (`apps/api/scripts`) — not the cwd it happens to be
+# launched from — is all Python puts on `sys.path` (`uvicorn app.main:app`
+# and `celery -A app.workers.celery_app` both work from `apps/api` only
+# because each CLI explicitly inserts the cwd itself; a plain `python
+# some_script.py` invocation does not). Insert the repo root (this file's
+# parent's parent, i.e. `apps/api`) before importing `app`, so the script
+# is self-sufficient from `apps/api` regardless of how it's invoked — no
+# PYTHONPATH, no `-m`, no package install step required.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.db.session import AsyncSessionLocal, run_with_cleanup  # noqa: E402
+from app.models.integration import IntegrationCode  # noqa: E402
+from app.repositories.integration import IntegrationRepository  # noqa: E402
+from app.services.sync_service import SyncService  # noqa: E402
+from app.tasks.sync_tasks import execute_sync_task  # noqa: E402
 
 
 async def _run(*, entity_type: str, dry_run: bool) -> None:
