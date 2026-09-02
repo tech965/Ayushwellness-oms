@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.orm import selectinload
 
 from app.models.auth import RefreshToken, User
@@ -10,6 +10,19 @@ from app.repositories.base import BaseRepository
 
 class UserRepository(BaseRepository[User]):
     model = User
+
+    def _base_query(self) -> Select:
+        # `BaseRepository.list` (used by `UserService.list_users` for
+        # `GET /users`) runs this with no further options -- without an
+        # eager-load here, `_to_response()` accessing `user.role_names`
+        # (which walks `user.user_roles[].role`) triggers a lazy load on
+        # an already-detached-from-IO-context AsyncSession result,
+        # raising `MissingGreenlet` in production. Only `user_roles.role`
+        # is loaded (not the deeper `role.role_permissions.permission`
+        # chain `get_by_email`/`get_with_permissions` below also need) --
+        # `role_names` never touches permissions, and listing users has
+        # no reason to pull in every role's full permission set.
+        return select(User).options(selectinload(User.user_roles).selectinload(UserRole.role))
 
     async def get_by_email(self, email: str) -> User | None:
         stmt = (

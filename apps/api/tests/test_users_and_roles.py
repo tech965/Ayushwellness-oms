@@ -43,6 +43,72 @@ async def test_role_create_then_update_permissions_twice(
         assert get_response.status_code == 200
 
 
+async def test_list_users_serializes_roles_without_missing_greenlet(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Real production incident: `GET /users` 500'd with `MissingGreenlet`
+    -- `UserService.list_users` -> `UserRepository.list` (the generic
+    `BaseRepository.list`, driven by `UserRepository._base_query`) loaded
+    plain `User` rows with no eager-load, and `_to_response()` then
+    accessed `user.role_names` (`user.user_roles[].role`) on each one,
+    triggering a lazy load AsyncSession can't service outside an active
+    greenlet. This covers exactly the list endpoint the earlier
+    create/update/get/delete tests above didn't.
+    """
+    async with await make_authenticated_client(
+        db_session, permission_codes=["users.manage", "roles.manage"]
+    ) as auth_client:
+        role = await auth_client.post(
+            "/api/v1/roles", json={"name": "LIST_TEST_ROLE", "permission_ids": []}
+        )
+        role_id = role.json()["data"]["id"]
+
+        with_role = await auth_client.post(
+            "/api/v1/users",
+            json={
+                "name": "Has Role",
+                "email": "has-role@example.com",
+                "password": "Sup3rSecret!",
+                "role_ids": [role_id],
+            },
+        )
+        assert with_role.status_code == 201
+
+        without_role = await auth_client.post(
+            "/api/v1/users",
+            json={
+                "name": "No Role",
+                "email": "no-role@example.com",
+                "password": "Sup3rSecret!",
+                "role_ids": [],
+            },
+        )
+        assert without_role.status_code == 201
+
+        listed = await auth_client.get("/api/v1/users", params={"page": 1, "page_size": 50})
+        assert listed.status_code == 200
+        body = listed.json()
+        assert body["success"] is True
+
+        by_email = {u["email"]: u for u in body["data"]}
+        assert by_email["has-role@example.com"]["roles"] == ["LIST_TEST_ROLE"]
+        assert by_email["no-role@example.com"]["roles"] == []
+
+        # Pagination still works: the auth_client's own user plus the two
+        # created above is at least 3 rows total, and page_size=1 must cap
+        # `data` at exactly one row while `meta` still reports the true total.
+        meta = body["meta"]
+        assert meta["total_items"] >= 3
+        page_one = await auth_client.get("/api/v1/users", params={"page": 1, "page_size": 1})
+        assert page_one.status_code == 200
+        page_one_body = page_one.json()
+        assert len(page_one_body["data"]) == 1
+        assert page_one_body["meta"]["page"] == 1
+        assert page_one_body["meta"]["page_size"] == 1
+        assert page_one_body["meta"]["total_items"] == meta["total_items"]
+        assert page_one_body["meta"]["total_pages"] == meta["total_items"]
+
+
 async def test_user_create_then_update_roles_twice(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
