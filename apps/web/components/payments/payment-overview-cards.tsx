@@ -17,8 +17,12 @@ interface PaymentOverviewCardsProps {
   hrefFor: (params: Record<string, string>) => string
 }
 
-/** The five Cashfree payment KPI tiles — reuses `KpiCard` exactly like
+/** The five payment KPI tiles (every provider, or whichever one the
+ * page's own provider filter is set to) — reuses `KpiCard` exactly like
  * every other dashboard KPI row (period-over-period %, drill-down link).
+ * Fed by `usePaymentOverview` (provider-agnostic); still typed as
+ * `CashfreePaymentOverview` purely because it's the same response
+ * shape, reused rather than duplicated.
  */
 export function PaymentOverviewCards({ data, hrefFor }: PaymentOverviewCardsProps) {
   return (

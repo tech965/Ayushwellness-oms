@@ -43,13 +43,14 @@ import { formatDate, formatMoney } from "@/lib/format"
 import { useLocalStorageState } from "@/lib/use-local-storage-state"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import type { TimeseriesInterval } from "@/types/analytics"
+import { useReconcileCashfreePayment } from "@/services/cashfree"
 import {
-  useCashfreePaymentMethodBreakdown,
-  useCashfreePaymentOverview,
-  useCashfreePaymentTrend,
-  useReconcileCashfreePayment,
-} from "@/services/cashfree"
-import { useExportPayments, usePayments } from "@/services/payments"
+  useExportPayments,
+  usePaymentMethodBreakdown,
+  usePaymentOverview,
+  usePaymentTrend,
+  usePayments,
+} from "@/services/payments"
 import {
   PAYMENT_PROVIDER_OPTIONS,
   PAYMENT_STATUS_OPTIONS,
@@ -364,17 +365,21 @@ function PaymentsPageContent() {
     ...activeFilters,
   })
 
-  // Cashfree analytics share the table's own date range so the KPI
-  // cards/charts and the rows below them always describe the same
-  // period -- same contract the main Dashboard's KPIs/drill-down links
-  // already use.
-  const analyticsDateParams = {
+  // The KPI cards/trend/method-breakdown share the table's own date
+  // range AND provider filter, so they always describe exactly the same
+  // slice of data the rows below them show -- same contract the main
+  // Dashboard's KPIs/drill-down links already use. Provider-agnostic by
+  // default ("All providers" -> every payment, Shopify included); the
+  // dedicated Cashfree-only analytics endpoints this page used to call
+  // are untouched and still power nothing here now, on purpose.
+  const analyticsParams = {
+    provider: filters.provider || undefined,
     date_from: filters.date_from || undefined,
     date_to: filters.date_to || undefined,
   }
-  const overviewQuery = useCashfreePaymentOverview(analyticsDateParams)
-  const trendQuery = useCashfreePaymentTrend({ ...analyticsDateParams, interval })
-  const methodBreakdownQuery = useCashfreePaymentMethodBreakdown(analyticsDateParams)
+  const overviewQuery = usePaymentOverview(analyticsParams)
+  const trendQuery = usePaymentTrend({ ...analyticsParams, interval })
+  const methodBreakdownQuery = usePaymentMethodBreakdown(analyticsParams)
 
   function hrefFor(extra: Record<string, string>): string {
     const params = new URLSearchParams()

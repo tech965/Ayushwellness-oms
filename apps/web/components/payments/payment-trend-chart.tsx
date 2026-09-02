@@ -39,10 +39,13 @@ function bucketLabel(bucket: string): string {
   }
 }
 
-/** Cashfree payment trend by day/week/month — paid vs failed counts as
+/** Payment trend by day/week/month (every provider, or whichever one the
+ * page's own provider filter is set to) — paid vs failed counts as
  * grouped bars, total amount received as a line on a secondary axis.
  * Same chart shape (`ComposedChart` + interval `<Select>`) as
- * `OrdersRevenueChart`.
+ * `OrdersRevenueChart`. Fed by `usePaymentTrend` (provider-agnostic);
+ * the type import below is still `CashfreePaymentTrend` purely because
+ * it's the same response shape, reused rather than duplicated.
  */
 export function PaymentTrendChart({
   data,
@@ -98,7 +101,7 @@ export function PaymentTrendChart({
           <div className="bg-muted h-[300px] w-full animate-pulse rounded-md" />
         ) : chartData.length === 0 ? (
           <div className="text-muted-foreground flex h-[300px] items-center justify-center text-sm">
-            No Cashfree payments in the selected range.
+            No payments in the selected range.
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={300}>
