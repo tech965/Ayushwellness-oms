@@ -87,6 +87,95 @@ class SyncService:
         await self.integrations.update(integration, configuration=configuration)
         await self.session.commit()
 
+    async def _mark_backlog_complete(
+        self, *, integration_id: uuid.UUID, entity_type: str, complete: bool
+    ) -> None:
+        """Explicit, persisted "has this entity's historical backlog crawl
+        ever genuinely finished" signal, alongside `sync_cursors` on the
+        same `Integration.configuration` column.
+
+        Real production incident this closes: inferring "backlog done"
+        purely from "a job completed and left no resume cursor" is
+        fragile — a job that merely ran out of its time budget mid-crawl
+        still completes successfully with a real `completed_at`, so only
+        `resume_cursor is None` stood between that and being mistaken for
+        genuinely done; and a resume cursor can itself be cleared for a
+        reason unrelated to real completion (e.g. `_run_entity_sync`'s
+        stale-cursor recovery above, or Shopify's API silently returning
+        `hasNextPage: false` at the edge of whatever order-history window
+        the app's current access actually covers — see docs/integrations/
+        shopify.md). Set `complete=True` only at the exact moment a crawl
+        that wasn't already incremental observes `has_more=False` — never
+        inferred. `complete=False` is used by an explicit, one-time
+        recovery action (`scripts/reset_shopify_orders_backlog.py`) to
+        force a genuinely fresh crawl regardless of what the legacy
+        cursor-based signal would otherwise imply.
+        """
+        integration = await self.integrations.get_by_id(integration_id)
+        if integration is None:
+            return
+        configuration = dict(integration.configuration or {})
+        flags = dict(configuration.get("backlog_complete") or {})
+        # `complete=False` must write an explicit `False`, never pop the
+        # key back to absent/`None` -- `backlog_known_complete_for` reads
+        # an *absent* entry as "no explicit signal yet, defer to the
+        # legacy since/resume_cursor inference", which a pre-existing
+        # completed `SyncJob` (exactly the state a reset is meant to
+        # override) can immediately satisfy again on its own, silently
+        # undoing the reset. Only an explicit `False` reliably wins.
+        flags[entity_type] = complete
+        configuration["backlog_complete"] = flags
+        await self.integrations.update(integration, configuration=configuration)
+        await self.session.commit()
+
+    @staticmethod
+    def backlog_known_complete_for(
+        integration: Integration,
+        *,
+        entity_type: str,
+        since: datetime | None,
+        resume_cursor: str | None,
+    ) -> bool:
+        """The explicit `backlog_complete` flag wins whenever it's been
+        set. Absent (`None` — never explicitly recorded for this entity)
+        falls back to the legacy inference this codebase already relied
+        on before this flag existed, so this doesn't force every
+        already-correctly-syncing entity (Shiprocket shipments/NDR,
+        Shopify customers/products) to redo a full crawl the first time
+        this code runs somewhere. An explicit `False` (e.g. from
+        `scripts/reset_shopify_orders_backlog.py`) always means "must
+        crawl", regardless of what the legacy cursor-based signal alone
+        would otherwise have implied.
+        """
+        explicit = (integration.configuration or {}).get("backlog_complete", {}).get(entity_type)
+        if explicit is not None:
+            return bool(explicit)
+        return since is not None and resume_cursor is None
+
+    async def reset_backlog(self, *, integration_id: uuid.UUID, entity_type: str) -> None:
+        """Explicit, safe, idempotent reset of one `(integration,
+        entity_type)`'s crawl checkpoint — clears any persisted resume
+        cursor and the `backlog_complete` flag, so the next sync for this
+        entity performs a genuine fresh backlog crawl from page 1
+        regardless of what the legacy `since`/`resume_cursor` inference in
+        `backlog_known_complete_for` would otherwise have concluded.
+
+        Used by `scripts/reset_shopify_orders_backlog.py` for the
+        historical-Shopify-orders recovery — the only supported way to
+        recover a backlog that was incorrectly marked complete before its
+        full history was actually imported. Never touches `SyncJob`
+        history and never deletes, modifies, or fabricates any `Order`/
+        `Customer`/`Product`/`Shipment`/`NDR` row — purely resets where
+        the *next* crawl starts from. Idempotent: safe to call again even
+        if already reset.
+        """
+        await self._persist_sync_cursor(
+            integration_id=integration_id, entity_type=entity_type, cursor=None
+        )
+        await self._mark_backlog_complete(
+            integration_id=integration_id, entity_type=entity_type, complete=False
+        )
+
     async def start_sync(
         self,
         *,
@@ -361,6 +450,19 @@ class SyncService:
             if integration
             else None
         )
+        backlog_known_complete = (
+            self.backlog_known_complete_for(
+                integration, entity_type=entity_type, since=since, resume_cursor=resume_cursor
+            )
+            if integration
+            else False
+        )
+        incremental_mode = (
+            sync_type == SyncType.INCREMENTAL
+            and since is not None
+            and resume_cursor is None
+            and backlog_known_complete
+        )
 
         # Round 5: sync_service.py had zero structured logging, making
         # "is the scheduled sync actually running against real data, or
@@ -373,8 +475,10 @@ class SyncService:
             integration=integration_code,
             entity_type=entity_type,
             sync_type=sync_type.value,
+            mode="incremental" if incremental_mode else "backlog",
             since=since.isoformat() if since else None,
             resume_cursor=resume_cursor,
+            backlog_known_complete=backlog_known_complete,
         )
 
         if adapter is None:
@@ -407,6 +511,7 @@ class SyncService:
                 adapter=adapter,
                 handler=handler,
                 resume_cursor=resume_cursor,
+                backlog_known_complete=backlog_known_complete,
             )
         except IntegrationError as exc:
             # A page-level failure (auth/permission/rate-limit/network) —
@@ -458,6 +563,7 @@ class SyncService:
         adapter: IntegrationAdapter,
         handler: UpsertHandler,
         resume_cursor: str | None,
+        backlog_known_complete: bool,
     ) -> None:
         """Pages through every record of `entity_type`, normalizing and
         upserting each one via `handler`. A single record's failure is
@@ -498,9 +604,28 @@ class SyncService:
         re-crawled end to end every 10 minutes (which starved the Celery
         worker and blocked Shopify order syncs): the historical crawl runs
         once, resumably, then every later run is a cheap newest-first slice.
+
+        Real production incident this fixes: Shopify historical orders
+        (anything before ~2026-03) never reached the OMS at all, even
+        though `since is not None and resume_cursor is None` looked
+        identical to "backlog genuinely finished" — a backlog crawl that
+        exhausts `_MAX_ENTITY_SYNC_DURATION` mid-crawl still completes
+        successfully with a real `completed_at`, and (per this
+        codebase's own confirmed prior finding on Shopify's API access —
+        see `entity_sync._upsert_shipment`'s Round 15/16 notes on the
+        `read_orders` scope) a not-yet-fully-caught-up crawl can also see
+        `hasNextPage: false` from the provider well short of true history.
+        `backlog_known_complete` (`backlog_known_complete_for`, computed by
+        the caller from the explicit, persisted `backlog_complete` flag —
+        never inferred here) is now a required, independent condition:
+        the implicit `since`/`resume_cursor` signals alone can never
+        again be mistaken for a finished backlog.
         """
         incremental_mode = (
-            sync_type == SyncType.INCREMENTAL and since is not None and resume_cursor is None
+            sync_type == SyncType.INCREMENTAL
+            and since is not None
+            and resume_cursor is None
+            and backlog_known_complete
         )
         cursor: str | None = None if incremental_mode else resume_cursor
         deadline = datetime.now(UTC) + _MAX_ENTITY_SYNC_DURATION
@@ -646,6 +771,7 @@ class SyncService:
                 "sync_page_processed",
                 sync_job_id=str(job_id),
                 entity_type=entity_type,
+                mode="incremental" if incremental_mode else "backlog",
                 nodes_received=len(page.nodes),
                 created=created_count,
                 updated=updated_count,
@@ -656,9 +782,21 @@ class SyncService:
             if not page.has_more:
                 if not incremental_mode:
                     # Backlog crawl finished a full pass — clear the resume
-                    # point so the next run switches to incremental mode.
+                    # point and record the explicit completion flag so the
+                    # next run switches to incremental mode. This is the
+                    # ONLY place `backlog_complete` is ever set `True` — a
+                    # genuine, observed `has_more=False` from a non-
+                    # incremental fetch, never inferred.
                     await self._persist_sync_cursor(
                         integration_id=integration_id, entity_type=entity_type, cursor=None
+                    )
+                    await self._mark_backlog_complete(
+                        integration_id=integration_id, entity_type=entity_type, complete=True
+                    )
+                    logger.info(
+                        "sync_backlog_completed",
+                        sync_job_id=str(job_id),
+                        entity_type=entity_type,
                     )
                 break
 

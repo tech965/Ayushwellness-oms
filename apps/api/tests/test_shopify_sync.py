@@ -7,7 +7,7 @@ returns hand-built GraphQL response shapes.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from app.integrations.registry import clear_adapters, register_adapter
@@ -451,6 +451,154 @@ async def test_full_sync_does_not_apply_an_incremental_filter(db_session: AsyncS
     await service.execute_sync(job.id)
 
     assert client.calls[0]["query"] is None
+
+
+# --- Historical-orders production incident: a backlog crawl that ran out
+# of its per-job time budget mid-crawl still `COMPLETED` with a real
+# `completed_at` — the only thing that had stood between that and being
+# mistaken for "backlog genuinely finished" was `resume_cursor is None`,
+# which is itself just an inference, not an explicit signal. Shopify
+# orders older than ~2026-03 (e.g. #AWL46048, confirmed live in Shopify,
+# created 2025-12-28) were never imported as a result. `backlog_complete`
+# is now explicit, persisted state, set ONLY at the exact moment a crawl
+# that wasn't already incremental observes a genuine `hasNextPage: false`
+# — never inferred from `since`/`resume_cursor` alone. ------------------
+
+
+async def test_interrupted_backlog_stays_backlog_even_once_since_is_set(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the exact reported production bug: a backlog
+    crawl that hits the time budget mid-crawl (persisting a resume
+    cursor) must still be treated as an incomplete backlog on the NEXT
+    run, even though that first job's own successful completion now
+    makes `since` non-None -- `since is not None` alone must never be
+    read as "the backlog is done".
+    """
+    import app.services.sync_service as sync_service_module
+
+    monkeypatch.setattr(sync_service_module, "_MAX_ENTITY_SYNC_DURATION", timedelta(seconds=-1))
+
+    page_1 = _orders_response("46048")
+    page_1["orders"]["pageInfo"] = {"hasNextPage": True, "endCursor": "cursor-2"}
+    client_1 = _StubClient([page_1])
+    register_adapter(ShopifyAdapter(client=client_1))
+    integration = await _make_shopify_integration(db_session)
+
+    service = SyncService(db_session)
+    job_1 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    assert job_1.status == SyncJobStatus.COMPLETED  # ran out of time budget, not an error
+    assert job_1.completed_at is not None  # `since` is now non-None for the next run
+
+    await db_session.refresh(integration)
+    assert integration.configuration["sync_cursors"]["orders"] == "cursor-2"
+    assert "orders" not in (integration.configuration.get("backlog_complete") or {})
+
+    # Second run: even requested as INCREMENTAL (what a caller unaware of
+    # the interrupted backlog might reasonably pass), the fetch must still
+    # be unfiltered (no `updated_at` query) and must resume from the
+    # persisted cursor, not restart at page 1 or switch to incremental.
+    page_2 = _orders_response("46049")
+    page_2["orders"]["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+    client_2 = _StubClient([page_2])
+    register_adapter(ShopifyAdapter(client=client_2))
+
+    job_2 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="orders"
+    )
+
+    assert client_2.calls[0]["query"] is None  # still a backlog fetch, not filtered by since
+    assert client_2.calls[0]["after"] == "cursor-2"  # resumed, did not restart at page 1
+    assert job_2.status == SyncJobStatus.COMPLETED
+
+    await db_session.refresh(integration)
+    assert integration.configuration["backlog_complete"]["orders"] is True
+    assert integration.configuration["sync_cursors"].get("orders") is None
+
+
+async def test_backlog_complete_flag_set_only_on_genuine_has_more_false(
+    db_session: AsyncSession,
+) -> None:
+    """A single-page backlog crawl that completes cleanly (no time-budget
+    interruption) must still set `backlog_complete` explicitly -- and a
+    THIRD run must then correctly switch to a real incremental
+    (`since`-filtered) fetch.
+    """
+    client = _StubClient([_orders_response("50001")])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    service = SyncService(db_session)
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    assert job.status == SyncJobStatus.COMPLETED
+
+    await db_session.refresh(integration)
+    assert integration.configuration["backlog_complete"]["orders"] is True
+
+    incremental_client = _StubClient(
+        [{"orders": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "edges": []}}]
+    )
+    register_adapter(ShopifyAdapter(client=incremental_client))
+    incremental_job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="orders"
+    )
+
+    assert incremental_client.calls[0]["query"] is not None
+    assert "updated_at" in incremental_client.calls[0]["query"]
+    assert incremental_job.status == SyncJobStatus.COMPLETED
+
+
+async def test_reset_backlog_recovers_a_missing_historical_order(
+    db_session: AsyncSession,
+) -> None:
+    """End-to-end proof of the recovery path
+    (`scripts/reset_shopify_orders_backlog.py`'s core operation,
+    `SyncService.reset_backlog`): an entity whose backlog *looks* done
+    under the legacy `since`/`resume_cursor` inference (no explicit flag
+    ever recorded) is forced back into a genuine unfiltered crawl, and a
+    historical order missing from the OMS (the #AWL46048 scenario) is
+    imported without duplicating or disturbing anything already synced.
+    """
+    integration = await _make_shopify_integration(db_session)
+
+    # Simulate the pre-existing, misleading state: a completed job with
+    # no resume cursor and no explicit backlog_complete flag -- exactly
+    # what production had before this fix existed.
+    await SyncJobRepository(db_session).create(
+        integration_id=integration.id,
+        sync_type=SyncType.FULL,
+        entity_type="orders",
+        status=SyncJobStatus.COMPLETED,
+        completed_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    await db_session.commit()
+
+    service = SyncService(db_session)
+    await service.reset_backlog(integration_id=integration.id, entity_type="orders")
+
+    await db_session.refresh(integration)
+    assert integration.configuration["backlog_complete"]["orders"] is False
+    assert integration.configuration["sync_cursors"].get("orders") is None
+
+    historical_order = _orders_response("AWL46048")
+    client = _StubClient([historical_order])
+    register_adapter(ShopifyAdapter(client=client))
+
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    assert client.calls[0]["query"] is None  # a genuine, unfiltered backlog crawl
+    assert job.status == SyncJobStatus.COMPLETED
+    assert job.records_created == 1
+
+    order = await OrderRepository(db_session).get_by_order_number("#AWL46048")
+    assert order is not None
+    assert order.order_number == "#AWL46048"
 
 
 # Round 5 — Task 9: an HTTP 200 with a GraphQL-level error must not be
