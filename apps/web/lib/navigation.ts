@@ -31,6 +31,10 @@ export interface NavItem {
   label: string
   href: string
   icon: LucideIcon
+  /** Gates this item on `useAuth().hasPermission(code)` (see
+   * `SidebarNav`) -- omit for items every `navGroups` user should see.
+   */
+  permission?: string
 }
 
 export interface NavGroup {
@@ -81,8 +85,8 @@ export const navGroups: NavGroup[] = [
   {
     label: "Administration",
     items: [
-      { label: "Users", href: "/users", icon: ShieldCheck },
-      { label: "Roles", href: "/roles", icon: Gauge },
+      { label: "Users", href: "/users", icon: ShieldCheck, permission: "users.manage" },
+      { label: "Roles", href: "/roles", icon: Gauge, permission: "roles.manage" },
       { label: "Settings", href: "/settings", icon: Settings },
     ],
   },

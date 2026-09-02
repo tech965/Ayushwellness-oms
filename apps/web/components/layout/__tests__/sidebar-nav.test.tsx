@@ -15,7 +15,8 @@ vi.mock("@/lib/auth-context", () => ({
 
 const mockedUseAuth = vi.mocked(useAuth)
 
-function authWithRoles(roles: string[]) {
+function authWithRoles(roles: string[], permissionCodes: string[] = []) {
+  const permissions = new Set(permissionCodes)
   return {
     user: {
       id: "1",
@@ -25,11 +26,12 @@ function authWithRoles(roles: string[]) {
       is_active: true,
       is_superuser: false,
       roles,
-      permissions: [],
+      permissions: permissionCodes,
     },
-    permissions: new Set<string>(),
+    permissions,
     isLoading: false,
-    hasPermission: () => true,
+    hasPermission: (code: string) =>
+      permissionCodes.length === 0 ? true : permissions.has(code),
     hasRole: (role: string) => roles.includes(role),
     logout: vi.fn(),
   }
@@ -64,5 +66,34 @@ describe("SidebarNav role-based navigation", () => {
     expect(screen.getByText("Telecallers")).toBeInTheDocument()
     expect(screen.queryByText("Users")).not.toBeInTheDocument()
     expect(screen.queryByText("Integrations")).not.toBeInTheDocument()
+  })
+})
+
+describe("SidebarNav Administration gating", () => {
+  it("hides Users and Roles but keeps Settings with neither users.manage nor roles.manage", () => {
+    mockedUseAuth.mockReturnValue(authWithRoles(["STAFF"], ["orders.update"]))
+    renderWithProviders(<SidebarNav />)
+    expect(screen.getByText("Orders")).toBeInTheDocument()
+    expect(screen.queryByText("Users")).not.toBeInTheDocument()
+    expect(screen.queryByText("Roles")).not.toBeInTheDocument()
+    expect(screen.getByText("Settings")).toBeInTheDocument()
+  })
+
+  it("shows only Users when the viewer has users.manage but not roles.manage", () => {
+    mockedUseAuth.mockReturnValue(authWithRoles(["STAFF"], ["users.manage"]))
+    renderWithProviders(<SidebarNav />)
+    expect(screen.getByText("Users")).toBeInTheDocument()
+    expect(screen.queryByText("Roles")).not.toBeInTheDocument()
+    expect(screen.getByText("Settings")).toBeInTheDocument()
+  })
+
+  it("shows both Users and Roles for a viewer with both permissions", () => {
+    mockedUseAuth.mockReturnValue(
+      authWithRoles(["STAFF"], ["users.manage", "roles.manage"])
+    )
+    renderWithProviders(<SidebarNav />)
+    expect(screen.getByText("Users")).toBeInTheDocument()
+    expect(screen.getByText("Roles")).toBeInTheDocument()
+    expect(screen.getByText("Settings")).toBeInTheDocument()
   })
 })
