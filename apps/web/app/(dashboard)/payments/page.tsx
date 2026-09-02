@@ -383,7 +383,13 @@ function PaymentsPageContent() {
 
   function hrefFor(extra: Record<string, string>): string {
     const params = new URLSearchParams()
-    params.set("provider", "cashfree")
+    // Mirrors whatever provider the KPI cards themselves are currently
+    // aggregating over (`analyticsParams.provider` above) -- "All
+    // providers" (no filter selected) must drill down to no `provider`
+    // param at all, not a stale hardcoded "cashfree" from when these
+    // cards were Cashfree-only. Never widens/narrows the provider beyond
+    // whatever context the cards are already showing.
+    if (filters.provider) params.set("provider", filters.provider)
     if (filters.date_from) params.set("date_from", filters.date_from)
     if (filters.date_to) params.set("date_to", filters.date_to)
     for (const [key, value] of Object.entries(extra)) params.set(key, value)

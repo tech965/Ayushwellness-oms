@@ -429,6 +429,7 @@ async def test_missing_optional_fields_do_not_erase_existing_shipment_data(
     ("raw_status", "expected"),
     [
         ("New", ShipmentStatus.PENDING),
+        ("Pickup Scheduled", ShipmentStatus.PENDING),
         ("Picked Up", ShipmentStatus.PICKED_UP),
         ("In Transit", ShipmentStatus.IN_TRANSIT),
         ("Out For Delivery", ShipmentStatus.OUT_FOR_DELIVERY),
@@ -436,6 +437,7 @@ async def test_missing_optional_fields_do_not_erase_existing_shipment_data(
         ("Undelivered", ShipmentStatus.NDR),
         ("Cancelled", ShipmentStatus.CANCELLED),
         ("RTO Initiated", ShipmentStatus.RTO_INITIATED),
+        ("RTO Delivered", ShipmentStatus.RTO_DELIVERED),
     ],
 )
 async def test_status_normalization_maps_raw_shiprocket_status(
