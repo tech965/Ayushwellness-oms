@@ -23,6 +23,7 @@ from app.api.v1.endpoints import (
     dashboard,
     integrations,
     ndr,
+    operations_command_center,
     orders,
     payments,
     permissions,
@@ -79,6 +80,11 @@ api_router.include_router(
     supply_intelligence.router,
     prefix="/analytics/supply-intelligence",
     tags=["analytics:supply-intelligence"],
+)
+api_router.include_router(
+    operations_command_center.router,
+    prefix="/analytics/operations-command-center",
+    tags=["analytics:operations-command-center"],
 )
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(sync.router, prefix="/sync", tags=["sync"])

@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react"
 import {
+  Activity,
   BarChart3,
   Bell,
   Boxes,
@@ -73,6 +74,11 @@ export const navGroups: NavGroup[] = [
     items: [
       { label: "Analytics", href: "/analytics", icon: BarChart3 },
       { label: "🇮🇳 Supply Intelligence", href: "/supply-intelligence", icon: Map },
+      {
+        label: "🤖 Operations Command Center",
+        href: "/operations-command-center",
+        icon: Activity,
+      },
     ],
   },
   {
