@@ -106,7 +106,18 @@ class WebhookService:
         await self.webhook_events.update(
             event,
             status=WebhookEventStatus.FAILED,
-            error_message=error_message,
+            # `error_message` is `String(1000)` -- a raw `str(exc)` from a
+            # SQLAlchemy/IntegrityError (full statement + bound params +
+            # driver text) routinely exceeds that, and writing it
+            # untruncated raises a *second*, unrelated
+            # StringDataRightTruncationError that masks the real failure
+            # and can itself go uncaught (the same class of bug already
+            # fixed once for `SyncError.error_message` -- see
+            # `app.services.sync_service.SyncService.record_error`). The
+            # full, untruncated message belongs in structured logs
+            # (callers log it before calling this), never silently lost,
+            # just not persisted in a column too small to hold it.
+            error_message=error_message[:1000],
             retry_count=event.retry_count + 1,
         )
         await self.session.commit()
@@ -115,7 +126,7 @@ class WebhookService:
     async def mark_ignored(self, webhook_event_id: uuid.UUID, *, reason: str) -> WebhookEvent:
         event = await self._get(webhook_event_id)
         await self.webhook_events.update(
-            event, status=WebhookEventStatus.IGNORED, error_message=reason
+            event, status=WebhookEventStatus.IGNORED, error_message=reason[:1000]
         )
         await self.session.commit()
         return event

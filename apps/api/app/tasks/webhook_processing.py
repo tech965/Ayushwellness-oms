@@ -80,6 +80,18 @@ async def _process_webhook_event(webhook_event_id: str) -> None:
             await handler(session, normalized)
         except Exception as exc:  # noqa: BLE001 - persisted before re-raising for Celery's retry
             await session.rollback()
+            # Full exception + traceback goes to structured logs
+            # unconditionally -- `mark_failed` below truncates whatever it
+            # persists to fit `WebhookEvent.error_message` (String(1000)),
+            # so this is the only place the complete, untruncated failure
+            # (e.g. a SQLAlchemy IntegrityError's full statement/params) is
+            # ever guaranteed to be visible, regardless of column limits.
+            logger.error(
+                "webhook_event_processing_failed",
+                webhook_event_id=str(event_id),
+                error=str(exc),
+                exc_info=True,
+            )
             await service.mark_failed(event_id, error_message=str(exc))
             raise
         else:

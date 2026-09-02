@@ -1153,6 +1153,84 @@ async def test_webhook_processing_task_marks_event_failed_when_handler_raises(
     assert refreshed.error_message is not None
 
 
+async def test_oversized_error_message_is_truncated_not_a_secondary_db_error(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: `WebhookEvent.error_message` is `String(1000)`, but
+    a real SQLAlchemy/IntegrityError's `str(exc)` (full statement + bound
+    params + driver text) routinely exceeds that. Writing it untruncated
+    used to raise a *second*, unrelated StringDataRightTruncationError
+    inside `mark_failed` itself -- masking the real failure and, since
+    nothing caught it, breaking Celery's retry/backoff for that event
+    entirely. The handler here raises a >1000-character message to prove
+    the fix: the event still ends up FAILED with a truncated message
+    (never crashes writing it), and the original exception still
+    propagates so Celery's retry still fires.
+    """
+    from app.models.enums import WebhookEventStatus
+    from app.tasks import webhook_processing
+
+    class _db_session_cm:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+
+        async def __aenter__(self) -> AsyncSession:
+            return self._session
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+    register_adapter(ShopifyAdapter(client=None))
+    integration = await _make_shopify_integration(db_session)
+
+    payload = {
+        "id": 501,
+        "first_name": "Long",
+        "last_name": "Error",
+        "email": "long-error@example.com",
+        "phone": None,
+        "state": "enabled",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "default_address": None,
+        "addresses": [],
+    }
+    webhook_service = WebhookService(db_session)
+    event, created = await webhook_service.ingest(
+        integration_id=integration.id,
+        event_type="customers/create",
+        payload=payload,
+        external_event_id="wh_oversized_error",
+    )
+    assert created is True
+    event_id = event.id  # plain UUID -- see the comment on the test above
+
+    oversized_message = (
+        "duplicate key value violates unique constraint "
+        "\"uq_customers_source_external_id\" DETAIL: Key (source_system, external_id)="
+        "(shopify, 501) already exists. " + ("x" * 2000)
+    )
+    assert len(oversized_message) > 1000
+
+    async def _broken_handler(*_args: object, **_kwargs: object) -> None:
+        raise ValueError(oversized_message)
+
+    monkeypatch.setitem(webhook_processing.ENTITY_UPSERT_HANDLERS, "customers", _broken_handler)
+    monkeypatch.setattr(webhook_processing, "AsyncSessionLocal", lambda: _db_session_cm(db_session))
+
+    with pytest.raises(ValueError):
+        await webhook_processing._process_webhook_event(str(event_id))
+
+    refreshed = (
+        await db_session.execute(select(WebhookEvent).where(WebhookEvent.id == event_id))
+    ).scalar_one()
+    assert refreshed.status == WebhookEventStatus.FAILED
+    assert refreshed.retry_count == 1
+    assert refreshed.error_message is not None
+    assert len(refreshed.error_message) == 1000
+    assert refreshed.error_message == oversized_message[:1000]
+
+
 async def test_refunds_create_webhook_returns_200_via_http_endpoint(
     db_session: AsyncSession, client: AsyncClient
 ) -> None:
