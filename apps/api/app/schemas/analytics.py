@@ -79,6 +79,8 @@ class CourierPerformance(BaseModel):
     name: str
     shipment_count: int
     delivered_count: int
+    in_transit_count: int
+    pending_count: int
     ndr_count: int
     rto_count: int
     delivered_pct: float
@@ -181,3 +183,31 @@ class PaymentStatusTimeseriesResponse(BaseModel):
     interval: str
     payment_type: str
     points: list[PaymentStatusTimeseriesPoint]
+
+
+# --- Dashboard Returns/Refunds cards. Scoped by `Return.created_at`/
+# `Refund.created_at` in range (a return/refund *raised* in the period),
+# same convention `AnalyticsSummaryResponse.returns`/`.refunds` already
+# use -- see `AnalyticsService.get_returns_refunds_summary` for the exact
+# pending/completed status-bucket rule. -----------------------------
+
+
+class ReturnsSummary(BaseModel):
+    total_returns: int
+    pending_returns: int
+    completed_returns: int
+    # None when there are no orders in range -- a rate against zero orders
+    # is undefined, not zero (matches `KPIValue.change_pct`'s convention).
+    return_rate_pct: float | None
+
+
+class RefundsSummary(BaseModel):
+    total_refunds: int
+    total_refund_amount: Decimal
+    pending_refunds: int
+    completed_refunds: int
+
+
+class ReturnsRefundsSummaryResponse(BaseModel):
+    returns: ReturnsSummary
+    refunds: RefundsSummary

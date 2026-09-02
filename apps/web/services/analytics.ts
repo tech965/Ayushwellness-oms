@@ -11,10 +11,22 @@ import type {
   PaymentStatusBreakdown,
   PaymentStatusTimeseries,
   RecentActivity,
+  ReturnsRefundsSummary,
   RevenueTimeseries,
   TimeseriesInterval,
   TopProduct,
 } from "@/types/analytics"
+
+/** Shared by every dashboard analytics hook below: `refetchInterval`
+ * drives the dashboard's "Refresh interval" setting (Administration ->
+ * Settings -> Dashboard) -- `false`/`undefined` means no polling (the
+ * default, matching every non-dashboard consumer of these hooks, e.g.
+ * the standalone Analytics page).
+ */
+interface QueryLifecycleOptions {
+  enabled?: boolean
+  refetchInterval?: number | false
+}
 
 async function fetchAnalyticsSummary(
   params: AnalyticsDateRangeParams
@@ -29,11 +41,16 @@ async function fetchAnalyticsSummary(
   return response.data.data
 }
 
-export function useAnalyticsSummary(params: AnalyticsDateRangeParams) {
+export function useAnalyticsSummary(
+  params: AnalyticsDateRangeParams,
+  options?: QueryLifecycleOptions
+) {
   return useQuery({
     queryKey: ["analytics", "summary", params],
     queryFn: () => fetchAnalyticsSummary(params),
     placeholderData: (previous) => previous,
+    enabled: options?.enabled ?? true,
+    refetchInterval: options?.refetchInterval ?? false,
   })
 }
 
@@ -49,12 +66,15 @@ async function fetchOrdersTimeseries(
 }
 
 export function useOrdersTimeseries(
-  params: AnalyticsDateRangeParams & { interval: TimeseriesInterval }
+  params: AnalyticsDateRangeParams & { interval: TimeseriesInterval },
+  options?: QueryLifecycleOptions
 ) {
   return useQuery({
     queryKey: ["analytics", "orders-timeseries", params],
     queryFn: () => fetchOrdersTimeseries(params),
     placeholderData: (previous) => previous,
+    enabled: options?.enabled ?? true,
+    refetchInterval: options?.refetchInterval ?? false,
   })
 }
 
@@ -66,11 +86,15 @@ async function fetchBreakdowns(params: AnalyticsDateRangeParams): Promise<Breakd
   return response.data.data
 }
 
-export function useBreakdowns(params: AnalyticsDateRangeParams) {
+export function useBreakdowns(
+  params: AnalyticsDateRangeParams,
+  options?: QueryLifecycleOptions
+) {
   return useQuery({
     queryKey: ["analytics", "breakdowns", params],
     queryFn: () => fetchBreakdowns(params),
     placeholderData: (previous) => previous,
+    refetchInterval: options?.refetchInterval ?? false,
   })
 }
 
@@ -86,11 +110,15 @@ async function fetchTopProducts(
   return response.data.data ?? []
 }
 
-export function useTopProducts(params: AnalyticsDateRangeParams & { limit?: number }) {
+export function useTopProducts(
+  params: AnalyticsDateRangeParams & { limit?: number },
+  options?: QueryLifecycleOptions
+) {
   return useQuery({
     queryKey: ["analytics", "top-products", params],
     queryFn: () => fetchTopProducts(params),
     placeholderData: (previous) => previous,
+    refetchInterval: options?.refetchInterval ?? false,
   })
 }
 
@@ -104,11 +132,15 @@ async function fetchCourierPerformance(
   return response.data.data ?? []
 }
 
-export function useCourierPerformance(params: AnalyticsDateRangeParams) {
+export function useCourierPerformance(
+  params: AnalyticsDateRangeParams,
+  options?: QueryLifecycleOptions
+) {
   return useQuery({
     queryKey: ["analytics", "couriers", params],
     queryFn: () => fetchCourierPerformance(params),
     placeholderData: (previous) => previous,
+    refetchInterval: options?.refetchInterval ?? false,
   })
 }
 
@@ -181,6 +213,29 @@ export function usePaymentStatusTimeseries(
   })
 }
 
+async function fetchReturnsRefundsSummary(
+  params: AnalyticsDateRangeParams
+): Promise<ReturnsRefundsSummary> {
+  const response = await apiClient.get<ApiResponse<ReturnsRefundsSummary>>(
+    "/analytics/returns-refunds",
+    { params }
+  )
+  if (!response.data.data) throw new Error("Returns/refunds summary not available.")
+  return response.data.data
+}
+
+export function useReturnsRefundsSummary(
+  params: AnalyticsDateRangeParams,
+  options?: QueryLifecycleOptions
+) {
+  return useQuery({
+    queryKey: ["analytics", "returns-refunds", params],
+    queryFn: () => fetchReturnsRefundsSummary(params),
+    placeholderData: (previous) => previous,
+    refetchInterval: options?.refetchInterval ?? false,
+  })
+}
+
 async function fetchRecentActivity(): Promise<RecentActivity> {
   const response = await apiClient.get<ApiResponse<RecentActivity>>(
     "/analytics/recent-activity"
@@ -189,9 +244,10 @@ async function fetchRecentActivity(): Promise<RecentActivity> {
   return response.data.data
 }
 
-export function useRecentActivity() {
+export function useRecentActivity(options?: QueryLifecycleOptions) {
   return useQuery({
     queryKey: ["analytics", "recent-activity"],
     queryFn: fetchRecentActivity,
+    refetchInterval: options?.refetchInterval ?? false,
   })
 }

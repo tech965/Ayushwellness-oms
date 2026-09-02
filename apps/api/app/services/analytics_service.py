@@ -66,6 +66,8 @@ from app.models.enums import (
     OrderStatus,
     PaymentStatus,
     PaymentType,
+    RefundStatus,
+    ReturnStatus,
     RTOStatus,
     ShipmentDelayStatus,
     ShipmentStatus,
@@ -93,6 +95,9 @@ from app.schemas.analytics import (
     RecentOrder,
     RecentPayment,
     RecentShipment,
+    RefundsSummary,
+    ReturnsRefundsSummaryResponse,
+    ReturnsSummary,
     RevenueTimeseriesPoint,
     RevenueTimeseriesResponse,
     StatusCount,
@@ -545,6 +550,9 @@ class AnalyticsService:
     ) -> list[CourierPerformance]:
         r = resolve_range(date_from, date_to)
         delivered_case = case((Shipment.current_status == ShipmentStatus.DELIVERED, 1), else_=0)
+        in_transit_statuses = [ShipmentStatus.PICKED_UP, ShipmentStatus.IN_TRANSIT]
+        in_transit_case = case((Shipment.current_status.in_(in_transit_statuses), 1), else_=0)
+        pending_case = case((Shipment.current_status == ShipmentStatus.PENDING, 1), else_=0)
         ndr_case = case((Shipment.current_status == ShipmentStatus.NDR, 1), else_=0)
         rto_statuses = [ShipmentStatus.RTO_INITIATED, ShipmentStatus.RTO_DELIVERED]
         rto_case = case(
@@ -557,6 +565,8 @@ class AnalyticsService:
                 Courier.name,
                 func.count(Shipment.id),
                 func.sum(cast(delivered_case, Numeric)),
+                func.sum(cast(in_transit_case, Numeric)),
+                func.sum(cast(pending_case, Numeric)),
                 func.sum(cast(ndr_case, Numeric)),
                 func.sum(cast(rto_case, Numeric)),
             )
@@ -568,9 +578,11 @@ class AnalyticsService:
         rows = (await self.session.execute(stmt)).all()
 
         results = []
-        for courier_id, name, shipment_count, delivered, ndr, rto in rows:
+        for courier_id, name, shipment_count, delivered, in_transit, pending, ndr, rto in rows:
             shipment_count = shipment_count or 0
             delivered = int(delivered or 0)
+            in_transit = int(in_transit or 0)
+            pending = int(pending or 0)
             ndr = int(ndr or 0)
             rto = int(rto or 0)
             results.append(
@@ -579,6 +591,8 @@ class AnalyticsService:
                     name=name,
                     shipment_count=shipment_count,
                     delivered_count=delivered,
+                    in_transit_count=in_transit,
+                    pending_count=pending,
                     ndr_count=ndr,
                     rto_count=rto,
                     delivered_pct=(delivered / shipment_count * 100) if shipment_count else 0.0,
@@ -587,6 +601,82 @@ class AnalyticsService:
                 )
             )
         return results
+
+    async def get_returns_refunds_summary(
+        self, date_from: datetime | None, date_to: datetime | None
+    ) -> ReturnsRefundsSummaryResponse:
+        """Backs the dashboard's Returns/Refunds cards. `pending` for a
+        `Return` means still in its request/receipt workflow (every status
+        except its two terminal ones, `COMPLETED`/`CANCELLED`) -- mirrors
+        how `open_ndr`/`open_rto` above define "open" as "not yet in a
+        terminal state" rather than listing every non-terminal status by
+        hand. `return_rate_pct` is against orders placed in the same
+        window (matches every other rate-style figure here being
+        period-scoped) -- `None` (never fabricated as 0%) when the period
+        has no orders at all.
+        """
+        r = resolve_range(date_from, date_to)
+
+        total_returns = await self._count_where(
+            Return, Return.created_at >= r.date_from, Return.created_at <= r.date_to
+        )
+        completed_returns = await self._count_where(
+            Return,
+            Return.created_at >= r.date_from,
+            Return.created_at <= r.date_to,
+            Return.status == ReturnStatus.COMPLETED,
+        )
+        cancelled_returns = await self._count_where(
+            Return,
+            Return.created_at >= r.date_from,
+            Return.created_at <= r.date_to,
+            Return.status == ReturnStatus.CANCELLED,
+        )
+        pending_returns = total_returns - completed_returns - cancelled_returns
+        total_orders = await self._count_where(
+            Order, Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to
+        )
+        return_rate_pct = (
+            float(total_returns / total_orders * 100) if total_orders else None
+        )
+
+        total_refunds = await self._count_where(
+            Refund, Refund.created_at >= r.date_from, Refund.created_at <= r.date_to
+        )
+        completed_refunds = await self._count_where(
+            Refund,
+            Refund.created_at >= r.date_from,
+            Refund.created_at <= r.date_to,
+            Refund.status == RefundStatus.COMPLETED,
+        )
+        pending_refunds = await self._count_where(
+            Refund,
+            Refund.created_at >= r.date_from,
+            Refund.created_at <= r.date_to,
+            Refund.status.in_([RefundStatus.PENDING, RefundStatus.PROCESSING]),
+        )
+        total_refund_amount = await self._scalar(
+            select(func.coalesce(func.sum(Refund.amount), 0)).where(
+                Refund.created_at >= r.date_from,
+                Refund.created_at <= r.date_to,
+                Refund.status == RefundStatus.COMPLETED,
+            )
+        )
+
+        return ReturnsRefundsSummaryResponse(
+            returns=ReturnsSummary(
+                total_returns=int(total_returns),
+                pending_returns=int(pending_returns),
+                completed_returns=int(completed_returns),
+                return_rate_pct=return_rate_pct,
+            ),
+            refunds=RefundsSummary(
+                total_refunds=int(total_refunds),
+                total_refund_amount=total_refund_amount,
+                pending_refunds=int(pending_refunds),
+                completed_refunds=int(completed_refunds),
+            ),
+        )
 
     async def get_recent_activity(self, limit: int = 5) -> RecentActivityResponse:
         orders_stmt = select(Order).order_by(Order.created_at.desc()).limit(limit)
@@ -682,6 +772,8 @@ class AnalyticsService:
 # filtering can never independently drift back into the bug above.
 def _bucket_key(value: datetime, interval: str) -> str:
     ist_value = to_ist(value)
+    if interval == "hour":
+        return ist_value.strftime("%Y-%m-%dT%H:00")
     if interval == "week":
         start_of_week = ist_value.date() - timedelta(days=ist_value.weekday())
         return start_of_week.isoformat()

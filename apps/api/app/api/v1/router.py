@@ -42,6 +42,9 @@ from app.api.v1.endpoints import (
     users,
     webhook_events,
 )
+from app.api.v1.endpoints import (
+    settings as settings_endpoints,
+)
 from app.api.v1.webhooks import cashfree as cashfree_webhooks
 from app.api.v1.webhooks import couriers as courier_webhooks
 from app.api.v1.webhooks import shiprocket as shiprocket_webhooks
@@ -80,6 +83,7 @@ api_router.include_router(automation.router, prefix="/automation", tags=["automa
 api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(audit_logs.router, prefix="/audit-logs", tags=["audit-logs"])
+api_router.include_router(settings_endpoints.router, prefix="/settings", tags=["settings"])
 api_router.include_router(team.router, prefix="/team", tags=["team"])
 api_router.include_router(telecaller.router, prefix="/telecaller", tags=["telecaller"])
 
