@@ -63,6 +63,20 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
               <Link
                 key={item.href}
                 href={item.href}
+                // Pre-demo fix: this list renders every one of ~31 nav
+                // destinations simultaneously, all visible in the
+                // persistent sidebar on every dashboard page. Next.js's
+                // default Link behavior auto-prefetches each one as it
+                // enters the viewport, which at this volume produced
+                // Chrome's own "Throttling navigation to prevent the
+                // browser from hanging" warning and the excessive
+                // `?_rsc=` request volume behind the visible navigation
+                // blinking. Disabling automatic prefetch here only stops
+                // that proactive background fetching -- clicking a link
+                // still navigates exactly as before (Next.js fetches the
+                // RSC payload for the clicked destination on click,
+                // same as any non-prefetched Link).
+                prefetch={false}
                 aria-current={isActive ? "page" : undefined}
                 className={cn(
                   "relative flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
