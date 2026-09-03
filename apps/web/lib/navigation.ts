@@ -94,6 +94,21 @@ export const navGroups: NavGroup[] = [
     ],
   },
   {
+    // Admin/superuser view of the same Telecalling pages `teamLeaderNavGroups`
+    // links to below -- same routes, same icons, just surfaced in the full
+    // Admin OMS menu too (previously only reachable by a Team Leader/
+    // Telecaller account or a direct URL; Admin already has every
+    // `telecalling.manage`/`calls.manage` permission via the "*" role).
+    label: "Telecalling",
+    items: [
+      { label: "Dashboard", href: "/team/dashboard", icon: LayoutDashboard },
+      { label: "Lead Pool", href: "/team/leads", icon: ListChecks },
+      { label: "Abandoned Checkouts", href: "/team/checkouts", icon: MousePointerClick },
+      { label: "Unfulfilled Orders", href: "/team/orders/unfulfilled", icon: ListChecks },
+      { label: "Telecallers", href: "/team/telecallers", icon: Users },
+    ],
+  },
+  {
     label: "Administration",
     items: [
       { label: "Users", href: "/users", icon: ShieldCheck, permission: "users.manage" },

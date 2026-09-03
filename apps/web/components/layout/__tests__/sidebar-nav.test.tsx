@@ -46,6 +46,16 @@ describe("SidebarNav role-based navigation", () => {
     expect(screen.getByText("Settings")).toBeInTheDocument()
   })
 
+  it("includes the Telecalling section (Lead Pool, Abandoned Checkouts, Telecallers) for Admin", () => {
+    mockedUseAuth.mockReturnValue(authWithRoles(["ADMIN"]))
+    renderWithProviders(<SidebarNav />)
+    expect(screen.getByText("Telecalling")).toBeInTheDocument()
+    expect(screen.getByText("Lead Pool")).toBeInTheDocument()
+    expect(screen.getByText("Abandoned Checkouts")).toBeInTheDocument()
+    expect(screen.getByText("Unfulfilled Orders")).toBeInTheDocument()
+    expect(screen.getByText("Telecallers")).toBeInTheDocument()
+  })
+
   it("renders only the minimal Telecaller nav — no admin links", () => {
     mockedUseAuth.mockReturnValue(authWithRoles(["TELECALLER"]))
     renderWithProviders(<SidebarNav />)
