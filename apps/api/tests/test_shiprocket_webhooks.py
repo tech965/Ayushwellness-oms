@@ -14,6 +14,7 @@ confirmed.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from app.core.config import settings
@@ -24,6 +25,7 @@ from app.models.enums import IntegrationStatus, IntegrationType, PaymentType, Sh
 from app.models.integration import Integration, IntegrationCode, WebhookEvent
 from app.models.shipment import Shipment, ShipmentEvent
 from app.repositories.integration import IntegrationRepository
+from app.repositories.order import OrderRepository
 from app.repositories.shipment import ShipmentRepository
 from app.services.order_service import OrderService
 from app.services.shipment_service import ShipmentService
@@ -457,6 +459,61 @@ async def test_webhook_matches_by_shiprocket_order_id_via_orders_show_fallback(
     shipment = await ShipmentRepository(db_session).get_by_awb("AWB-ORDERID-1")
     assert shipment is not None
     assert shipment.order_id == order.id
+
+
+async def test_webhook_orders_show_fallback_resolves_via_api_order_id_for_native_shopify_channel(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """7: same live orders/show fallback as above, but for a native
+    Shopify-channel order where `channel_order_id` (41531) is Shiprocket's
+    own internal per-channel sequence number and matches no OMS order --
+    `api_order_id` (confirmed live to equal `Order.external_id` for these
+    orders) resolves it instead, off the SAME response, with no second
+    Shiprocket API call.
+    """
+
+    class _StubClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def request(self, method, path, *, json=None, params=None):
+            self.calls.append(path)
+            assert path == "/orders/show/1555650745"
+            return {"data": {"channel_order_id": 41531, "api_order_id": "6777362383037"}}
+
+        async def ensure_authenticated(self) -> None:
+            pass
+
+    stub_client = _StubClient()
+    order, _created = await OrderRepository(db_session).upsert_by_external_id(
+        source_system="shopify",
+        external_id="6777362383037",
+        order_number="#AWL93156",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("699.00"),
+    )
+    await db_session.commit()
+    register_adapter(ShiprocketAdapter(client=stub_client))
+    await _make_shiprocket_integration(db_session)
+
+    response = await client.post(
+        _URL,
+        json={
+            "awb": "AWB-APIORDERID-1",
+            "shipment_id": "1555650745",
+            "sr_order_id": "1555650745",
+            "current_status": "Delivered",
+        },
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+
+    shipment = await ShipmentRepository(db_session).get_by_awb("AWB-APIORDERID-1")
+    assert shipment is not None
+    assert shipment.order_id == order.id
+    # Exactly one live orders/show call -- the fallback reads api_order_id
+    # off the already-fetched response, never a second Shiprocket call.
+    assert stub_client.calls == ["/orders/show/1555650745"]
 
 
 # --- 5. Unknown shipment must not fabricate a match ------------------------

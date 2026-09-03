@@ -15,6 +15,7 @@ shapes.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from app.integrations.registry import clear_adapters, register_adapter
@@ -32,6 +33,7 @@ from app.models.ndr import NDR
 from app.models.rto import RTO
 from app.models.shipment import ShipmentEvent
 from app.repositories.integration import IntegrationRepository
+from app.repositories.order import OrderRepository
 from app.repositories.shipment import ShipmentRepository
 from app.services.order_service import OrderService
 from app.services.shipment_service import ShipmentService
@@ -655,8 +657,8 @@ async def test_existing_shipment_awb_is_populated_once_shiprocket_assigns_one(
 # (`"AWL43729"`, needing `#` prepended). Both forms are covered. --------
 
 
-def _orders_show_response(channel_order_id: object) -> dict:
-    return {"data": {"channel_order_id": channel_order_id}}
+def _orders_show_response(channel_order_id: object, *, api_order_id: object = None) -> dict:
+    return {"data": {"channel_order_id": channel_order_id, "api_order_id": api_order_id}}
 
 
 async def test_shipment_sync_resolves_via_orders_show_fallback_with_hash_prefixed_channel_order_id(
@@ -769,6 +771,218 @@ async def test_shipment_sync_does_not_crash_on_a_numeric_channel_order_id(
     assert job.status == "partial"
     assert job.error_count == 1
     assert job.records_created == 0
+
+
+# --- Round 18: `channel_order_id` (e.g. `41531`, exercised above) is
+# Shiprocket's own internal per-channel sequence number for a native
+# Shopify-channel order -- confirmed live to never match any OMS order.
+# `api_order_id` from that same `/orders/show` response is confirmed
+# live, across multiple real orders, to equal `Order.external_id`
+# exactly for `source_system="shopify"`. Tried only as a fallback, only
+# once `channel_order_id` has already failed -- never a second
+# Shiprocket API call. -----------------------------------------------
+
+
+async def test_shipment_sync_still_matches_by_channel_order_id_when_it_resolves(
+    db_session: AsyncSession,
+) -> None:
+    """1: the existing channel_order_id match must still win outright,
+    completely unaffected by the new fallback -- even when a (deliberately
+    wrong) api_order_id is also present in the same response.
+    """
+    order = await _make_bare_order(db_session, order_number="#AWL92268")
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1544069864,
+                        "channel_order_id": None,
+                        "order_id": 1547850287,
+                        "awb": "",
+                    }
+                ]
+            ),
+            _orders_show_response("#AWL92268", api_order_id="9999999999999"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    shipment = await ShipmentRepository(db_session).get_by_source_external_id(
+        source_system="shiprocket", external_id="1544069864"
+    )
+    assert shipment is not None
+    assert shipment.order_id == order.id
+
+
+async def test_shipment_sync_resolves_native_shopify_channel_order_via_api_order_id_fallback(
+    db_session: AsyncSession,
+) -> None:
+    """2: the exact real production shape -- channel_order_id is a bare
+    Shiprocket-internal sequence number (41531) that matches no OMS
+    order, but api_order_id equals a real Shopify Order.external_id.
+    """
+    order, _created = await OrderRepository(db_session).upsert_by_external_id(
+        source_system="shopify",
+        external_id="6777362383037",
+        order_number="#AWL93156",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("699.00"),
+    )
+    await db_session.commit()
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {
+                        "id": 1555650745,
+                        "channel_order_id": None,
+                        "order_id": 1555650745,
+                        "awb": "AWB-NATIVE-1",
+                    }
+                ]
+            ),
+            _orders_show_response(41531, api_order_id="6777362383037"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "completed"
+    assert job.records_created == 1
+
+    shipment = await ShipmentRepository(db_session).get_by_awb("AWB-NATIVE-1")
+    assert shipment is not None
+    assert shipment.order_id == order.id
+
+
+async def test_api_order_id_fallback_is_scoped_to_shopify_source_system(
+    db_session: AsyncSession,
+) -> None:
+    """3: the same external_id value on a non-Shopify order must never be
+    matched through this fallback -- it is explicitly scoped to
+    `source_system="shopify"`, never a bare external_id lookup.
+    """
+    await OrderRepository(db_session).upsert_by_external_id(
+        source_system="some_other_system",
+        external_id="123456",
+        order_number="#OTHER-1",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+    )
+    await db_session.commit()
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 5001, "channel_order_id": None, "order_id": 5001, "awb": "AWB-SCOPED-1"}
+                ]
+            ),
+            _orders_show_response(41531, api_order_id="123456"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.records_created == 0
+
+    from app.models.shipment import Shipment
+
+    total = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total.scalar_one() == 0
+
+
+async def test_shipment_sync_unmatched_when_api_order_id_is_missing(
+    db_session: AsyncSession,
+) -> None:
+    """4: no api_order_id in the response at all -- must remain unmatched
+    exactly like before this fallback existed, no crash.
+    """
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 5002, "channel_order_id": None, "order_id": 5002, "awb": "AWB-MISSING-1"}
+                ]
+            ),
+            _orders_show_response("AWL-DOES-NOT-EXIST"),  # api_order_id defaults to None
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.error_count == 1
+    assert job.records_created == 0
+
+
+async def test_shipment_sync_unmatched_when_api_order_id_matches_no_oms_order(
+    db_session: AsyncSession,
+) -> None:
+    """5: a real-looking but unknown api_order_id -- must remain unmatched
+    exactly as before, never fabricated.
+    """
+    client = _StubClient(
+        [
+            _shipments_page(
+                records=[
+                    {"id": 5003, "channel_order_id": None, "order_id": 5003, "awb": "AWB-UNKNOWN-1"}
+                ]
+            ),
+            _orders_show_response(41531, api_order_id="9999999999999"),
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    integration = await _make_shiprocket_integration(db_session)
+
+    job = await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="shipments"
+    )
+
+    assert job.status == "partial"
+    assert job.error_count == 1
+    assert job.records_created == 0
+
+
+async def test_api_order_id_fallback_refuses_to_pick_between_ambiguous_matches() -> None:
+    """6: the DB's own `uq_orders_source_external_id` constraint makes two
+    real Orders sharing (source_system, external_id) impossible to create
+    through normal means -- so this exercises the defensive check
+    directly against a session double simulating that (never-expected)
+    state, proving the fallback refuses to arbitrarily choose one rather
+    than silently matching the wrong order.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.integrations.entity_sync import _resolve_shopify_order_by_api_order_id
+
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [MagicMock(), MagicMock()]
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=mock_result)
+
+    order = await _resolve_shopify_order_by_api_order_id(session, "6777362383037")
+
+    assert order is None
 
 
 async def test_shipment_sync_records_a_sync_error_when_orders_show_also_has_no_match(

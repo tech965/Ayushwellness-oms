@@ -15,12 +15,15 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import IntegrationError, NotFoundError
 from app.core.logging import get_logger
 from app.integrations.registry import get_adapter
 from app.models.integration import IntegrationCode
+from app.models.mixins import SourceSystem
+from app.models.order import Order
 from app.repositories.order import OrderRepository
 from app.repositories.payment import PaymentRepository
 from app.repositories.refund import RefundRepository
@@ -117,6 +120,45 @@ async def _resolve_order_by_channel_order_id(
     return None
 
 
+async def _resolve_shopify_order_by_api_order_id(
+    session: AsyncSession, api_order_id: Any | None
+) -> Any | None:
+    """Fallback for the one category `_resolve_order_by_channel_order_id`
+    can never resolve: a Shiprocket order created via Shiprocket's own
+    native Shopify channel connector, where `channel_order_id` (e.g.
+    `41531`) is confirmed live to be Shiprocket's own internal per-channel
+    sequence number -- unrelated to the Shopify order at all, not a
+    reformatted `order_number`. `api_order_id` from that same
+    `/orders/show/{id}` response is confirmed live, across multiple real
+    orders, to be exactly Shopify's own numeric order id -- i.e. exactly
+    `Order.external_id` for `source_system == "shopify"`. Compared as
+    strings throughout (a real Shopify id is well beyond float64's exact-
+    integer range, so any numeric comparison risks silent precision loss).
+
+    Never guesses past an exact match: if more than one `Order` somehow
+    shares this `external_id` (violates the DB's own
+    `uq_orders_source_external_id` constraint, so not expected in
+    practice, but never assumed), this refuses to arbitrarily pick one --
+    logs a warning and returns `None`, identical in effect to "no match
+    found", exactly like every other unmatched case in this module.
+    """
+    if not api_order_id:
+        return None
+    stmt = select(Order).where(
+        Order.source_system == SourceSystem.SHOPIFY,
+        Order.external_id == str(api_order_id),
+    )
+    orders = (await session.execute(stmt)).scalars().all()
+    if len(orders) > 1:
+        logger.warning(
+            "shiprocket_api_order_id_ambiguous_match",
+            api_order_id=str(api_order_id),
+            matched_order_count=len(orders),
+        )
+        return None
+    return orders[0] if orders else None
+
+
 async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple[Any, bool]:
     """Round 13 fix: a Shiprocket shipment this OMS already knows about
     (every one ever created went through `ShiprocketOperationsService.
@@ -182,6 +224,22 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
     only as a diagnostic (`predates_oms_coverage`), never used to skip
     the lookup. The Round 16 cache below already provides the correct
     "don't repeat a live call forever" bound.
+
+    Round 18 fix: the Round 14 note above ("`api_order_id`... confirmed
+    live to be unreliable, `None` for at least one real OMS-created
+    order") was correct only for that one category -- an order this OMS
+    pushed to Shiprocket itself, which never has a real Shopify
+    `api_order_id` to report (it wasn't created via Shiprocket's Shopify
+    channel connector; `channel_order_id` already resolves that category
+    correctly and is untouched). For the *other* category -- a genuinely
+    native-Shopify-channel order, where `channel_order_id` (e.g. `41531`)
+    is confirmed live to be Shiprocket's own internal per-channel sequence
+    number, unrelated to Shopify at all -- `api_order_id` is confirmed
+    live, across multiple real orders, to equal `Order.external_id`
+    exactly. `_resolve_shopify_order_by_api_order_id` is tried only as a
+    fallback, only once `channel_order_id` has already failed, and reads
+    `api_order_id` off the exact same `/orders/show` response already
+    fetched above -- no second Shiprocket API call.
 
     A shipment that still can't be resolved raises `NotFoundError`,
     exactly like `NDRService.upsert_synced_ndr` already does for an
@@ -329,6 +387,30 @@ async def _upsert_shipment(session: AsyncSession, data: dict[str, Any]) -> tuple
                 order = await _resolve_order_by_channel_order_id(session, fetched_channel_order_id)
                 if order is not None:
                     match_strategy = "orders_show_channel_order_id"
+
+                # Fallback for a native Shopify-channel order (spec:
+                # confirmed live across 3 real orders -- see
+                # `_resolve_shopify_order_by_api_order_id`'s docstring).
+                # Reads `api_order_id` off the exact same `/orders/show`
+                # response already fetched above -- never a second
+                # Shiprocket API call. Only attempted once
+                # `channel_order_id` has genuinely failed to resolve.
+                if order is None:
+                    raw_api_order_id = (
+                        body.get("api_order_id") if isinstance(body, dict) else None
+                    )
+                    order = await _resolve_shopify_order_by_api_order_id(
+                        session, raw_api_order_id
+                    )
+                    if order is not None:
+                        match_strategy = "orders_show_api_order_id"
+                        logger.info(
+                            "shiprocket_order_match_fallback",
+                            shiprocket_order_id=shiprocket_order_id,
+                            api_order_id=str(raw_api_order_id),
+                            source_system=SourceSystem.SHOPIFY,
+                            match_method="api_order_id",
+                        )
 
     logger.info(
         "shiprocket_shipment_order_resolution",

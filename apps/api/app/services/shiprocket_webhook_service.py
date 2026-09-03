@@ -18,7 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import IntegrationError
 from app.core.logging import get_logger
-from app.integrations.entity_sync import _resolve_order_by_channel_order_id
+from app.integrations.entity_sync import (
+    _resolve_order_by_channel_order_id,
+    _resolve_shopify_order_by_api_order_id,
+)
 from app.integrations.registry import get_adapter
 from app.integrations.shiprocket.normalizer import (
     TRACKING_NORMALIZER,
@@ -196,6 +199,15 @@ class ShiprocketWebhookService:
         two ingestion paths can't silently disagree about what counts as a
         match. Never raises — a lookup failure (network/permission) is
         logged and treated as "couldn't resolve," not "confirmed no match."
+
+        Tries `channel_order_id` first (unchanged); when that fails to
+        resolve, falls back to `api_order_id` -- confirmed live to equal
+        `Order.external_id` for `source_system="shopify"` on orders
+        created via Shiprocket's native Shopify channel connector, where
+        `channel_order_id` is Shiprocket's own internal sequence number
+        instead (see `_resolve_shopify_order_by_api_order_id`'s
+        docstring). Reads it off the exact same response already
+        fetched above -- no second Shiprocket API call.
         """
         adapter = get_adapter(IntegrationCode.SHIPROCKET)
         get_order = getattr(adapter, "get_order", None) if adapter else None
@@ -212,9 +224,25 @@ class ShiprocketWebhookService:
             return None
         body = (detail.get("data") if isinstance(detail, dict) else None) or detail
         raw_channel_order_id = body.get("channel_order_id") if isinstance(body, dict) else None
-        if not raw_channel_order_id:
-            return None
-        return await _resolve_order_by_channel_order_id(self.session, str(raw_channel_order_id))
+        order = (
+            await _resolve_order_by_channel_order_id(self.session, str(raw_channel_order_id))
+            if raw_channel_order_id
+            else None
+        )
+        if order is not None:
+            return order
+
+        raw_api_order_id = body.get("api_order_id") if isinstance(body, dict) else None
+        order = await _resolve_shopify_order_by_api_order_id(self.session, raw_api_order_id)
+        if order is not None:
+            logger.info(
+                "shiprocket_order_match_fallback",
+                shiprocket_order_id=shiprocket_order_id,
+                api_order_id=str(raw_api_order_id),
+                source_system=SourceSystem.SHOPIFY,
+                match_method="api_order_id",
+            )
+        return order
 
     async def _apply_identifier_updates(
         self, shipment: Shipment, ids: dict[str, str | None]
