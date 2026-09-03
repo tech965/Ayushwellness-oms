@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react"
 import {
+  Activity,
   BarChart3,
   Bell,
   Boxes,
@@ -11,6 +12,7 @@ import {
   History,
   LayoutDashboard,
   ListChecks,
+  Map,
   Package,
   PackageX,
   Phone,
@@ -69,7 +71,15 @@ export const navGroups: NavGroup[] = [
   },
   {
     label: "Intelligence",
-    items: [{ label: "Analytics", href: "/analytics", icon: BarChart3 }],
+    items: [
+      { label: "Analytics", href: "/analytics", icon: BarChart3 },
+      { label: "🇮🇳 Supply Intelligence", href: "/supply-intelligence", icon: Map },
+      {
+        label: "🤖 Operations Command Center",
+        href: "/operations-command-center",
+        icon: Activity,
+      },
+    ],
   },
   {
     label: "Operations",

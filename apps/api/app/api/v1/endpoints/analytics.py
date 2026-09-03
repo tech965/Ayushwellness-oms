@@ -23,6 +23,7 @@ from app.schemas.analytics import (
     PaymentStatusBreakdownResponse,
     PaymentStatusTimeseriesResponse,
     RecentActivityResponse,
+    ReturnsRefundsSummaryResponse,
     RevenueTimeseriesResponse,
     TopProduct,
 )
@@ -47,7 +48,11 @@ async def get_analytics_summary(
 async def get_orders_timeseries(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
-    interval: str = Query(default="day", pattern="^(day|week|month)$"),
+    # "hour" is only used by the dashboard's Today-vs-Yesterday comparison
+    # chart (a single IST calendar day has nothing useful to show at
+    # day/week/month granularity); every other caller keeps using
+    # day/week/month.
+    interval: str = Query(default="day", pattern="^(hour|day|week|month)$"),
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("analytics.read")),
 ) -> ApiResponse[OrdersTimeseriesResponse]:
@@ -132,6 +137,17 @@ async def get_courier_performance(
 ) -> ApiResponse[list[CourierPerformance]]:
     couriers = await AnalyticsService(session).get_courier_performance(date_from, date_to)
     return ApiResponse(data=couriers)
+
+
+@router.get("/returns-refunds", response_model=ApiResponse[ReturnsRefundsSummaryResponse])
+async def get_returns_refunds_summary(
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("analytics.read")),
+) -> ApiResponse[ReturnsRefundsSummaryResponse]:
+    summary = await AnalyticsService(session).get_returns_refunds_summary(date_from, date_to)
+    return ApiResponse(data=summary)
 
 
 @router.get("/recent-activity", response_model=ApiResponse[RecentActivityResponse])

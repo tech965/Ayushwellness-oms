@@ -22,6 +22,7 @@ from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.models.refund import Refund
 from app.models.returns import Return
 from app.models.rto import RTO
+from app.models.settings import AppSettings
 from app.models.shipment import Shipment, ShipmentEvent
 from app.models.telecalling import CallAttempt, OrderAssignment
 
@@ -53,6 +54,7 @@ __all__ = [
     "Refund",
     "Return",
     "RTO",
+    "AppSettings",
     "Shipment",
     "ShipmentEvent",
     "CallAttempt",
