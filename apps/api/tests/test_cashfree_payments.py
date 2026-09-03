@@ -733,3 +733,30 @@ async def test_settlement_analytics_requires_permission(
     async with await make_authenticated_client(db_session, permission_codes=[]) as authed_client:
         response = await authed_client.get("/api/v1/payments/cashfree/analytics/settlements")
     assert response.status_code == 403
+
+
+async def test_settlement_analytics_endpoint_returns_a_clean_empty_response_never_a_500(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Issue 3 investigation: confirms `GET /analytics/settlements` itself
+    has no bug that would turn "nothing synced yet" into a 500 — a
+    genuinely empty `cashfree_settlements` table (the state before the
+    settlement sync has ever been run, e.g. right after this feature's
+    migration first lands) must render as a real, structured empty
+    response (matching `test_settlement_summary_with_no_data_returns_
+    honest_empty_values` at the service layer, but exercised through the
+    real HTTP route + response_model serialization this time), never an
+    unhandled exception the global error handler would mask as "An
+    unexpected error occurred."
+    """
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get("/api/v1/payments/cashfree/analytics/settlements")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["unsettled_amount"] == "0"
+    assert data["upcoming_settlement_amount"] is None
+    assert data["last_settled_amount"] is None
+    assert data["history"] == []

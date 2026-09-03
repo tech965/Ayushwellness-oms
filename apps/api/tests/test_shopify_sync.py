@@ -130,6 +130,7 @@ def _orders_response(
     tags: list[str] | None = None,
     note: str | None = None,
     updated_at: str = "2026-01-02T00:00:00Z",
+    fulfillment_status: str = "UNFULFILLED",
 ) -> dict:
     return {
         "orders": {
@@ -144,7 +145,7 @@ def _orders_response(
                         "cancelledAt": None,
                         "currencyCode": "INR",
                         "displayFinancialStatus": "PAID",
-                        "displayFulfillmentStatus": "UNFULFILLED",
+                        "displayFulfillmentStatus": fulfillment_status,
                         "tags": tags,
                         "note": note,
                         "subtotalPriceSet": {"shopMoney": {"amount": "500.00"}},
@@ -433,6 +434,46 @@ async def test_order_tags_are_returned_as_a_structured_list_not_a_joined_string(
     )
     assert isinstance(order.shopify_tags, list)
     assert order.shopify_tags == ["A", "B", "C"]
+
+
+# Issue 2: Orders page "Shipment Status" column must be Shopify-sourced
+# (`Order.fulfillment_status`), never Shiprocket's `Shipment.current_status`.
+
+
+async def test_resync_updates_fulfillment_status_on_an_existing_order(
+    db_session: AsyncSession,
+) -> None:
+    """A historical order must pick up Shopify's current fulfillment
+    status on its NEXT resync — `fulfillment_status` is part of the same
+    always-overwritten `data` dict as every other Shopify-owned field
+    (`OrderService.upsert_synced_order`), so no separate backfill path is
+    needed; this proves that in practice, not just by code inspection.
+    """
+    client = _StubClient(
+        [
+            _orders_response("514", fulfillment_status="UNFULFILLED"),
+            _orders_response(
+                "514", fulfillment_status="FULFILLED", updated_at="2026-01-03T00:00:00Z"
+            ),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+    service = SyncService(db_session)
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="514"
+    )
+    assert order.fulfillment_status == "unfulfilled"
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    await db_session.refresh(order)
+    assert order.fulfillment_status == "fulfilled"
 
 
 # 19. Partial sync failure

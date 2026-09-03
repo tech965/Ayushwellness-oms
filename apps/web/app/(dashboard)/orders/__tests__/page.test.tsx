@@ -4,6 +4,7 @@ import { screen } from "@testing-library/react"
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import OrdersPage from "@/app/(dashboard)/orders/page"
 import { useOrders } from "@/services/orders"
+import type { Order } from "@/types/order"
 
 let mockSearchParams = new URLSearchParams()
 
@@ -107,6 +108,61 @@ describe("OrdersPage", () => {
     expect(screen.getByText("OMS-1001")).toBeInTheDocument()
   })
 
+  // Issue 2 regression: the visible-by-default "Shipment Status" column
+  // must render Shopify's `fulfillment_status`, never Shiprocket's
+  // `shipment_status` — Shiprocket's own status is still available, just
+  // under a separate "Courier Status" column that stays off by default
+  // (same as before), so the two sources are never conflated in the one
+  // column most viewers actually see.
+  it("renders the Shipment Status column from Shopify fulfillment_status, not Shiprocket shipment_status", () => {
+    const order: Order = {
+      id: "1",
+      order_number: "OMS-SHIP-SRC",
+      shopify_order_id: "1001",
+      customer_id: null,
+      order_datetime: "2026-01-01T00:00:00Z",
+      currency: "INR",
+      subtotal: "100.00",
+      discount_amount: "0.00",
+      tax_amount: "0.00",
+      shipping_charge: "0.00",
+      total_amount: "100.00",
+      payment_type: "prepaid",
+      payment_status: "paid",
+      status: "confirmed",
+      fulfillment_status: "unfulfilled",
+      cancellation_status: "none",
+      notes: null,
+      shopify_tags: null,
+      shopify_order_note: null,
+      shipping_address: null,
+      billing_address: null,
+      source_system: "shopify",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      shipment_status: "pending",
+    }
+
+    mockedUseOrders.mockReturnValue(
+      baseQueryResult({
+        data: {
+          success: true,
+          message: "Success",
+          data: [order],
+          meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+        },
+      })
+    )
+    renderWithProviders(<OrdersPage />)
+
+    // Shopify's fulfillment_status ("unfulfilled") renders in the
+    // default-visible Shipment Status column...
+    expect(screen.getByText("Unfulfilled")).toBeInTheDocument()
+    // ...while Shiprocket's shipment_status ("pending") is not shown,
+    // because its column (Courier Status) is off by default.
+    expect(screen.queryByText("Pending")).not.toBeInTheDocument()
+  })
+
   // Regression coverage for the reported "Pending filter doesn't
   // correctly filter" bug: a dashboard drill-down link (e.g. from the
   // Order Status breakdown or the "Pending Orders" KPI) lands on
@@ -172,6 +228,70 @@ describe("OrdersPage", () => {
     expect(screen.queryByText("Shipment Status: Pending")).not.toBeInTheDocument()
     expect(screen.queryByText("Payment Status: Pending")).not.toBeInTheDocument()
     mockSearchParams = new URLSearchParams()
+  })
+
+  // Regression test: `useOrders` keeps the previous filter's rows on
+  // screen (`placeholderData`) while a newly filtered request is in
+  // flight, so `isLoading` alone stays false — this proves the page
+  // shows a visible "still updating" signal instead of silently
+  // presenting the old filter's rows as if they already matched the new
+  // (already-updated) filter chips, which is what the reported "filter
+  // says one range, table shows another" symptom actually was.
+  it("shows an updating indicator instead of silently presenting stale placeholder rows", () => {
+    const ORDER_ROW: Order = {
+      id: "1",
+      order_number: "OMS-STALE-1",
+      shopify_order_id: null,
+      customer_id: null,
+      order_datetime: "2026-01-01T00:00:00Z",
+      currency: "INR",
+      subtotal: "100.00",
+      discount_amount: "0.00",
+      tax_amount: "0.00",
+      shipping_charge: "0.00",
+      total_amount: "100.00",
+      payment_type: "prepaid",
+      payment_status: "pending",
+      status: "pending",
+      fulfillment_status: "unfulfilled",
+      cancellation_status: "none",
+      notes: null,
+      shopify_tags: null,
+      shopify_order_note: null,
+      shipping_address: null,
+      billing_address: null,
+      source_system: "manual",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    }
+    const data = {
+      success: true,
+      message: "Success",
+      data: [ORDER_ROW],
+      meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+    }
+
+    mockedUseOrders.mockReturnValue(baseQueryResult({ data, isFetching: true }))
+    renderWithProviders(<OrdersPage />)
+    expect(screen.getByText("Updating results for the selected filters…")).toBeInTheDocument()
+  })
+
+  it("shows no updating indicator once the request for the current filters has settled", () => {
+    mockedUseOrders.mockReturnValue(
+      baseQueryResult({
+        data: {
+          success: true,
+          message: "Success",
+          data: [],
+          meta: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+        },
+        isFetching: false,
+      })
+    )
+    renderWithProviders(<OrdersPage />)
+    expect(
+      screen.queryByText("Updating results for the selected filters…")
+    ).not.toBeInTheDocument()
   })
 
   it("reads tag=VIP from the URL and requests it from the API", () => {
