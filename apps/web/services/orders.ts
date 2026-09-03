@@ -28,6 +28,7 @@ function toOrderQueryParams(params: OrderListFilters) {
     shipment_status: params.shipment_status,
     courier_id: params.courier_id,
     sku: params.sku,
+    tag: params.tag,
     amount_min: params.amount_min || undefined,
     amount_max: params.amount_max || undefined,
     date_from: params.date_from,

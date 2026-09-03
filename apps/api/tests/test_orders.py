@@ -226,6 +226,53 @@ async def test_order_detail_embeds_customer_when_linked(
         assert data["customer"]["email"] == "jane@example.com"
 
 
+async def test_order_detail_and_list_expose_shopify_tags_and_note(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Issue 4: Shopify-synced tags/note must reach the Orders API,
+    distinct from the OMS-internal `notes` field.
+    """
+    from datetime import UTC, datetime
+
+    repo = OrderRepository(db_session)
+    order, _ = await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="order_tags_1",
+        order_number="OMS-TAGNOTE-1",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+        shopify_tags=["Prepaid", "VIP"],
+        shopify_order_note="Please deliver after 6 PM",
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        detail = await auth_client.get(f"/api/v1/orders/{order.id}")
+        detail_data = detail.json()["data"]
+        assert detail_data["shopify_tags"] == ["Prepaid", "VIP"]
+        assert detail_data["shopify_order_note"] == "Please deliver after 6 PM"
+        assert detail_data["notes"] is None
+
+        listing = await auth_client.get("/api/v1/orders", params={"q": "OMS-TAGNOTE-1"})
+        list_row = listing.json()["data"][0]
+        assert list_row["shopify_tags"] == ["Prepaid", "VIP"]
+        assert list_row["shopify_order_note"] == "Please deliver after 6 PM"
+
+
+async def test_manually_created_order_has_no_shopify_tags_or_note(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        created = await auth_client.post("/api/v1/orders", json=_order_payload("OMS-MANUAL-1"))
+        data = created.json()["data"]
+        assert data["shopify_tags"] is None
+        assert data["shopify_order_note"] is None
+
+
 async def test_order_detail_customer_is_null_without_a_linked_customer(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:

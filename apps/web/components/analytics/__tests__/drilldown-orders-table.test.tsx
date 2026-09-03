@@ -36,6 +36,8 @@ const ORDER: Order = {
   fulfillment_status: "fulfilled",
   cancellation_status: "none",
   notes: null,
+  shopify_tags: null,
+  shopify_order_note: null,
   shipping_address: null,
   billing_address: null,
   source_system: "shopify",

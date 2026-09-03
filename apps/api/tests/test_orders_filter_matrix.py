@@ -354,6 +354,43 @@ async def test_sku_filter(db_session: AsyncSession, make_authenticated_client) -
         assert [o["order_number"] for o in response.json()["data"]] == ["OMS-SKU-1"]
 
 
+# --- Shopify tag filter (Issue 4) -------------------------------------------
+
+
+async def test_tag_filter_matches_orders_carrying_that_shopify_tag(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    from app.repositories.order import OrderRepository
+
+    repo = OrderRepository(db_session)
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="tag-vip",
+        order_number="OMS-TAG-VIP",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+        shopify_tags=["VIP", "Repeat Customer"],
+    )
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="tag-cod",
+        order_number="OMS-TAG-COD",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+        shopify_tags=["COD"],
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/orders", params={"tag": "VIP"})
+        assert [o["order_number"] for o in response.json()["data"]] == ["OMS-TAG-VIP"]
+
+        none_match = await auth_client.get("/api/v1/orders", params={"tag": "High Value"})
+        assert none_match.json()["data"] == []
+
+
 # --- 10. Search by order number / customer name / phone / email -----------
 
 

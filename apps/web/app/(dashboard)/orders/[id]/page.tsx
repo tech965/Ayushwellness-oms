@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams, useSearchParams } from "next/navigation"
-import { Mail, MapPin, Phone, Truck } from "lucide-react"
+import { Mail, MapPin, Phone, Tag, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { CashfreePaymentCard } from "@/components/orders/cashfree-payment-card"
@@ -11,6 +11,7 @@ import { Breadcrumbs } from "@/components/shared/breadcrumbs"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -193,6 +194,33 @@ function OrderDetailContent() {
                 />
               </CardContent>
             </Card>
+
+            {(order.shopify_tags?.length || order.shopify_order_note) && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-1.5">
+                    <Tag className="size-4" />
+                    Shopify Tags &amp; Order Note
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-3">
+                  {order.shopify_tags && order.shopify_tags.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {order.shopify_tags.map((tag) => (
+                        <Badge key={tag} variant="secondary">
+                          {tag}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
+                  {order.shopify_order_note && (
+                    <p className="text-muted-foreground text-sm italic">
+                      &ldquo;{order.shopify_order_note}&rdquo;
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            )}
 
             <div className="grid gap-4 lg:grid-cols-2">
               <Card>

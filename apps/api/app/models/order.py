@@ -103,6 +103,18 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     )
 
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Shopify-owned order tags/note (spec: "Issue 4" — tags/note import).
+    # Deliberately separate from `notes` above: `notes` is OMS-internal,
+    # staff-entered free text (set via `OrderCreateRequest.notes` at
+    # manual-order-creation time and never touched by sync); these two
+    # columns are the opposite — always overwritten wholesale on every
+    # Shopify sync (`ShopifyOrderNormalizer` always includes both keys,
+    # even when empty/None) so a resync's tag list/note exactly mirrors
+    # Shopify's current state — added/removed tags and note edits/clears
+    # are reflected, never appended or left stale. Never written to by
+    # OMS staff.
+    shopify_tags: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
+    shopify_order_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Point-in-time snapshot of the address used for this order — not a
     # CustomerAddress FK, matching OrderItem's existing snapshot
     # convention (an order's shipping/billing address must never change

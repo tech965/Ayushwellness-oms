@@ -90,6 +90,8 @@ describe("OrdersPage", () => {
               fulfillment_status: "unfulfilled",
               cancellation_status: "none",
               notes: null,
+              shopify_tags: null,
+              shopify_order_note: null,
               shipping_address: null,
               billing_address: null,
               source_system: "manual",
@@ -169,6 +171,18 @@ describe("OrdersPage", () => {
     expect(screen.getByText("Order Status: Pending")).toBeInTheDocument()
     expect(screen.queryByText("Shipment Status: Pending")).not.toBeInTheDocument()
     expect(screen.queryByText("Payment Status: Pending")).not.toBeInTheDocument()
+    mockSearchParams = new URLSearchParams()
+  })
+
+  it("reads tag=VIP from the URL and requests it from the API", () => {
+    mockSearchParams = new URLSearchParams("tag=VIP")
+    mockedUseOrders.mockReturnValue(baseQueryResult({}))
+
+    renderWithProviders(<OrdersPage />)
+
+    expect(mockedUseOrders).toHaveBeenCalledWith(expect.objectContaining({ tag: "VIP" }))
+    expect(screen.getByText("Tag: VIP")).toBeInTheDocument()
+
     mockSearchParams = new URLSearchParams()
   })
 

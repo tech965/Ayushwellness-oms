@@ -49,6 +49,14 @@ export interface Order {
   fulfillment_status: FulfillmentStatus
   cancellation_status: CancellationStatus
   notes: string | null
+  // Shopify-owned tags/order note — distinct from `notes` above, which
+  // is OMS-internal staff text set at manual-order-creation time and
+  // never touched by Shopify sync. `null` on `shopify_tags` means "this
+  // order has never synced from Shopify" (e.g. a manually created
+  // order); every Shopify-synced order always has a real (possibly
+  // empty) array.
+  shopify_tags: string[] | null
+  shopify_order_note: string | null
   shipping_address: OrderAddress | null
   billing_address: OrderAddress | null
   source_system: string | null
@@ -105,6 +113,7 @@ export interface OrderListFilters {
   shipment_status?: string
   courier_id?: string
   sku?: string
+  tag?: string
   amount_min?: string
   amount_max?: string
   date_from?: string

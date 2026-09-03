@@ -77,6 +77,14 @@ class OrderResponse(BaseModel):
     fulfillment_status: FulfillmentStatus
     cancellation_status: CancellationStatus
     notes: str | None
+    # Shopify-owned tags/order note — see `Order.shopify_tags`/
+    # `Order.shopify_order_note` in app/models/order.py for why these are
+    # separate from `notes` above (that one is OMS-internal staff text).
+    # `None` on the DB row means "never synced from Shopify" (e.g. a
+    # manually created order) — every Shopify-synced order always has a
+    # real (possibly empty) list, never `None`, per `normalize_tags`.
+    shopify_tags: list[str] | None = None
+    shopify_order_note: str | None = None
     shipping_address: dict | None
     billing_address: dict | None
     source_system: str | None

@@ -300,6 +300,29 @@ _FULFILLMENT_STATUS_MAP: dict[str, FulfillmentStatus] = {
 _COD_GATEWAY_MARKERS = ("cod", "cash on delivery", "cash_on_delivery")
 
 
+def normalize_tags(value: Any) -> list[str]:
+    """Order.tags` on Shopify's GraphQL Admin API is `[String!]!`; the
+    REST/webhook shape (`webhook_shapes.order_webhook_to_graphql_shape`)
+    gives the same data as a comma-joined string instead -- unlike
+    `ShopifyProductNormalizer.normalize`, which keeps the product's tags
+    as a single comma-joined string column, this always converges to a
+    `list[str]` (Order.tags is stored as a structured JSON array — see
+    `app/models/order.py`). Always returns a list (never `None`) so a
+    resync always fully replaces the stored list with Shopify's current
+    tags, satisfying the idempotent-resync/removed-tags-removed
+    requirement for free, with no dedup/append logic needed anywhere.
+    """
+    if isinstance(value, list):
+        return [cleaned for t in value if (cleaned := _clean_text(t, max_len=255))]
+    if isinstance(value, str):
+        return [
+            cleaned
+            for t in value.split(",")
+            if (cleaned := _clean_text(t.strip(), max_len=255))
+        ]
+    return []
+
+
 def normalize_payment_status(raw_status: str | None) -> PaymentStatus:
     return _PAYMENT_STATUS_MAP.get((raw_status or "").upper(), PaymentStatus.PENDING)
 
@@ -345,6 +368,14 @@ class ShopifyOrderNormalizer(OrderNormalizer):
             "fulfillment_status": normalize_fulfillment_status(raw.get("displayFulfillmentStatus")),
             "payment_type": normalize_payment_type(raw.get("paymentGatewayNames")),
             "is_cancelled": bool(raw.get("cancelledAt")),
+            # Always included (even when empty/None) so every sync fully
+            # replaces the stored value with Shopify's current state —
+            # see `normalize_tags`'s docstring and `Order.shopify_tags`/
+            # `Order.shopify_order_note` in app/models/order.py. Distinct
+            # from `Order.notes`, the OMS-internal staff note field this
+            # normalizer has never touched and still doesn't.
+            "shopify_tags": normalize_tags(raw.get("tags")),
+            "shopify_order_note": _clean_text(raw.get("note"), max_len=5000),
             "shipping_address": normalize_address(raw.get("shippingAddress")),
             "billing_address": normalize_address(raw.get("billingAddress")),
             "external_created_at": _parse_datetime(raw.get("createdAt")),

@@ -12,7 +12,9 @@ from app.integrations.shopify.normalizer import (
     normalize_fulfillment_status,
     normalize_payment_status,
     normalize_payment_type,
+    normalize_tags,
 )
+from app.integrations.shopify.webhook_shapes import order_webhook_to_graphql_shape
 from app.models.enums import FulfillmentStatus, PaymentStatus, PaymentType
 
 
@@ -201,6 +203,98 @@ def test_order_normalization_maps_totals_addresses_and_line_items() -> None:
     # per-line discount.
     assert item["total_amount"] == Decimal("950.00")
     assert item["discount_amount"] == Decimal("50.00")
+
+
+# Issue 4: Shopify order tags/note import.
+
+
+def _minimal_order_raw(**overrides) -> dict:
+    base = {
+        "id": "gid://shopify/Order/1",
+        "name": "#1",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z",
+        "cancelledAt": None,
+        "currencyCode": "INR",
+        "displayFinancialStatus": "PAID",
+        "displayFulfillmentStatus": "UNFULFILLED",
+        "subtotalPriceSet": {"shopMoney": {"amount": "100.00"}},
+        "totalDiscountsSet": {"shopMoney": {"amount": "0.00"}},
+        "totalTaxSet": {"shopMoney": {"amount": "0.00"}},
+        "totalPriceSet": {"shopMoney": {"amount": "100.00"}},
+        "shippingLine": None,
+        "paymentGatewayNames": ["Razorpay"],
+        "customer": None,
+        "shippingAddress": None,
+        "billingAddress": None,
+        "lineItems": {"edges": []},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_order_normalization_maps_tags_and_note() -> None:
+    raw = _minimal_order_raw(
+        tags=["COD", "VIP", "Repeat Customer"], note="Please deliver after 6 PM"
+    )
+    data = ShopifyOrderNormalizer().normalize(raw)
+    assert data["shopify_tags"] == ["COD", "VIP", "Repeat Customer"]
+    assert data["shopify_order_note"] == "Please deliver after 6 PM"
+
+
+def test_order_normalization_handles_missing_tags_and_note_without_crashing() -> None:
+    """Neither key present on the raw payload (e.g. an older cached
+    response, or a field Shopify omitted) -- must degrade to an empty
+    list/None, matching every other field's `.get()`-defensive handling,
+    never crash the sync.
+    """
+    raw = _minimal_order_raw()
+    assert "tags" not in raw and "note" not in raw
+    data = ShopifyOrderNormalizer().normalize(raw)
+    assert data["shopify_tags"] == []
+    assert data["shopify_order_note"] is None
+
+
+def test_order_normalization_handles_explicit_null_tags_and_note() -> None:
+    raw = _minimal_order_raw(tags=None, note=None)
+    data = ShopifyOrderNormalizer().normalize(raw)
+    assert data["shopify_tags"] == []
+    assert data["shopify_order_note"] is None
+
+
+def test_normalize_tags_accepts_a_graphql_list() -> None:
+    assert normalize_tags(["COD", "VIP"]) == ["COD", "VIP"]
+
+
+def test_normalize_tags_accepts_a_rest_comma_joined_string() -> None:
+    assert normalize_tags("COD, VIP, Repeat Customer") == ["COD", "VIP", "Repeat Customer"]
+
+
+def test_normalize_tags_drops_blank_entries() -> None:
+    assert normalize_tags("COD, , VIP,") == ["COD", "VIP"]
+
+
+def test_normalize_tags_of_none_is_an_empty_list() -> None:
+    assert normalize_tags(None) == []
+
+
+def test_order_webhook_shape_translates_rest_tags_and_note_for_the_normalizer() -> None:
+    """REST webhook delivery shape (`orders/updated`) -> the same
+    normalizer the GraphQL pull-sync path uses, unmodified.
+    """
+    rest_payload = {
+        "id": 900,
+        "name": "#900",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "tags": "COD, VIP",
+        "note": "Call before delivery",
+        "line_items": [],
+    }
+    graphql_shape = order_webhook_to_graphql_shape(rest_payload)
+    data = ShopifyOrderNormalizer().normalize(graphql_shape)
+    assert data["shopify_tags"] == ["COD", "VIP"]
+    assert data["shopify_order_note"] == "Call before delivery"
 
 
 def test_line_item_with_no_discount_still_gets_a_nonzero_total() -> None:

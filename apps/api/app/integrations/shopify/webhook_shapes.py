@@ -104,6 +104,12 @@ def order_webhook_to_graphql_shape(raw: dict[str, Any]) -> dict[str, Any]:
         "displayFulfillmentStatus": _REST_FULFILLMENT_STATUS_TO_GRAPHQL.get(
             raw.get("fulfillment_status"), "UNFULFILLED"
         ),
+        # REST gives a comma-joined string for tags (same shape as the
+        # product webhook below); `note` is already a plain string on
+        # both shapes -- `_normalize_tags`/`_clean_text` in normalizer.py
+        # accept either shape unchanged.
+        "tags": raw.get("tags"),
+        "note": raw.get("note"),
         "paymentGatewayNames": raw.get("payment_gateway_names"),
         "customer": {"id": _gid("Customer", customer.get("id"))} if customer.get("id") else {},
         "subtotalPriceSet": _amount(raw.get("subtotal_price")),

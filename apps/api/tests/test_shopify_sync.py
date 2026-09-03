@@ -124,7 +124,13 @@ def _products_response(product_id: str, variant_id: str, sku: str) -> dict:
     }
 
 
-def _orders_response(order_id: str) -> dict:
+def _orders_response(
+    order_id: str,
+    *,
+    tags: list[str] | None = None,
+    note: str | None = None,
+    updated_at: str = "2026-01-02T00:00:00Z",
+) -> dict:
     return {
         "orders": {
             "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -134,11 +140,13 @@ def _orders_response(order_id: str) -> dict:
                         "id": f"gid://shopify/Order/{order_id}",
                         "name": f"#{order_id}",
                         "createdAt": "2026-01-01T00:00:00Z",
-                        "updatedAt": "2026-01-02T00:00:00Z",
+                        "updatedAt": updated_at,
                         "cancelledAt": None,
                         "currencyCode": "INR",
                         "displayFinancialStatus": "PAID",
                         "displayFulfillmentStatus": "UNFULFILLED",
+                        "tags": tags,
+                        "note": note,
                         "subtotalPriceSet": {"shopMoney": {"amount": "500.00"}},
                         "totalDiscountsSet": {"shopMoney": {"amount": "0.00"}},
                         "totalTaxSet": {"shopMoney": {"amount": "0.00"}},
@@ -316,6 +324,115 @@ async def test_resyncing_the_same_order_does_not_duplicate(db_session: AsyncSess
 
     total = await db_session.execute(select(func.count()).select_from(Order))
     assert total.scalar_one() == 1
+
+
+# Issue 4: Shopify order tags/note import.
+
+
+async def test_order_sync_imports_tags_and_note(db_session: AsyncSession) -> None:
+    client = _StubClient(
+        [_orders_response("510", tags=["COD", "VIP"], note="Please deliver after 6 PM")]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="510"
+    )
+    assert order is not None
+    assert order.shopify_tags == ["COD", "VIP"]
+    assert order.shopify_order_note == "Please deliver after 6 PM"
+    # Distinct from the OMS-internal `notes` field -- Shopify sync must
+    # never write to it.
+    assert order.notes is None
+
+
+async def test_order_sync_with_no_tags_or_note_stores_empty_list_and_none(
+    db_session: AsyncSession,
+) -> None:
+    client = _StubClient([_orders_response("511")])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="511"
+    )
+    assert order is not None
+    assert order.shopify_tags == []
+    assert order.shopify_order_note is None
+
+
+async def test_resync_reflects_new_and_removed_tags_and_updated_note(
+    db_session: AsyncSession,
+) -> None:
+    """Idempotent resync: Shopify is the source of truth for tags/note --
+    a resync must fully replace the stored value, not append to it, so an
+    added tag appears, a removed tag disappears, and an edited note
+    overwrites the old one (spec section D).
+    """
+    client = _StubClient(
+        [
+            _orders_response(
+                "512", tags=["COD", "Repeat Customer"], note="Call before delivery",
+                updated_at="2026-01-02T00:00:00Z",
+            ),
+            _orders_response(
+                "512", tags=["VIP", "High Value"], note="Leave at the gate",
+                updated_at="2026-01-03T00:00:00Z",
+            ),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+    service = SyncService(db_session)
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="512"
+    )
+    assert order.shopify_tags == ["COD", "Repeat Customer"]
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    await db_session.refresh(order)
+    # "COD"/"Repeat Customer" are gone, replaced wholesale -- not appended.
+    assert order.shopify_tags == ["VIP", "High Value"]
+    assert order.shopify_order_note == "Leave at the gate"
+
+    total = await db_session.execute(select(func.count()).select_from(Order))
+    assert total.scalar_one() == 1
+
+
+async def test_order_tags_are_returned_as_a_structured_list_not_a_joined_string(
+    db_session: AsyncSession,
+) -> None:
+    """Regression guard distinguishing this from `Product.tags` (a single
+    comma-joined string column) -- Order tags must stay a real list.
+    """
+    client = _StubClient([_orders_response("513", tags=["A", "B", "C"])])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="513"
+    )
+    assert isinstance(order.shopify_tags, list)
+    assert order.shopify_tags == ["A", "B", "C"]
 
 
 # 19. Partial sync failure

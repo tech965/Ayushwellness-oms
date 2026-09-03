@@ -63,6 +63,7 @@ const FILTER_DEFAULTS = {
   shipment_status: "",
   courier_id: "",
   sku: "",
+  tag: "",
   amount_min: "",
   amount_max: "",
   date_from: "",
@@ -264,6 +265,27 @@ const ALL_COLUMNS: ColumnDef[] = [
       cell: (o) => formatDate(o.created_at),
     },
   },
+  {
+    id: "shopify_tags",
+    label: "Shopify Tags",
+    defaultVisible: false,
+    column: {
+      id: "shopify_tags",
+      header: "Shopify Tags",
+      cell: (o) =>
+        o.shopify_tags?.length ? (
+          <div className="flex max-w-[200px] flex-wrap gap-1">
+            {o.shopify_tags.map((tag) => (
+              <Badge key={tag} variant="secondary" className="text-[10px]">
+                {tag}
+              </Badge>
+            ))}
+          </div>
+        ) : (
+          "—"
+        ),
+    },
+  },
 ]
 
 const COLUMN_STORAGE_KEY = "oms_orders_visible_columns"
@@ -338,10 +360,12 @@ function OrdersPageContent() {
 
   const [searchInput, setSearchInput] = React.useState(filters.q)
   const [skuInput, setSkuInput] = React.useState(filters.sku)
+  const [tagInput, setTagInput] = React.useState(filters.tag)
   const [amountMinInput, setAmountMinInput] = React.useState(filters.amount_min)
   const [amountMaxInput, setAmountMaxInput] = React.useState(filters.amount_max)
   const debouncedSearch = useDebouncedValue(searchInput, 400)
   const debouncedSku = useDebouncedValue(skuInput, 400)
+  const debouncedTag = useDebouncedValue(tagInput, 400)
   const debouncedAmountMin = useDebouncedValue(amountMinInput, 400)
   const debouncedAmountMax = useDebouncedValue(amountMaxInput, 400)
 
@@ -353,6 +377,10 @@ function OrdersPageContent() {
     setFilters({ sku: debouncedSku })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSku])
+  React.useEffect(() => {
+    setFilters({ tag: debouncedTag })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedTag])
   React.useEffect(() => {
     setFilters({ amount_min: debouncedAmountMin })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -377,6 +405,7 @@ function OrdersPageContent() {
     shipment_status: filters.shipment_status || undefined,
     courier_id: filters.courier_id || undefined,
     sku: filters.sku || undefined,
+    tag: filters.tag || undefined,
     amount_min: filters.amount_min || undefined,
     amount_max: filters.amount_max || undefined,
     date_from: filters.date_from || undefined,
@@ -404,6 +433,7 @@ function OrdersPageContent() {
   function handleClear() {
     setSearchInput("")
     setSkuInput("")
+    setTagInput("")
     setAmountMinInput("")
     setAmountMaxInput("")
     clearFilters()
@@ -420,6 +450,7 @@ function OrdersPageContent() {
   function clearField(field: string) {
     if (field === "q") setSearchInput("")
     if (field === "sku") setSkuInput("")
+    if (field === "tag") setTagInput("")
     if (field === "amount_min") setAmountMinInput("")
     if (field === "amount_max") setAmountMaxInput("")
     if (field === "date") {
@@ -468,6 +499,7 @@ function OrdersPageContent() {
     },
     filters.courier_id && { key: "courier_id", label: `Courier: ${courierName ?? "—"}` },
     filters.sku && { key: "sku", label: `SKU: ${filters.sku}` },
+    filters.tag && { key: "tag", label: `Tag: ${filters.tag}` },
     filters.amount_min && { key: "amount_min", label: `Min ₹${filters.amount_min}` },
     filters.amount_max && { key: "amount_max", label: `Max ₹${filters.amount_max}` },
     (filters.date_from || filters.date_to) && {
@@ -653,6 +685,12 @@ function OrdersPageContent() {
               value={skuInput}
               onChange={(e) => setSkuInput(e.target.value)}
               placeholder="SKU / Product"
+              className="w-[140px]"
+            />
+            <Input
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              placeholder="Shopify Tag"
               className="w-[140px]"
             />
             <Input

@@ -111,6 +111,8 @@ query Orders($first: Int!, $after: String, $query: String) {
         currencyCode
         displayFinancialStatus
         displayFulfillmentStatus
+        tags
+        note
         subtotalPriceSet { shopMoney { amount } }
         totalDiscountsSet { shopMoney { amount } }
         totalTaxSet { shopMoney { amount } }
