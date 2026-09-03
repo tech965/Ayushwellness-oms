@@ -50,6 +50,23 @@ export function useUrlFilters<T extends FilterRecord>(defaults: T) {
       // `resetPage()` convention this hook replaces.
       if (!("page" in patch)) params.delete("page")
       const query = params.toString()
+      // Pre-demo fix: several pages (Orders, Payments) sync a debounced
+      // text input back to the URL via `useEffect(() => setFilters({q:
+      // debounced}), [debounced])` -- that effect always fires once on
+      // mount, with the value the URL already has, since a dependency
+      // "changing" from its initial undefined state still counts as a
+      // change to React. Without this check, every single mount of those
+      // pages fired a real `router.replace` (a same-document History API
+      // navigation) that changed nothing. Across a demo session of
+      // repeated back-and-forth navigation between pages, these
+      // genuinely-no-op navigations added up and were the concrete,
+      // reproducible source of enough same-document navigations to trip
+      // Chrome's own "Throttling navigation" rate limiter. Skipping a
+      // call that would produce the exact same URL the address bar
+      // already shows changes no observable behavior for a real filter
+      // change (query only equals the current string when nothing this
+      // patch does would alter it).
+      if (query === searchParams.toString()) return
       router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
     },
     [defaults, pathname, router, searchParams]
