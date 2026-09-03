@@ -13,8 +13,8 @@ import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
+import { TelecallerRosterField } from "@/components/team/telecaller-roster-field"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -33,7 +33,7 @@ import {
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDateTime, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import { useAssignCheckouts, useTeamCheckouts, useTeamTelecallers } from "@/services/team"
+import { useAssignCheckouts, useTeamCheckouts } from "@/services/team"
 import { CALL_OUTCOME_OPTIONS, type AssignedCheckout } from "@/types/telecalling"
 
 const FILTER_DEFAULTS = {
@@ -60,7 +60,6 @@ export default function TeamCheckoutsPage() {
 function TeamCheckoutsContent() {
   const router = useRouter()
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
-  const telecallersQuery = useTeamTelecallers()
   const assignMutation = useAssignCheckouts()
 
   const dateRange: DateRangeValue = {
@@ -290,38 +289,13 @@ function TeamCheckoutsContent() {
               </SelectContent>
             </Select>
 
-            {mode === "manual" ? (
-              <Select value={manualTelecallerId} onValueChange={setManualTelecallerId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select telecaller" />
-                </SelectTrigger>
-                <SelectContent>
-                  {telecallersQuery.data?.map((t) => (
-                    <SelectItem key={t.telecaller_id} value={t.telecaller_id}>
-                      {t.telecaller_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-                  Distribute equally across
-                </p>
-                {telecallersQuery.data?.map((t) => (
-                  <label
-                    key={t.telecaller_id}
-                    className="flex items-center gap-2 text-sm"
-                  >
-                    <Checkbox
-                      checked={equalTelecallerIds.has(t.telecaller_id)}
-                      onCheckedChange={() => toggleEqualTelecaller(t.telecaller_id)}
-                    />
-                    {t.telecaller_name}
-                  </label>
-                ))}
-              </div>
-            )}
+            <TelecallerRosterField
+              mode={mode}
+              manualValue={manualTelecallerId}
+              onManualChange={setManualTelecallerId}
+              selectedIds={equalTelecallerIds}
+              onToggle={toggleEqualTelecaller}
+            />
           </div>
 
           <DialogFooter>

@@ -374,6 +374,17 @@ class TelecallingService:
             )
         return results
 
+    async def list_assignable_telecallers(self, *, scope: ScopeFilter) -> list[User]:
+        """The roster for a "Select Telecaller" assignment dropdown — every
+        active TELECALLER-role user in scope, regardless of whether they
+        already have any lead assigned (unlike `team_telecaller_performance`
+        above, which only ever surfaces telecallers with existing assignment
+        activity and is the wrong data source for "who can I assign to").
+        Reuses `UserRepository`/the same `resolve_team_scope` convention as
+        every other `/team/*` read — no second Telecaller list.
+        """
+        return await self.users.list_by_role("TELECALLER", team_leader_id=scope.team_leader_id)
+
     async def assert_telecaller_in_team_scope(
         self, telecaller_id: uuid.UUID, *, actor: User
     ) -> User:

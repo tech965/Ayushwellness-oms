@@ -186,6 +186,18 @@ export interface OrderAssignment {
   next_follow_up_at: string | null
 }
 
+/** One selectable entry for a "Select Telecaller" assignment dropdown —
+ * every active TELECALLER-role user in scope, regardless of whether
+ * they've ever had a lead assigned yet. Distinct from
+ * `TelecallerPerformance` below (assignment-activity counts only, so a
+ * brand-new Telecaller never appears there).
+ */
+export interface TelecallerOption {
+  id: string
+  name: string
+  email: string
+}
+
 export interface TelecallerPerformance {
   telecaller_id: string
   telecaller_name: string

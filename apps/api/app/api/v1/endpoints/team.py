@@ -37,6 +37,7 @@ from app.schemas.telecalling import (
     OrderAssignmentResponse,
     ReassignCheckoutRequest,
     ReassignOrderRequest,
+    TelecallerOptionResponse,
     TelecallerPerformanceResponse,
     TelecallingSummaryResponse,
 )
@@ -394,6 +395,25 @@ async def list_team_telecallers(
         scope=resolve_team_scope(current_user)
     )
     return ApiResponse(data=[TelecallerPerformanceResponse(**p) for p in performance])
+
+
+@router.get("/telecallers/roster", response_model=ApiResponse[list[TelecallerOptionResponse]])
+async def list_assignable_telecallers(
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("telecalling.manage")),
+) -> ApiResponse[list[TelecallerOptionResponse]]:
+    """Every active TELECALLER-role user in scope — the "Select Telecaller"
+    assignment-dialog data source. Distinct from `/telecallers` above
+    (that endpoint's per-telecaller counts only ever include telecallers
+    who already have an active assignment; a brand-new Telecaller with
+    zero leads assigned so far must still show up here).
+    """
+    telecallers = await TelecallingService(session).list_assignable_telecallers(
+        scope=resolve_team_scope(current_user)
+    )
+    return ApiResponse(
+        data=[TelecallerOptionResponse(id=t.id, name=t.name, email=t.email) for t in telecallers]
+    )
 
 
 @router.get(

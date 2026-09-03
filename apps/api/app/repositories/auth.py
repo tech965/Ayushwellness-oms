@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import Select, select
 from sqlalchemy.orm import selectinload
 
@@ -57,6 +59,39 @@ class UserRepository(BaseRepository[User]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_by_role(
+        self,
+        role_name: str,
+        *,
+        team_leader_id: uuid.UUID | None = None,
+        active_only: bool = True,
+    ) -> list[User]:
+        """Every user holding `role_name` — the roster source for
+        "assignable Telecaller" dropdowns (`TelecallingService.
+        list_assignable_telecallers`). Deliberately independent of
+        `OrderAssignmentRepository`/`CheckoutAssignmentRepository`'s
+        `telecaller_performance` (which only ever returns telecallers who
+        already have at least one active assignment) — a brand-new
+        Telecaller with zero assignments so far must still be selectable.
+        `team_leader_id=None` returns every holder of the role across
+        every team (the Admin case); a caller scoping to one Team Leader's
+        own roster passes their own id, matching every other `/team/*`
+        scoping convention in this codebase.
+        """
+        stmt = (
+            select(User)
+            .join(UserRole, UserRole.user_id == User.id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(Role.name == role_name)
+            .order_by(User.name)
+        )
+        if active_only:
+            stmt = stmt.where(User.is_active.is_(True))
+        if team_leader_id is not None:
+            stmt = stmt.where(User.team_leader_id == team_leader_id)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
 
 
 class RefreshTokenRepository(BaseRepository[RefreshToken]):

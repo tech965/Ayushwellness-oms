@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event"
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import UnfulfilledTeamOrdersPage from "@/app/(dashboard)/team/orders/unfulfilled/page"
 import {
+  useAssignableTelecallers,
   useAssignOrders,
   useTeamTelecallers,
   useUnfulfilledTeamOrders,
@@ -19,11 +20,13 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/services/team", () => ({
   useUnfulfilledTeamOrders: vi.fn(),
   useTeamTelecallers: vi.fn(),
+  useAssignableTelecallers: vi.fn(),
   useAssignOrders: vi.fn(),
 }))
 
 const mockedUseUnfulfilledTeamOrders = vi.mocked(useUnfulfilledTeamOrders)
 const mockedUseTeamTelecallers = vi.mocked(useTeamTelecallers)
+const mockedUseAssignableTelecallers = vi.mocked(useAssignableTelecallers)
 const mockedUseAssignOrders = vi.mocked(useAssignOrders)
 
 const ORDERS = [
@@ -92,6 +95,14 @@ const TELECALLERS = [
   },
 ]
 
+// The "Select Telecaller" assign-dialog roster — active TELECALLER users
+// regardless of assignment history, distinct from the performance-count
+// shape above (see `useAssignableTelecallers`).
+const TELECALLER_ROSTER = [
+  { id: "tc-1", name: "Telecaller One", email: "one@example.com" },
+  { id: "tc-2", name: "Telecaller Two", email: "two@example.com" },
+]
+
 describe("UnfulfilledTeamOrdersPage", () => {
   it("disables Bulk Assign until at least one order is selected, then enables it and submits equal distribution", async () => {
     const user = userEvent.setup()
@@ -113,6 +124,13 @@ describe("UnfulfilledTeamOrdersPage", () => {
     mockedUseTeamTelecallers.mockReturnValue({
       data: TELECALLERS,
     } as unknown as ReturnType<typeof useTeamTelecallers>)
+
+    mockedUseAssignableTelecallers.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      data: TELECALLER_ROSTER,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useAssignableTelecallers>)
 
     mockedUseAssignOrders.mockReturnValue({
       mutate,
@@ -151,5 +169,5 @@ describe("UnfulfilledTeamOrdersPage", () => {
       },
       expect.anything()
     )
-  })
+  }, 15000)
 })

@@ -224,6 +224,19 @@ class CallHistoryEntryResponse(CallAttemptResponse):
     order_number: str
 
 
+class TelecallerOptionResponse(BaseModel):
+    """One selectable entry for a "Select Telecaller" assignment dropdown
+    — deliberately just the User fields an assignment UI needs, not a
+    second Telecaller data source: sourced straight from `User`/`Role`
+    (Administration -> Users), independent of whether that telecaller
+    has ever had a lead assigned yet.
+    """
+
+    id: uuid.UUID
+    name: str
+    email: str
+
+
 class TelecallerPerformanceResponse(BaseModel):
     telecaller_id: uuid.UUID
     telecaller_name: str

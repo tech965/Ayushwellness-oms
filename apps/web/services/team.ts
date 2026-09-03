@@ -14,6 +14,7 @@ import type {
   OrderAssignment,
   ReassignCheckoutInput,
   ReassignOrderInput,
+  TelecallerOption,
   TelecallerPerformance,
   TelecallingSummary,
 } from "@/types/telecalling"
@@ -138,6 +139,28 @@ export function useTeamTelecallers() {
   return useQuery({
     queryKey: ["team", "telecallers"],
     queryFn: fetchTeamTelecallers,
+  })
+}
+
+async function fetchAssignableTelecallers(): Promise<TelecallerOption[]> {
+  const response = await apiClient.get<ApiResponse<TelecallerOption[]>>(
+    "/team/telecallers/roster"
+  )
+  return response.data.data ?? []
+}
+
+/** The "Select Telecaller" assignment-dialog roster — every active
+ * TELECALLER-role user in scope (Administration -> Users), regardless of
+ * whether they already have any lead assigned. Deliberately NOT
+ * `useTeamTelecallers` above: that endpoint's per-telecaller counts only
+ * ever include telecallers with existing assignment activity, so a
+ * brand-new Telecaller would never appear in a "Select Telecaller"
+ * dropdown backed by it.
+ */
+export function useAssignableTelecallers() {
+  return useQuery({
+    queryKey: ["team", "telecallers", "roster"],
+    queryFn: fetchAssignableTelecallers,
   })
 }
 
