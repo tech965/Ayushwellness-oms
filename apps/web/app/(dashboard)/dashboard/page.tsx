@@ -17,6 +17,7 @@ import {
   Users,
   Wallet,
 } from "lucide-react"
+import { format } from "date-fns"
 import { CourierPerformanceCard } from "@/components/dashboard/courier-performance-card"
 import { KpiCard } from "@/components/dashboard/kpi-card"
 import { BreakdownList } from "@/components/dashboard/breakdown-list"
@@ -42,6 +43,7 @@ import { useUrlFilters } from "@/lib/use-url-filters"
 import { useAppSettings } from "@/lib/settings-context"
 import {
   isSameIstDay,
+  istCalendarDateAsLocalMidnight,
   istEndOfDay,
   istHourOfDay,
   istStartOfDay,
@@ -138,28 +140,48 @@ function DashboardContent() {
   const refreshSeconds = settings?.dashboard.refresh_interval_seconds ?? 0
   const refetchInterval: number | false = refreshSeconds > 0 ? refreshSeconds * 1000 : false
 
-  // The "Today" preset gets a dedicated hourly Today-vs-Yesterday view
-  // (spec: today's data prominent, yesterday subdued as context) instead
-  // of the day/week/month chart every other range shows — a single IST
-  // calendar day has nothing useful to bucket by day/week/month.
+  // "Today" and "Yesterday" each get a dedicated hourly comparison view
+  // (spec: the selected day's data prominent, the previous calendar day
+  // subdued as context) instead of the day/week/month chart every other
+  // range shows — a single IST calendar day has nothing useful to bucket
+  // by day/week/month. The comparison direction is always "selected day
+  // vs. the day immediately before it" -- Yesterday must never compare
+  // against Today.
   const isTodayRange = isSameIstDay(resolvedFrom, now) && isSameIstDay(resolvedTo, now)
-  const effectiveInterval: TimeseriesInterval = isTodayRange ? "hour" : interval
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
-  const yesterdayParams = {
-    date_from: istStartOfDay(yesterday).toISOString(),
-    date_to: istEndOfDay(yesterday).toISOString(),
+  const isYesterdayRange =
+    !isTodayRange && isSameIstDay(resolvedFrom, yesterday) && isSameIstDay(resolvedTo, yesterday)
+  const isSingleDayComparisonRange = isTodayRange || isYesterdayRange
+  const effectiveInterval: TimeseriesInterval = isSingleDayComparisonRange ? "hour" : interval
+
+  // The day being compared against is always the calendar day immediately
+  // before whichever single day is selected -- `now - 1` when Today is
+  // selected, `now - 2` when Yesterday is selected.
+  const comparisonPrimaryDay = isYesterdayRange ? yesterday : now
+  const comparisonPreviousDay = new Date(comparisonPrimaryDay.getTime() - 24 * 60 * 60 * 1000)
+  const comparisonPreviousParams = {
+    date_from: istStartOfDay(comparisonPreviousDay).toISOString(),
+    date_to: istEndOfDay(comparisonPreviousDay).toISOString(),
   }
+  // "Today" is the only case where part of the primary day hasn't
+  // happened yet -- Yesterday (or any other single past day) is always
+  // fully elapsed, so every hour bucket may show real data (including a
+  // genuine zero), never a blanked-out "hasn't happened yet" hour.
+  const primaryLabel = isTodayRange ? "Today" : "Yesterday"
+  const previousLabel = isTodayRange
+    ? "Yesterday"
+    : format(istCalendarDateAsLocalMidnight(comparisonPreviousDay), "d MMM")
 
   const summaryQuery = useAnalyticsSummary(dateParams, { refetchInterval })
   const timeseriesQuery = useOrdersTimeseries(
     { ...dateParams, interval: effectiveInterval },
     { refetchInterval }
   )
-  const yesterdayTimeseriesQuery = useOrdersTimeseries(
-    { ...yesterdayParams, interval: "hour" },
-    // Only needed for the Today comparison chart -- skip the request
-    // entirely for every other date range.
-    { enabled: isTodayRange, refetchInterval }
+  const comparisonPreviousTimeseriesQuery = useOrdersTimeseries(
+    { ...comparisonPreviousParams, interval: "hour" },
+    // Only needed for the Today/Yesterday comparison chart -- skip the
+    // request entirely for every other date range.
+    { enabled: isSingleDayComparisonRange, refetchInterval }
   )
   const breakdownsQuery = useBreakdowns(dateParams, { refetchInterval })
   const topProductsQuery = useTopProducts({ ...dateParams, limit: 10 }, { refetchInterval })
@@ -367,11 +389,13 @@ function DashboardContent() {
           onIntervalChange={setInterval}
           isLoading={timeseriesQuery.isLoading}
           comparison={
-            isTodayRange
+            isSingleDayComparisonRange
               ? {
-                  yesterday: yesterdayTimeseriesQuery.data,
-                  isLoading: yesterdayTimeseriesQuery.isLoading,
-                  currentIstHour: istHourOfDay(now),
+                  previous: comparisonPreviousTimeseriesQuery.data,
+                  isLoading: comparisonPreviousTimeseriesQuery.isLoading,
+                  currentIstHour: isTodayRange ? istHourOfDay(now) : 23,
+                  primaryLabel,
+                  previousLabel,
                 }
               : undefined
           }

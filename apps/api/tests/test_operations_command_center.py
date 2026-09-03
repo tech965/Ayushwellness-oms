@@ -167,3 +167,33 @@ async def test_command_center_requires_analytics_permission(
     ) as auth_client:
         response = await auth_client.get("/api/v1/analytics/operations-command-center")
         assert response.status_code == 403
+
+
+async def test_command_center_tolerates_empty_string_date_params(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Production incident: `?date_from=&date_to=` (present but empty --
+    the query keys a client sends when a date filter is cleared, rather
+    than omitting them) 422'd with "Input should be a valid datetime or
+    date, input is too short" -- Pydantic's datetime coercion rejects an
+    empty string outright, unlike an omitted param (which correctly
+    defaults to `None`). An empty string means the same thing an omitted
+    param does here; a genuinely malformed value must still 422.
+    """
+    await _make_order(db_session, order_number="OMS-OCC-EMPTY-DATE", amount="250.00")
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_PERMS
+    ) as auth_client:
+        empty = await auth_client.get(
+            "/api/v1/analytics/operations-command-center",
+            params={"date_from": "", "date_to": ""},
+        )
+        assert empty.status_code == 200
+        assert empty.json()["data"]["summary"]["total_orders"] >= 1
+
+        malformed = await auth_client.get(
+            "/api/v1/analytics/operations-command-center",
+            params={"date_from": "not-a-date"},
+        )
+        assert malformed.status_code == 422

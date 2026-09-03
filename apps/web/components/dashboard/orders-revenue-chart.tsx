@@ -23,16 +23,30 @@ import {
 import { formatMoney } from "@/lib/format"
 import type { OrdersTimeseries, TimeseriesInterval } from "@/types/analytics"
 
-/** Today-vs-Yesterday comparison data — only meaningful when `interval`
- * is "hour" (a single IST calendar day has nothing useful to show at
- * day/week/month granularity). `currentIstHour` bounds how much of
- * "today" has actually elapsed, so hours that haven't happened yet are
- * left blank rather than rendered as a fake "0 orders."
+/** Selected-day-vs-previous-day comparison data — only meaningful when
+ * `interval` is "hour" (a single IST calendar day has nothing useful to
+ * show at day/week/month granularity). Used for both the Today (vs.
+ * Yesterday) and Yesterday (vs. the day before) dashboard views — the
+ * comparison is always "selected day vs. the calendar day immediately
+ * before it," never a fixed pair of days. `currentIstHour` bounds how
+ * much of the *primary* day has actually elapsed, so hours that haven't
+ * happened yet are left blank rather than rendered as a fake "0 orders" —
+ * for any day other than the real current day this is always `23` (a
+ * past day is always fully elapsed).
  */
 export interface HourlyComparison {
-  yesterday: OrdersTimeseries | undefined
+  previous: OrdersTimeseries | undefined
   isLoading: boolean
   currentIstHour: number
+  /** Human-readable label for the primary series — "Today" or
+   * "Yesterday". Never hardcoded in the chart itself so the legend/title/
+   * tooltips always match whichever day is actually selected.
+   */
+  primaryLabel: string
+  /** Human-readable label for the comparison series — "Yesterday" when
+   * the primary day is Today, otherwise a calendar date (e.g. "1 Sep").
+   */
+  previousLabel: string
 }
 
 interface OrdersRevenueChartProps {
@@ -68,27 +82,32 @@ interface HourlyChartPoint {
   bucket: string
   orders: number | null
   revenue: number | null
-  ordersYesterday: number | null
+  ordersPrevious: number | null
 }
 
-function buildHourlyComparisonData(
-  today: OrdersTimeseries | undefined,
-  yesterday: OrdersTimeseries | undefined,
+/** Builds the 24-hour (12 AM - 11 PM) comparison series for the primary
+ * selected day vs. the previous calendar day. Exported for direct unit
+ * testing of the elapsed-hour/null-vs-zero rules, which matter more here
+ * than any particular rendered pixel.
+ */
+export function buildHourlyComparisonData(
+  primary: OrdersTimeseries | undefined,
+  previous: OrdersTimeseries | undefined,
   currentIstHour: number
 ): HourlyChartPoint[] {
-  const todayByHour = new Map((today?.points ?? []).map((p) => [hourFromBucket(p.bucket), p]))
-  const yesterdayByHour = new Map(
-    (yesterday?.points ?? []).map((p) => [hourFromBucket(p.bucket), p])
+  const primaryByHour = new Map((primary?.points ?? []).map((p) => [hourFromBucket(p.bucket), p]))
+  const previousByHour = new Map(
+    (previous?.points ?? []).map((p) => [hourFromBucket(p.bucket), p])
   )
   return Array.from({ length: 24 }, (_, hour) => {
-    const todayPoint = todayByHour.get(hour)
-    const yesterdayPoint = yesterdayByHour.get(hour)
+    const primaryPoint = primaryByHour.get(hour)
+    const previousPoint = previousByHour.get(hour)
     const hasElapsed = hour <= currentIstHour
     return {
       bucket: hourLabel(hour),
-      orders: hasElapsed ? (todayPoint?.order_count ?? 0) : null,
-      revenue: hasElapsed ? Number(todayPoint?.revenue ?? 0) : null,
-      ordersYesterday: yesterdayPoint?.order_count ?? 0,
+      orders: hasElapsed ? (primaryPoint?.order_count ?? 0) : null,
+      revenue: hasElapsed ? Number(primaryPoint?.revenue ?? 0) : null,
+      ordersPrevious: previousPoint?.order_count ?? 0,
     }
   })
 }
@@ -103,20 +122,22 @@ export function OrdersRevenueChart({
   const isComparisonMode = interval === "hour" && comparison !== undefined
   const points = data?.points ?? []
   const chartData = isComparisonMode
-    ? buildHourlyComparisonData(data, comparison.yesterday, comparison.currentIstHour)
+    ? buildHourlyComparisonData(data, comparison.previous, comparison.currentIstHour)
     : points.map((p) => ({
         bucket: bucketLabel(p.bucket),
         orders: p.order_count,
         revenue: Number(p.revenue),
-        ordersYesterday: null,
+        ordersPrevious: null,
       }))
   const chartIsLoading = isLoading || (isComparisonMode && comparison.isLoading)
+  const primaryLabel = comparison?.primaryLabel ?? ""
+  const previousLabel = comparison?.previousLabel ?? ""
 
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-2">
         <CardTitle>
-          {isComparisonMode ? "Today vs. Yesterday" : "Orders & Revenue"}
+          {isComparisonMode ? `${primaryLabel} vs. ${previousLabel}` : "Orders & Revenue"}
         </CardTitle>
         {isComparisonMode ? (
           <span className="text-muted-foreground text-xs font-medium">Hourly</span>
@@ -143,7 +164,7 @@ export function OrdersRevenueChart({
               className="size-2.5 rounded-sm"
               style={{ backgroundColor: "var(--chart-1)" }}
             />
-            {isComparisonMode ? "Orders (Today)" : "Orders"}
+            {isComparisonMode ? `Orders (${primaryLabel})` : "Orders"}
           </span>
           {isComparisonMode ? (
             <span className="flex items-center gap-1.5">
@@ -151,7 +172,7 @@ export function OrdersRevenueChart({
                 className="size-2.5 rounded-sm"
                 style={{ backgroundColor: "var(--chart-1)", opacity: 0.35 }}
               />
-              Orders (Yesterday)
+              {`Orders (${previousLabel})`}
             </span>
           ) : null}
           <span className="flex items-center gap-1.5">
@@ -170,9 +191,9 @@ export function OrdersRevenueChart({
           </div>
         ) : isComparisonMode &&
           points.length === 0 &&
-          (comparison.yesterday?.points.length ?? 0) === 0 ? (
+          (comparison.previous?.points.length ?? 0) === 0 ? (
           <div className="text-muted-foreground flex h-[300px] items-center justify-center text-sm">
-            No orders today or yesterday.
+            {`No orders on ${primaryLabel} or ${previousLabel}.`}
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={300}>
@@ -226,19 +247,19 @@ export function OrdersRevenueChart({
                 }}
                 formatter={(value, name) => {
                   if (name === "revenue") return [formatMoney(Number(value)), "Revenue"]
-                  if (name === "ordersYesterday") {
-                    return [Number(value).toLocaleString("en-IN"), "Orders (Yesterday)"]
+                  if (name === "ordersPrevious") {
+                    return [Number(value).toLocaleString("en-IN"), `Orders (${previousLabel})`]
                   }
                   return [
                     Number(value).toLocaleString("en-IN"),
-                    isComparisonMode ? "Orders (Today)" : "Orders",
+                    isComparisonMode ? `Orders (${primaryLabel})` : "Orders",
                   ]
                 }}
               />
               {isComparisonMode ? (
                 <Bar
                   yAxisId="orders"
-                  dataKey="ordersYesterday"
+                  dataKey="ordersPrevious"
                   fill="var(--chart-1)"
                   fillOpacity={0.35}
                   radius={[4, 4, 0, 0]}
