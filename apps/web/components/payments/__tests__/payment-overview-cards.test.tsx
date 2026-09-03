@@ -29,7 +29,7 @@ describe("PaymentOverviewCards", () => {
     expect(screen.getByText("Paid")).toBeInTheDocument()
     expect(screen.getByText("Pending")).toBeInTheDocument()
     expect(screen.getByText("Failed")).toBeInTheDocument()
-    expect(screen.getByText("Total Amount")).toBeInTheDocument()
+    expect(screen.getByText("Paid Amount")).toBeInTheDocument()
     expect(screen.getByText("10")).toBeInTheDocument()
     expect(screen.getByText("6")).toBeInTheDocument()
   })

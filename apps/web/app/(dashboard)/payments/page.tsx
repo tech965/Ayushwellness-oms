@@ -366,7 +366,7 @@ function PaymentsPageContent() {
     ...activeFilters,
   })
 
-  // The KPI cards/trend/method-breakdown share the table's own date
+  // The trend chart/method-breakdown/table share the table's own date
   // range AND provider filter, so they always describe exactly the same
   // slice of data the rows below them show -- same contract the main
   // Dashboard's KPIs/drill-down links already use. Provider-agnostic by
@@ -378,7 +378,21 @@ function PaymentsPageContent() {
     date_from: filters.date_from || undefined,
     date_to: filters.date_to || undefined,
   }
-  const overviewQuery = usePaymentOverview(analyticsParams)
+  // The 5 KPI tiles above (Total Payments/Paid/Pending/Failed/Paid
+  // Amount) are this page's own "Cashfree Payments" summary -- always
+  // scoped to `provider: "cashfree"`, independent of the general
+  // Provider filter above (which stays "every provider" by default for
+  // the trend/breakdown/table). Every Shopify-synced order, COD
+  // included, already gets its own `Payment` row (`provider="shopify"`,
+  // see `OrderService.upsert_synced_order`) -- with no provider filter,
+  // this query's `total_amount` was silently summing COD's collected
+  // amount right alongside real Cashfree transactions, which is exactly
+  // why it read close to overall Total Revenue instead of Revenue
+  // Analytics' much smaller Prepaid Revenue figure for the same range.
+  // Same date range/timezone convention as Revenue Analytics either way
+  // (`date_from`/`date_to` pass straight through to the same
+  // `resolve_range` helper, untouched).
+  const overviewQuery = usePaymentOverview({ ...analyticsParams, provider: "cashfree" })
   const trendQuery = usePaymentTrend({ ...analyticsParams, interval })
   const methodBreakdownQuery = usePaymentMethodBreakdown(analyticsParams)
 

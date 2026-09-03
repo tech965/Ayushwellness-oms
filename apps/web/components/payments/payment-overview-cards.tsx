@@ -17,12 +17,11 @@ interface PaymentOverviewCardsProps {
   hrefFor: (params: Record<string, string>) => string
 }
 
-/** The five payment KPI tiles (every provider, or whichever one the
- * page's own provider filter is set to) — reuses `KpiCard` exactly like
+/** The five Cashfree payment KPI tiles — reuses `KpiCard` exactly like
  * every other dashboard KPI row (period-over-period %, drill-down link).
- * Fed by `usePaymentOverview` (provider-agnostic); still typed as
- * `CashfreePaymentOverview` purely because it's the same response
- * shape, reused rather than duplicated.
+ * Fed by `usePaymentOverview` called with `provider: "cashfree"` (see
+ * `app/(dashboard)/payments/page.tsx`) -- always Cashfree-only,
+ * regardless of the page's own general provider filter.
  */
 export function PaymentOverviewCards({ data, hrefFor }: PaymentOverviewCardsProps) {
   return (
@@ -62,7 +61,10 @@ export function PaymentOverviewCards({ data, hrefFor }: PaymentOverviewCardsProp
         invert
       />
       <KpiCard
-        label="Total Amount"
+        // `data.total_amount` only ever sums PAID payments (see
+        // `PaymentService.get_payment_overview`) -- "Paid Amount" says
+        // that unambiguously; pending/failed amounts were never included.
+        label="Paid Amount"
         icon={IndianRupee}
         kpi={data?.total_amount}
         format={money}
