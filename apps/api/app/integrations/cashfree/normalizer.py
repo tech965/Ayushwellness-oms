@@ -155,6 +155,116 @@ def extract_decimal_amount(container: dict[str, Any], key: str) -> Decimal | Non
     return Decimal(str(value))
 
 
+# --- Reconciliation (pull, bulk) -----------------------------------------
+
+# Confirmed via Cashfree's current PG Reconciliation API reference
+# (POST /recon — see docs/integrations/cashfree.md): each row's
+# `event_type` is one of these three. Only PAYMENT rows carry a
+# completed/attempted payment outcome that `apply_payment_event` already
+# knows how to apply; REFUND/DISPUTE rows describe a different lifecycle
+# this integration doesn't model yet (spec: "ignore or separately handle
+# REFUND/DISPUTE" — never force them through the payment-status path,
+# which would silently misrepresent a refund as a fresh payment result).
+_RECON_PAYMENT_EVENT_TYPE = "PAYMENT"
+
+
+def extract_recon_rows(response: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+    """One `POST /recon` response page -> `(rows, next_cursor)`. `cursor`
+    is `None` once Cashfree has no further page (an empty/missing cursor
+    value, or a page with no rows at all — either one safely ends the
+    caller's pagination loop, never spins forever).
+    """
+    data = response.get("data")
+    rows = [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+    cursor = response.get("cursor")
+    return rows, cursor if isinstance(cursor, str) and cursor else None
+
+
+def normalize_recon_row(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """One `/recon` row -> the exact kwargs
+    `CashfreePaymentService.apply_payment_event` already accepts — reused
+    verbatim (spec: never a second payment-upsert implementation). `None`
+    for a REFUND/DISPUTE row (see `_RECON_PAYMENT_EVENT_TYPE` above) or a
+    row with no `order_id` to resolve against — the caller counts either
+    as skipped, never as a failure.
+
+    `event_type` is treated as PAYMENT when absent, not just when
+    present-and-equal — some recon rows were documented without it on a
+    plain single-payment sync; only an *explicit* REFUND/DISPUTE value is
+    ever excluded, so this never silently drops a genuine payment row
+    over a field that turns out to be optional.
+    """
+    event_type = raw.get("event_type")
+    if event_type not in (None, _RECON_PAYMENT_EVENT_TYPE):
+        return None
+    order_id = raw.get("order_id")
+    if not order_id:
+        return None
+
+    cf_payment_id = raw.get("cf_payment_id")
+    raw_amount = raw.get("payment_amount")
+    amount = extract_decimal_amount(raw, "payment_amount") if raw_amount is not None else None
+
+    return {
+        "cashfree_order_id": str(order_id),
+        "cf_payment_id": str(cf_payment_id) if cf_payment_id is not None else None,
+        "raw_status": raw.get("status"),
+        "amount": amount,
+        "currency": raw.get("payment_currency"),
+        # Not present on a /recon row (confirmed against the current API
+        # reference) — never guessed; a webhook/reconcile-by-order delivery
+        # is what actually populates `payment_metadata["payment_method"]`.
+        "payment_method_name": None,
+        "paid_at": parse_iso_datetime(raw.get("payment_time")),
+        "raw_payload": raw,
+    }
+
+
+# --- Settlements (pull, bulk) ---------------------------------------------
+
+
+def extract_settlement_rows(response: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+    """One `POST /settlements` response page -> `(rows, next_cursor)` —
+    same shape/pagination contract as `extract_recon_rows` above.
+    """
+    data = response.get("data")
+    rows = [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+    cursor = response.get("cursor")
+    return rows, cursor if isinstance(cursor, str) and cursor else None
+
+
+def normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """One `/settlements` row -> the kwargs
+    `CashfreeSettlementRepository.upsert_by_cf_settlement_id` expects.
+    `None` when `cf_settlement_id` is missing — nothing to key an upsert
+    on, so the caller counts it as skipped rather than guessing an id.
+    """
+    cf_settlement_id = raw.get("cf_settlement_id")
+    if not cf_settlement_id:
+        return None
+
+    def _amount(key: str) -> Decimal | None:
+        value = raw.get(key)
+        return Decimal(str(value)) if value is not None else None
+
+    return {
+        "cf_settlement_id": str(cf_settlement_id),
+        "status": raw.get("status"),
+        "status_description": raw.get("status_description"),
+        "settlement_utr": raw.get("settlement_utr"),
+        "settlement_initiated_on": parse_iso_datetime(raw.get("settlement_initiated_on")),
+        "settlement_processed_on": parse_iso_datetime(raw.get("settlement_processed_on")),
+        "payment_amount": _amount("payment_amount"),
+        "pg_service_charge": _amount("pg_service_charge"),
+        "pg_service_tax": _amount("pg_service_tax"),
+        "adjustment": _amount("adjustment"),
+        "settlement_charge": _amount("settlement_charge"),
+        "settlement_tax": _amount("settlement_tax"),
+        "amount_settled": _amount("amount_settled"),
+        "raw_external_payload": raw,
+    }
+
+
 class CashfreeOrderPushNormalizer:
     """Builds the `POST /orders` request body from an OMS `Order` (with
     `.customer` eager-loaded) plus the resolved Cashfree order_id.

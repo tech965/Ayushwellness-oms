@@ -149,3 +149,53 @@ class CashfreeClient:
         """`GET /orders/{order_id}/payments/{cf_payment_id}` — one
         specific payment attempt by its Cashfree id."""
         return await self.request("GET", f"/orders/{order_id}/payments/{cf_payment_id}")
+
+    async def get_reconciliation(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+        cursor: str | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """`POST /recon` (PG Reconciliation) — every payment/refund/
+        dispute event across the whole merchant account in a date range,
+        cursor-paginated. Confirmed against Cashfree's current official
+        API reference (see docs/integrations/cashfree.md) — this is the
+        one endpoint that lists transactions in bulk; every other method
+        on this client is scoped to one already-known order. `limit`
+        caps at 1000 per Cashfree's documented maximum page size.
+        """
+        payload: dict[str, Any] = {
+            "pagination": {"limit": min(limit, 1000), "cursor": cursor},
+            "filters": {"start_date": start_date, "end_date": end_date},
+        }
+        return await self.request("POST", "/recon", json=payload)
+
+    async def get_settlements(
+        self,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        settlement_status: list[str] | None = None,
+        cursor: str | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """`POST /settlements` (Get All Settlements) — settlement lots
+        for a date range and/or status, cursor-paginated. Confirmed
+        against Cashfree's current official API reference. Cashfree
+        requires at least one filter; callers always supply a date
+        range (see `CashfreeSyncService.sync_settlements`).
+        """
+        filters: dict[str, Any] = {}
+        if start_date:
+            filters["start_date"] = start_date
+        if end_date:
+            filters["end_date"] = end_date
+        if settlement_status:
+            filters["settlement_status"] = settlement_status
+        payload: dict[str, Any] = {
+            "pagination": {"limit": min(limit, 1000), "cursor": cursor},
+            "filters": filters,
+        }
+        return await self.request("POST", "/settlements", json=payload)

@@ -89,3 +89,53 @@ export interface CashfreePaymentMethodBreakdownItem {
 export interface CashfreePaymentMethodBreakdown {
   items: CashfreePaymentMethodBreakdownItem[]
 }
+
+// --- Transaction sync (bulk, operator-triggered) -----------------------
+
+export interface CashfreeSyncRequest {
+  date_from: string
+  date_to: string
+}
+
+export interface CashfreeSyncResult {
+  fetched: number
+  processed: number
+  applied: number
+  duplicates: number
+  skipped: number
+  failures: number
+  errors: string[]
+}
+
+// --- Settlements ----------------------------------------------------
+
+export interface CashfreeSettlementItem {
+  cf_settlement_id: string
+  status: string | null
+  settlement_utr: string | null
+  settlement_processed_on: string | null
+  /** Gross transaction amount this settlement covers -- distinct from
+   * `amount_settled` (PG service charge/tax/adjustments are deducted).
+   */
+  payment_amount: string | null
+  amount_settled: string | null
+}
+
+/** Every field documented `// derived` is computed by the backend from
+ * the locally-synced settlement list, not returned by a confirmed
+ * dedicated Cashfree endpoint — see `CashfreeSettlementSummaryResponse`
+ * in app/schemas/cashfree.py for exactly why.
+ */
+export interface CashfreeSettlementSummary {
+  /** derived */
+  unsettled_amount: string
+  /** derived */
+  upcoming_settlement_amount: string | null
+  /** derived */
+  upcoming_settlement_status: string | null
+  last_settled_amount: string | null
+  last_settled_date: string | null
+  last_settlement_utr: string | null
+  last_settlement_status: string | null
+  history: CashfreeSettlementItem[]
+}

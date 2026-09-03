@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import PaymentStatus
 from app.models.payment import Payment
@@ -171,3 +171,78 @@ class CashfreePaymentMethodBreakdownItem(BaseModel):
 
 class CashfreePaymentMethodBreakdownResponse(BaseModel):
     items: list[CashfreePaymentMethodBreakdownItem]
+
+
+# --- Transaction sync (POST /payments/cashfree/sync) ----------------------
+
+
+class CashfreeSyncRequest(BaseModel):
+    date_from: datetime
+    date_to: datetime
+
+
+class CashfreeSyncResult(BaseModel):
+    """Outcome of one `sync_transactions`/`sync_settlements` call —
+    always returned, never silently swallowed, so the operator sees
+    exactly what happened (spec §16/§17: "do not silently refresh
+    without telling the operator what happened").
+    """
+
+    fetched: int = 0
+    processed: int = 0
+    # A row that genuinely wrote new/changed state -- a new Payment/
+    # Settlement created, or an existing one's status legitimately
+    # advanced. Named "applied" (not "created"/"updated") because
+    # `CashfreePaymentService.apply_payment_event` -- reused unchanged --
+    # doesn't itself distinguish the two; see that method's own
+    # `PaymentEventResult.applied`.
+    applied: int = 0
+    duplicates: int = 0
+    skipped: int = 0
+    failures: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+# --- Settlements (POST /payments/cashfree/settlements/sync,
+# GET /payments/cashfree/analytics/settlements) ----------------------------
+
+
+class CashfreeSettlementItem(BaseModel):
+    cf_settlement_id: str
+    status: str | None
+    settlement_utr: str | None
+    settlement_processed_on: datetime | None
+    # Gross transaction amount this settlement covers -- distinct from
+    # `amount_settled` below (spec: never equate the two; the difference
+    # is PG service charge/tax/adjustments, shown explicitly here).
+    payment_amount: Decimal | None
+    amount_settled: Decimal | None
+
+
+class CashfreeSettlementSummaryResponse(BaseModel):
+    """Backs the Payments page's "Cashfree Settlement" section. Every
+    field documented below as DERIVED is computed from the locally
+    synced `cashfree_settlements` table (`POST /settlements`), not
+    returned by a confirmed dedicated Cashfree endpoint — see
+    `app.services.cashfree_sync_service`'s module docstring for exactly
+    why, and never presented to a caller as if it were Cashfree-native.
+    """
+
+    # DERIVED: sum of `amount_settled` (or `payment_amount` when a
+    # pending settlement has no `amount_settled` yet) across every
+    # non-terminal (PENDING/PENDING_WITH_CASHFREE/PENDING_WITH_BANK)
+    # settlement currently on record.
+    unsettled_amount: Decimal
+    # DERIVED: the nearest non-terminal settlement's own gross amount —
+    # a best-effort stand-in for Cashfree's own "next settlement"
+    # concept, not a dedicated Cashfree field.
+    upcoming_settlement_amount: Decimal | None
+    upcoming_settlement_status: str | None
+    # From the most recent settlement Cashfree has actually completed
+    # (status="SUCCESS") -- these ARE the real, Cashfree-reported values
+    # for that one settlement, not derived.
+    last_settled_amount: Decimal | None
+    last_settled_date: datetime | None
+    last_settlement_utr: str | None
+    last_settlement_status: str | None
+    history: list[CashfreeSettlementItem]

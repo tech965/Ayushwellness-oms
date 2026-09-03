@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from app.models.audit_log import AuditLog
 from app.models.auth import RefreshToken, User
+from app.models.cashfree_settlement import CashfreeSettlement
 from app.models.courier import Courier
 from app.models.customer import Customer, CustomerAddress
 from app.models.integration import Integration, SyncError, SyncJob, WebhookEvent
@@ -30,6 +31,7 @@ __all__ = [
     "AuditLog",
     "RefreshToken",
     "User",
+    "CashfreeSettlement",
     "Courier",
     "Customer",
     "CustomerAddress",

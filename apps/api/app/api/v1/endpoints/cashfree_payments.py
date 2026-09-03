@@ -8,6 +8,9 @@
     GET  /api/v1/payments/cashfree/analytics/overview
     GET  /api/v1/payments/cashfree/analytics/trend
     GET  /api/v1/payments/cashfree/analytics/method-breakdown
+    POST /api/v1/payments/cashfree/sync
+    POST /api/v1/payments/cashfree/settlements/sync
+    GET  /api/v1/payments/cashfree/analytics/settlements
 
 `create` is the only endpoint that ever calls Cashfree's Create Order
 API — the order amount always comes from the server-side OMS `Order`,
@@ -19,6 +22,13 @@ polled from here. `status`/`test-connection`/`analytics/*` back the
 Cashfree payments dashboard (`/payments`); see
 `app.services.cashfree_payment_service.CashfreePaymentService`'s
 "Connection status"/"Payment analytics" sections for what each reuses.
+
+`sync`/`settlements/sync` are the bulk, date-range, OPERATOR-TRIGGERED
+counterparts to the webhook — see `app.services.cashfree_sync_service.
+CashfreeSyncService`'s module docstring. Neither is ever auto-polled
+from here; both are gated by `payments.create` (the same permission
+`reconcile` above already uses — this is the same class of write-
+triggering action, just bulk instead of per-order).
 """
 
 from __future__ import annotations
@@ -40,12 +50,16 @@ from app.schemas.cashfree import (
     CashfreePaymentOverviewResponse,
     CashfreePaymentStatusResponse,
     CashfreePaymentTrendResponse,
+    CashfreeSettlementSummaryResponse,
     CashfreeStatusResponse,
+    CashfreeSyncRequest,
+    CashfreeSyncResult,
     build_checkout_response,
     build_status_response,
 )
 from app.schemas.response import ApiResponse
 from app.services.cashfree_payment_service import CashfreePaymentService
+from app.services.cashfree_sync_service import CashfreeSyncService
 
 router = APIRouter()
 
@@ -160,3 +174,49 @@ async def get_cashfree_payment_method_breakdown(
         date_from, date_to
     )
     return ApiResponse(data=breakdown)
+
+
+@router.post("/sync", response_model=ApiResponse[CashfreeSyncResult])
+async def sync_cashfree_transactions(
+    payload: CashfreeSyncRequest,
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("payments.create")),
+) -> ApiResponse[CashfreeSyncResult]:
+    """Bulk historical transaction sync (`POST /recon`) for an operator-
+    chosen date range — see `CashfreeSyncService.sync_transactions`.
+    """
+    result = await CashfreeSyncService(session).sync_transactions(
+        payload.date_from, payload.date_to
+    )
+    return ApiResponse(data=result, message="Cashfree transaction sync completed.")
+
+
+@router.post("/settlements/sync", response_model=ApiResponse[CashfreeSyncResult])
+async def sync_cashfree_settlements(
+    payload: CashfreeSyncRequest,
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("payments.create")),
+) -> ApiResponse[CashfreeSyncResult]:
+    """Bulk settlement sync (`POST /settlements`) for an operator-chosen
+    date range — see `CashfreeSyncService.sync_settlements`.
+    """
+    result = await CashfreeSyncService(session).sync_settlements(
+        payload.date_from, payload.date_to
+    )
+    return ApiResponse(data=result, message="Cashfree settlement sync completed.")
+
+
+@router.get(
+    "/analytics/settlements", response_model=ApiResponse[CashfreeSettlementSummaryResponse]
+)
+async def get_cashfree_settlement_summary(
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("payments.read")),
+) -> ApiResponse[CashfreeSettlementSummaryResponse]:
+    """Reads only the locally-synced settlement table — run
+    `POST .../settlements/sync` first to populate/refresh it. See
+    `CashfreeSyncService.get_settlement_summary` for exactly which
+    fields are Cashfree-native vs. derived.
+    """
+    summary = await CashfreeSyncService(session).get_settlement_summary()
+    return ApiResponse(data=summary)

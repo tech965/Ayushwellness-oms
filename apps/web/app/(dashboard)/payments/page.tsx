@@ -4,9 +4,12 @@ import * as React from "react"
 import { useRouter } from "next/navigation"
 import { useQueryClient } from "@tanstack/react-query"
 import { Columns3, Download } from "lucide-react"
+import { endOfDay, startOfDay, subDays } from "date-fns"
 import { toast } from "sonner"
 
+import { CashfreeSettlementSection } from "@/components/payments/cashfree-settlement-section"
 import { CashfreeStatusCard } from "@/components/payments/cashfree-status-card"
+import { CashfreeSyncTransactionsButton } from "@/components/payments/cashfree-sync-transactions-button"
 import { PaymentMethodBreakdown } from "@/components/payments/payment-method-breakdown"
 import { PaymentOverviewCards } from "@/components/payments/payment-overview-cards"
 import { PaymentTrendChart } from "@/components/payments/payment-trend-chart"
@@ -349,6 +352,13 @@ function PaymentsPageContent() {
     to: filters.date_to ? new Date(filters.date_to) : undefined,
   }
 
+  // The Cashfree sync actions need a concrete date range (the sync
+  // endpoints' `date_from`/`date_to` are required, unlike the optional
+  // analytics query params below) -- same "last 30 days when nothing is
+  // picked" fallback the Dashboard/Revenue Analytics pages already use.
+  const resolvedSyncFrom = dateRange.from ?? startOfDay(subDays(new Date(), 29))
+  const resolvedSyncTo = dateRange.to ?? endOfDay(new Date())
+
   const activeFilters = {
     q: filters.q || undefined,
     provider: filters.provider || undefined,
@@ -473,7 +483,25 @@ function PaymentsPageContent() {
       <div className="flex flex-col gap-6">
         <CashfreeStatusCard />
 
-        <PaymentOverviewCards data={overviewQuery.data} hrefFor={hrefFor} />
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold">Cashfree Transactions</h2>
+          <CashfreeSyncTransactionsButton
+            dateFrom={resolvedSyncFrom.toISOString()}
+            dateTo={resolvedSyncTo.toISOString()}
+          />
+        </div>
+        <PaymentOverviewCards
+          data={overviewQuery.data}
+          hrefFor={hrefFor}
+          isError={overviewQuery.isError}
+          error={overviewQuery.error}
+          onRetry={() => void overviewQuery.refetch()}
+        />
+
+        <CashfreeSettlementSection
+          dateFrom={resolvedSyncFrom.toISOString()}
+          dateTo={resolvedSyncTo.toISOString()}
+        />
 
         <div className="grid gap-4 lg:grid-cols-2">
           <PaymentTrendChart
