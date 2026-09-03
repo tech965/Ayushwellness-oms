@@ -25,8 +25,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { QueryStates } from "@/components/shared/query-states"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
 import { formatDateTime } from "@/lib/format"
@@ -45,7 +45,7 @@ import type {
 } from "@/types/settings"
 
 export default function SettingsPage() {
-  const { data, isLoading } = useSettings()
+  const query = useSettings()
 
   return (
     <>
@@ -53,11 +53,26 @@ export default function SettingsPage() {
         title="Settings"
         description="Organization-wide OMS configuration — every change here applies immediately for every user."
       />
-      {isLoading || !data ? (
-        <Skeleton className="h-[480px] w-full" />
-      ) : (
-        <SettingsView data={data} />
-      )}
+      {/* Was previously `isLoading || !data ? <Skeleton> : <SettingsView>` --
+       * once a request permanently fails (e.g. a 500), `isLoading` settles
+       * to `false` but `data` never arrives, so that condition stayed true
+       * forever: an infinite skeleton with no error message and no way to
+       * retry. `QueryStates` (the same loading/error/empty handling every
+       * other page already uses) shows the real, sanitized error message
+       * plus a manual Retry button instead -- never a raw stack trace,
+       * never a silent hang, never an automatic retry loop.
+       */}
+      <QueryStates
+        isLoading={query.isLoading}
+        isError={query.isError}
+        error={query.error}
+        data={query.data}
+        onRetry={() => void query.refetch()}
+        emptyTitle="Settings unavailable"
+        emptyDescription="Could not load settings right now. The rest of the OMS is unaffected."
+      >
+        {(data) => <SettingsView data={data} />}
+      </QueryStates>
     </>
   )
 }
