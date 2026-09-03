@@ -49,7 +49,15 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
         ForeignKey("customers.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
-    order_datetime: Mapped[datetime] = mapped_column(AwareDateTime(), nullable=False)
+    # Confirmed live (EXPLAIN ANALYZE against production, 48k orders): every
+    # analytics/dashboard query filters on this column (`resolve_range` in
+    # analytics_service.py), and without an index this was a sequential
+    # scan costing ~700ms per query alone -- the dashboard fires roughly
+    # eight such queries per navigation, directly explaining the reported
+    # multi-second-to-tens-of-seconds dashboard load delay.
+    order_datetime: Mapped[datetime] = mapped_column(
+        AwareDateTime(), nullable=False, index=True
+    )
     currency: Mapped[str] = mapped_column(
         String(8), nullable=False, default="INR", server_default="INR"
     )
