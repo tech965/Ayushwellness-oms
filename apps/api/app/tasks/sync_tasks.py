@@ -55,7 +55,7 @@ STALE_SYNC_JOB_THRESHOLD = timedelta(minutes=20)
 # guarantee — an NDR for a shipment that arrives moments later in the
 # same store will simply be picked up on the next scheduled cycle.
 _SCHEDULED_SYNC_ENTITIES: dict[str, list[str]] = {
-    IntegrationCode.SHOPIFY: ["orders", "customers", "products"],
+    IntegrationCode.SHOPIFY: ["orders", "customers", "products", "abandoned_checkouts"],
     IntegrationCode.SHIPROCKET: ["shipments", "ndr"],
 }
 

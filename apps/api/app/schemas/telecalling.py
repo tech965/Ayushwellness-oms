@@ -7,7 +7,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.enums import FulfillmentStatus, PaymentStatus, PaymentType, TelecallingStatus
+from app.models.enums import (
+    FulfillmentStatus,
+    LeadCategory,
+    LeadPriority,
+    PaymentStatus,
+    PaymentType,
+    TelecallingStatus,
+)
 
 
 class AssignOrdersRequest(BaseModel):
@@ -27,6 +34,27 @@ class AssignOrdersRequest(BaseModel):
 
 class ReassignOrderRequest(BaseModel):
     order_id: uuid.UUID
+    new_telecaller_id: uuid.UUID
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class AssignCheckoutsRequest(BaseModel):
+    checkout_ids: list[uuid.UUID] = Field(min_length=1)
+    mode: Literal["manual", "equal"]
+    telecaller_id: uuid.UUID | None = None
+    telecaller_ids: list[uuid.UUID] | None = None
+
+    @model_validator(mode="after")
+    def _check_mode_fields(self) -> AssignCheckoutsRequest:
+        if self.mode == "manual" and not self.telecaller_id:
+            raise ValueError("telecaller_id is required for manual assignment.")
+        if self.mode == "equal" and not self.telecaller_ids:
+            raise ValueError("telecaller_ids is required for equal-distribution assignment.")
+        return self
+
+
+class ReassignCheckoutRequest(BaseModel):
+    checkout_id: uuid.UUID
     new_telecaller_id: uuid.UUID
     reason: str = Field(min_length=1, max_length=1000)
 
@@ -115,6 +143,75 @@ class AssignedOrderResponse(BaseModel):
     attempt_count: int = 0
     last_attempt_at: datetime | None = None
     next_follow_up_at: datetime | None = None
+    # `None` only for `PaymentType.OTHER` — not one of the spec's defined
+    # categories (see `app.services.lead_classification.classify_order`).
+    lead_category: LeadCategory | None = None
+    priority: LeadPriority | None = None
+
+
+class AssignedCheckoutResponse(BaseModel):
+    """`AssignedOrderResponse`'s counterpart for an abandoned-checkout
+    lead — same "denormalize once" shape, flattening an `AbandonedCheckout`
+    + its (possibly absent) active `CheckoutAssignment` into one row.
+    `lead_category` is always `ABANDONED_CHECKOUT` here (included anyway
+    so both lead types share one column set in the frontend's unified
+    lead table).
+    """
+
+    checkout_id: uuid.UUID
+    customer_name: str | None
+    customer_phone: str | None
+    customer_email: str | None
+    item_summary: str | None = None
+    total_amount: Decimal
+    checkout_url: str | None
+    checkout_created_at: datetime | None
+    is_recovered: bool
+    assignment_id: uuid.UUID | None = None
+    assigned_to: uuid.UUID | None = None
+    assigned_to_name: str | None = None
+    call_status: TelecallingStatus | None = None
+    attempt_count: int = 0
+    last_attempt_at: datetime | None = None
+    next_follow_up_at: datetime | None = None
+    lead_category: LeadCategory = LeadCategory.ABANDONED_CHECKOUT
+    priority: LeadPriority | None = None
+
+
+class CheckoutAssignmentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    checkout_id: uuid.UUID
+    assigned_to: uuid.UUID
+    assigned_by: uuid.UUID | None
+    assigned_at: datetime
+    team_leader_id: uuid.UUID | None
+    assignment_status: str
+    reassigned_from: uuid.UUID | None
+    reassigned_to: uuid.UUID | None
+    reassigned_at: datetime | None
+    reassignment_reason: str | None
+    current_status: TelecallingStatus
+    attempt_count: int
+    last_attempt_at: datetime | None
+    next_follow_up_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CheckoutCallAttemptResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    checkout_id: uuid.UUID
+    telecaller_id: uuid.UUID | None
+    attempt_number: int
+    attempted_at: datetime
+    outcome: TelecallingStatus
+    notes: str | None
+    next_follow_up_at: datetime | None
+    created_at: datetime
 
 
 class CallHistoryEntryResponse(CallAttemptResponse):
@@ -132,13 +229,23 @@ class TelecallerPerformanceResponse(BaseModel):
     telecaller_name: str
     assigned: int
     called: int
+    pending: int = 0
     connected: int
+    interested: int = 0
     follow_ups: int
     confirmed: int
     not_interested: int
+    # Percentage (0-100, one decimal) of assigned leads marked CONFIRMED —
+    # this codebase's existing enum has no separate "Converted" status
+    # (spec's suggested outcome list, reused as-is per the "don't create
+    # duplicate outcome systems" rule); CONFIRMED is treated as the
+    # converted-lead signal.
+    conversion_rate: float = 0.0
 
 
 class TelecallingSummaryResponse(BaseModel):
+    total_leads: int = 0
+    unassigned_leads: int = 0
     assigned: int
     pending: int
     called: int
@@ -146,3 +253,7 @@ class TelecallingSummaryResponse(BaseModel):
     follow_ups_today: int
     confirmed: int
     not_interested: int = 0
+    abandoned_checkouts: int = 0
+    cod_unfulfilled: int = 0
+    cod_fulfilled: int = 0
+    prepaid: int = 0

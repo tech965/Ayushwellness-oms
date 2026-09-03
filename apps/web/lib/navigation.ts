@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   ListChecks,
   Map,
+  MousePointerClick,
   Package,
   PackageX,
   Phone,
@@ -115,6 +116,11 @@ export const telecallerNavGroups: NavGroup[] = [
     items: [
       { label: "Dashboard", href: "/telecaller/dashboard", icon: LayoutDashboard },
       { label: "My Assigned Orders", href: "/telecaller/orders", icon: Phone },
+      {
+        label: "My Checkout Leads",
+        href: "/telecaller/checkouts",
+        icon: MousePointerClick,
+      },
       { label: "Follow-ups", href: "/telecaller/follow-ups", icon: CalendarClock },
       { label: "Call History", href: "/telecaller/calls", icon: PhoneCall },
     ],
@@ -127,6 +133,8 @@ export const teamLeaderNavGroups: NavGroup[] = [
     label: "Team",
     items: [
       { label: "Dashboard", href: "/team/dashboard", icon: LayoutDashboard },
+      { label: "Lead Pool", href: "/team/leads", icon: ListChecks },
+      { label: "Abandoned Checkouts", href: "/team/checkouts", icon: MousePointerClick },
       { label: "Unfulfilled Orders", href: "/team/orders/unfulfilled", icon: ListChecks },
       { label: "Telecallers", href: "/team/telecallers", icon: Users },
     ],

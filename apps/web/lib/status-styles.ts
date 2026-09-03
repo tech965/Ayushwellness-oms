@@ -203,6 +203,22 @@ const TELECALLING_STATUS_TONES: Record<string, StatusTone> = {
   cancelled: "danger",
 }
 
+// `app.models.enums.LeadPriority` — computed, never stored (see
+// `app.services.lead_classification`).
+const LEAD_PRIORITY_TONES: Record<string, StatusTone> = {
+  high: "danger",
+  medium: "warning",
+  low: "neutral",
+}
+
+// `app.models.enums.LeadCategory`.
+const LEAD_CATEGORY_TONES: Record<string, StatusTone> = {
+  abandoned_checkout: "purple",
+  cod_unfulfilled: "warning",
+  cod_fulfilled: "info",
+  prepaid: "success",
+}
+
 const RECONCILIATION_RESULT_STATUS_TONES: Record<string, StatusTone> = {
   reconciled: "success",
   mismatch: "warning",
@@ -243,6 +259,8 @@ export type StatusDomain =
   | "reconciliation_result"
   | "telecalling"
   | "payment_method"
+  | "lead_priority"
+  | "lead_category"
 
 const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   order: ORDER_STATUS_TONES,
@@ -263,6 +281,8 @@ const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   reconciliation_result: RECONCILIATION_RESULT_STATUS_TONES,
   telecalling: TELECALLING_STATUS_TONES,
   payment_method: PAYMENT_METHOD_TONES,
+  lead_priority: LEAD_PRIORITY_TONES,
+  lead_category: LEAD_CATEGORY_TONES,
 }
 
 export function getStatusTone(domain: StatusDomain, status: string): StatusTone {

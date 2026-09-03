@@ -30,6 +30,32 @@ export const CALL_OUTCOME_OPTIONS: { label: string; value: TelecallingStatus }[]
   { label: "Cancelled", value: "cancelled" },
 ]
 
+/** Mirrors app.models.enums.LeadCategory. */
+export type LeadCategory =
+  "abandoned_checkout" | "cod_unfulfilled" | "cod_fulfilled" | "prepaid"
+
+/** Mirrors app.models.enums.LeadPriority. */
+export type LeadPriority = "high" | "medium" | "low"
+
+export const LEAD_CATEGORY_OPTIONS: { label: string; value: LeadCategory }[] = [
+  { label: "COD Unfulfilled", value: "cod_unfulfilled" },
+  { label: "COD Fulfilled", value: "cod_fulfilled" },
+  { label: "Prepaid", value: "prepaid" },
+]
+
+export const LEAD_CATEGORY_LABELS: Record<LeadCategory, string> = {
+  abandoned_checkout: "Abandoned Checkout",
+  cod_unfulfilled: "COD Unfulfilled",
+  cod_fulfilled: "COD Fulfilled",
+  prepaid: "Prepaid",
+}
+
+export const LEAD_PRIORITY_LABELS: Record<LeadPriority, string> = {
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+}
+
 export interface AssignedOrder {
   order_id: string
   order_number: string
@@ -58,6 +84,72 @@ export interface AssignedOrder {
   attempt_count: number
   last_attempt_at: string | null
   next_follow_up_at: string | null
+  lead_category: LeadCategory | null
+  priority: LeadPriority | null
+}
+
+export interface AssignedCheckout {
+  checkout_id: string
+  customer_name: string | null
+  customer_phone: string | null
+  customer_email: string | null
+  item_summary: string | null
+  total_amount: string
+  checkout_url: string | null
+  checkout_created_at: string | null
+  is_recovered: boolean
+  assignment_id: string | null
+  assigned_to: string | null
+  assigned_to_name: string | null
+  call_status: TelecallingStatus | null
+  attempt_count: number
+  last_attempt_at: string | null
+  next_follow_up_at: string | null
+  lead_category: "abandoned_checkout"
+  priority: LeadPriority | null
+}
+
+export interface CheckoutAssignment {
+  id: string
+  checkout_id: string
+  assigned_to: string
+  assigned_by: string | null
+  assigned_at: string
+  team_leader_id: string | null
+  assignment_status: "active" | "inactive"
+  reassigned_from: string | null
+  reassigned_to: string | null
+  reassigned_at: string | null
+  reassignment_reason: string | null
+  current_status: TelecallingStatus
+  attempt_count: number
+  last_attempt_at: string | null
+  next_follow_up_at: string | null
+}
+
+export interface CheckoutCallAttempt {
+  id: string
+  checkout_id: string
+  telecaller_id: string | null
+  attempt_number: number
+  attempted_at: string
+  outcome: TelecallingStatus
+  notes: string | null
+  next_follow_up_at: string | null
+  created_at: string
+}
+
+export interface AssignCheckoutsInput {
+  checkout_ids: string[]
+  mode: "manual" | "equal"
+  telecaller_id?: string
+  telecaller_ids?: string[]
+}
+
+export interface ReassignCheckoutInput {
+  checkout_id: string
+  new_telecaller_id: string
+  reason: string
 }
 
 export interface CallAttempt {
@@ -99,13 +191,18 @@ export interface TelecallerPerformance {
   telecaller_name: string
   assigned: number
   called: number
+  pending: number
   connected: number
+  interested: number
   follow_ups: number
   confirmed: number
   not_interested: number
+  conversion_rate: number
 }
 
 export interface TelecallingSummary {
+  total_leads: number
+  unassigned_leads: number
   assigned: number
   pending: number
   called: number
@@ -113,6 +210,10 @@ export interface TelecallingSummary {
   follow_ups_today: number
   confirmed: number
   not_interested: number
+  abandoned_checkouts: number
+  cod_unfulfilled: number
+  cod_fulfilled: number
+  prepaid: number
 }
 
 export interface AssignOrdersInput {

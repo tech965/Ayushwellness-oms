@@ -45,3 +45,7 @@ class ShipmentNormalizer(Normalizer):
 
 class RefundNormalizer(Normalizer):
     entity_type = "refunds"
+
+
+class AbandonedCheckoutNormalizer(Normalizer):
+    entity_type = "abandoned_checkouts"

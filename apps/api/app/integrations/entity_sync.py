@@ -29,6 +29,7 @@ from app.repositories.payment import PaymentRepository
 from app.repositories.refund import RefundRepository
 from app.repositories.shipment import ShipmentRepository
 from app.repositories.sync_error import SyncErrorRepository
+from app.services.abandoned_checkout_service import AbandonedCheckoutService
 from app.services.customer_service import CustomerService
 from app.services.ndr_service import NDRService
 from app.services.order_service import OrderService
@@ -50,6 +51,12 @@ async def _upsert_product(session: AsyncSession, data: dict[str, Any]) -> tuple[
 
 async def _upsert_order(session: AsyncSession, data: dict[str, Any]) -> tuple[Any, bool]:
     return await OrderService(session).upsert_synced_order(**data)
+
+
+async def _upsert_abandoned_checkout(
+    session: AsyncSession, data: dict[str, Any]
+) -> tuple[Any, bool]:
+    return await AbandonedCheckoutService(session).upsert_synced_checkout(**data)
 
 
 async def _upsert_ndr(session: AsyncSession, data: dict[str, Any]) -> tuple[Any, bool]:
@@ -458,4 +465,5 @@ ENTITY_UPSERT_HANDLERS: dict[str, UpsertHandler] = {
     "ndr": _upsert_ndr,
     "shipments": _upsert_shipment,
     "refunds": _upsert_refund,
+    "abandoned_checkouts": _upsert_abandoned_checkout,
 }

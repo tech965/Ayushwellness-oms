@@ -170,10 +170,59 @@ query Orders($first: Int!, $after: String, $query: String) {
 }
 """
 
+ABANDONED_CHECKOUTS_QUERY = """
+query AbandonedCheckouts($first: Int!, $after: String, $query: String) {
+  abandonedCheckouts(first: $first, after: $after, query: $query, sortKey: UPDATED_AT) {
+    pageInfo { hasNextPage endCursor }
+    edges {
+      node {
+        id
+        name
+        email
+        phone
+        abandonedCheckoutUrl
+        completedAt
+        createdAt
+        updatedAt
+        totalPriceSet { shopMoney { amount } }
+        subtotalPriceSet { shopMoney { amount } }
+        customer {
+          id
+          firstName
+          lastName
+          email
+          phone
+        }
+        billingAddress {
+          name
+          phone
+        }
+        # Kept intentionally minimal (title/quantity only) -- this is
+        # display-only data for the calling workflow ("Products,
+        # Quantity" per spec), and every extra field requested here is
+        # one more chance to reference a field name this schema version
+        # doesn't actually have (unlike REST, an unknown GraphQL field
+        # fails the whole query, not just that one value -- see this
+        # file's module docstring).
+        lineItems(first: 100) {
+          edges {
+            node {
+              title
+              quantity
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
 ENTITY_QUERIES: dict[str, str] = {
     "customers": CUSTOMERS_QUERY,
     "products": PRODUCTS_QUERY,
     "orders": ORDERS_QUERY,
+    "abandoned_checkouts": ABANDONED_CHECKOUTS_QUERY,
 }
 
 

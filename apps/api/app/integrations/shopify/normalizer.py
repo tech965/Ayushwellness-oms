@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.integrations.normalizer import (
+    AbandonedCheckoutNormalizer,
     CustomerNormalizer,
     Normalizer,
     OrderNormalizer,
@@ -505,14 +506,84 @@ class ShopifyRefundNormalizer(RefundNormalizer):
         }
 
 
+# --- Abandoned checkout ----------------------------------------------------
+
+
+class ShopifyAbandonedCheckoutNormalizer(AbandonedCheckoutNormalizer):
+    """Maps a raw `abandonedCheckouts` GraphQL node to
+    `AbandonedCheckoutService.upsert_synced_checkout`'s kwargs — same
+    `.get()`-everywhere defensiveness as every other normalizer in this
+    module, since `ABANDONED_CHECKOUTS_QUERY` (queries.py) is authored
+    against the documented schema shape and not yet verified against a
+    live store's introspection (see that query's own comment).
+    """
+
+    def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
+        external_id = _gid_to_external_id(raw.get("id"))
+        customer = raw.get("customer") or {}
+        billing = raw.get("billingAddress") or {}
+
+        customer_name = _clean_text(
+            billing.get("name")
+            or " ".join(filter(None, [customer.get("firstName"), customer.get("lastName")]))
+            or None,
+            max_len=255,
+        )
+        # Checkout-level `email`/`phone` (present even for a guest
+        # checkout with no linked Shopify `Customer`) is tried first;
+        # the linked customer's/billing address's own values are the
+        # fallback -- never fabricated when all three are absent (see
+        # `AbandonedCheckout`'s module docstring: a row with neither is
+        # never surfaced as an assignable lead).
+        customer_phone = _clean_text(
+            raw.get("phone") or customer.get("phone") or billing.get("phone"), max_len=32
+        )
+        customer_email = _clean_text(raw.get("email") or customer.get("email"), max_len=255)
+
+        line_items = [
+            {
+                "title": _clean_text((edge.get("node") or {}).get("title"), max_len=500)
+                or "Unknown item",
+                "quantity": (edge.get("node") or {}).get("quantity") or 0,
+            }
+            for edge in (raw.get("lineItems", {}).get("edges") or [])
+        ]
+
+        total = _money(raw.get("totalPriceSet"))
+        subtotal = _money(raw.get("subtotalPriceSet")) or total
+
+        return {
+            "source_system": SourceSystem.SHOPIFY,
+            "external_id": external_id,
+            "shopify_checkout_id": external_id,
+            "customer_external_id": _gid_to_external_id(customer.get("id")),
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "customer_email": customer_email,
+            "checkout_url": _clean_text(raw.get("abandonedCheckoutUrl"), max_len=2000),
+            "currency": "INR",
+            "subtotal_amount": subtotal,
+            "total_amount": total,
+            "line_items": line_items or None,
+            "is_recovered": bool(raw.get("completedAt")),
+            "checkout_created_at": _parse_datetime(raw.get("createdAt")),
+            "checkout_updated_at": _parse_datetime(raw.get("updatedAt")),
+            "external_created_at": _parse_datetime(raw.get("createdAt")),
+            "external_updated_at": _parse_datetime(raw.get("updatedAt")),
+            "raw_external_payload": _sanitize_raw_payload(raw),
+        }
+
+
 CUSTOMER_NORMALIZER: Normalizer = ShopifyCustomerNormalizer()
 PRODUCT_NORMALIZER: Normalizer = ShopifyProductNormalizer()
 ORDER_NORMALIZER: Normalizer = ShopifyOrderNormalizer()
 REFUND_NORMALIZER: Normalizer = ShopifyRefundNormalizer()
+ABANDONED_CHECKOUT_NORMALIZER: Normalizer = ShopifyAbandonedCheckoutNormalizer()
 
 ENTITY_NORMALIZERS: dict[str, Normalizer] = {
     "customers": CUSTOMER_NORMALIZER,
     "products": PRODUCT_NORMALIZER,
     "orders": ORDER_NORMALIZER,
     "refunds": REFUND_NORMALIZER,
+    "abandoned_checkouts": ABANDONED_CHECKOUT_NORMALIZER,
 }

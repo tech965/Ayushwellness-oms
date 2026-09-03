@@ -66,6 +66,7 @@ async def test_scheduled_sync_enqueues_only_entities_a_registered_adapter_suppor
         (IntegrationCode.SHOPIFY, "orders"),
         (IntegrationCode.SHOPIFY, "customers"),
         (IntegrationCode.SHOPIFY, "products"),
+        (IntegrationCode.SHOPIFY, "abandoned_checkouts"),
     ]
     # Regression test for the historical-backlog production incident: a
     # brand-new entity with no completed baseline and no `backlog_complete`
@@ -77,6 +78,7 @@ async def test_scheduled_sync_enqueues_only_entities_a_registered_adapter_suppor
         (str(shopify_integration.id), SyncType.FULL.value, "orders"),
         (str(shopify_integration.id), SyncType.FULL.value, "customers"),
         (str(shopify_integration.id), SyncType.FULL.value, "products"),
+        (str(shopify_integration.id), SyncType.FULL.value, "abandoned_checkouts"),
     ]
 
 
