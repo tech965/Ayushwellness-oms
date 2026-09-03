@@ -115,6 +115,15 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     # OMS staff.
     shopify_tags: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
     shopify_order_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The actual Shopify delivery/shipment-progress status
+    # (`Fulfillment.displayStatus` — IN_TRANSIT/OUT_FOR_DELIVERY/
+    # DELIVERED/... 18 values), stored as Shopify's own raw lowercased
+    # string rather than a new OMS enum (no natural, non-lossy mapping
+    # exists — see `normalize_shipment_status`'s docstring). Deliberately
+    # a separate column from `fulfillment_status` above (Shopify's much
+    # coarser UNFULFILLED/PARTIALLY_FULFILLED/FULFILLED) — the two must
+    # never be conflated in the UI.
+    shopify_shipment_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # Point-in-time snapshot of the address used for this order — not a
     # CustomerAddress FK, matching OrderItem's existing snapshot
     # convention (an order's shipping/billing address must never change

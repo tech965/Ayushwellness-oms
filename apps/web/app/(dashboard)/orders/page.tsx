@@ -228,28 +228,27 @@ const ALL_COLUMNS: ColumnDef[] = [
       cell: (o) => <StatusBadge domain="order" status={o.status} />,
     },
   },
-  // "Shipment Status" (the visible-by-default column) must be Shopify's
-  // own fulfillment status (`Order.fulfillment_status`, synced from
-  // GraphQL `displayFulfillmentStatus` — see
-  // `app/integrations/shopify/normalizer.py`), never Shiprocket's
-  // courier-progress status. The two column ids below are intentionally
-  // left unchanged from before this fix (only which field each renders,
-  // and their labels, changed) so a viewer's saved column-visibility
-  // preference (`oms_orders_visible_columns` in localStorage) isn't
-  // silently reset by this fix.
+  // Three deliberately separate concepts, never conflated:
+  //   Order Status        -> OMS order lifecycle (`o.status`, above)
+  //   Fulfillment Status  -> Shopify's fulfilled/unfulfilled/partial
+  //                          (`o.fulfillment_status`, synced from
+  //                          GraphQL `displayFulfillmentStatus`)
+  //   Shipment Status     -> Shiprocket's actual delivery/shipment
+  //                          progress (`o.shipment_status`, synced from
+  //                          Shiprocket's own `status` field via
+  //                          `Shipment.current_status` — see
+  //                          `app/integrations/shiprocket/normalizer.py`)
+  // Must never render `fulfillment_status` as "Shipment Status", and
+  // must never derive Shipment Status from Shopify data at all — that
+  // was the exact reported bug this fix corrects.
   {
-    id: "fulfillment_status",
-    label: "Courier Status",
-    defaultVisible: false,
+    id: "shopify_fulfillment_status",
+    label: "Fulfillment Status",
+    defaultVisible: true,
     column: {
-      id: "fulfillment_status",
-      header: "Courier Status",
-      cell: (o) =>
-        o.shipment_status ? (
-          <StatusBadge domain="shipment" status={o.shipment_status} />
-        ) : (
-          "—"
-        ),
+      id: "shopify_fulfillment_status",
+      header: "Fulfillment Status",
+      cell: (o) => <StatusBadge domain="fulfillment" status={o.fulfillment_status} />,
     },
   },
   {
@@ -259,7 +258,12 @@ const ALL_COLUMNS: ColumnDef[] = [
     column: {
       id: "shipment_status",
       header: "Shipment Status",
-      cell: (o) => <StatusBadge domain="fulfillment" status={o.fulfillment_status} />,
+      cell: (o) =>
+        o.shipment_status ? (
+          <StatusBadge domain="shipment" status={o.shipment_status} />
+        ) : (
+          "—"
+        ),
     },
   },
   {

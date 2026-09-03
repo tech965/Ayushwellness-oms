@@ -85,6 +85,12 @@ class OrderResponse(BaseModel):
     # real (possibly empty) list, never `None`, per `normalize_tags`.
     shopify_tags: list[str] | None = None
     shopify_order_note: str | None = None
+    # The actual Shopify delivery/shipment status (`Fulfillment.
+    # displayStatus`) — see `Order.shopify_shipment_status` in
+    # app/models/order.py. Deliberately separate from `fulfillment_status`
+    # above (Shopify's coarser fulfilled/unfulfilled/partial) — never
+    # conflate the two in the frontend.
+    shopify_shipment_status: str | None = None
     shipping_address: dict | None
     billing_address: dict | None
     source_system: str | None

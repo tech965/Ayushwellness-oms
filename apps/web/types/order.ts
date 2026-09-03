@@ -57,6 +57,11 @@ export interface Order {
   // empty) array.
   shopify_tags: string[] | null
   shopify_order_note: string | null
+  // The actual Shopify delivery/shipment status (`Fulfillment.
+  // displayStatus`) — deliberately separate from `fulfillment_status`
+  // above (Shopify's much coarser fulfilled/unfulfilled/partial). Never
+  // render one in place of the other.
+  shopify_shipment_status: string | null
   shipping_address: OrderAddress | null
   billing_address: OrderAddress | null
   source_system: string | null

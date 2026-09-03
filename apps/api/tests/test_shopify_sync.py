@@ -131,6 +131,7 @@ def _orders_response(
     note: str | None = None,
     updated_at: str = "2026-01-02T00:00:00Z",
     fulfillment_status: str = "UNFULFILLED",
+    shipment_display_status: str | None = None,
 ) -> dict:
     return {
         "orders": {
@@ -148,6 +149,11 @@ def _orders_response(
                         "displayFulfillmentStatus": fulfillment_status,
                         "tags": tags,
                         "note": note,
+                        "fulfillments": (
+                            [{"displayStatus": shipment_display_status}]
+                            if shipment_display_status
+                            else []
+                        ),
                         "subtotalPriceSet": {"shopMoney": {"amount": "500.00"}},
                         "totalDiscountsSet": {"shopMoney": {"amount": "0.00"}},
                         "totalTaxSet": {"shopMoney": {"amount": "0.00"}},
@@ -474,6 +480,93 @@ async def test_resync_updates_fulfillment_status_on_an_existing_order(
     )
     await db_session.refresh(order)
     assert order.fulfillment_status == "fulfilled"
+
+
+async def test_order_sync_imports_the_real_shopify_shipment_status(
+    db_session: AsyncSession,
+) -> None:
+    """Regression test for the reported bug: the "Shipment Status" column
+    must never render `fulfillment_status` — it must come from Shopify's
+    actual delivery/shipment-progress status (`Fulfillment.displayStatus`),
+    stored on a separate column.
+    """
+    client = _StubClient(
+        [
+            _orders_response(
+                "515", fulfillment_status="UNFULFILLED", shipment_display_status="OUT_FOR_DELIVERY"
+            )
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="515"
+    )
+    assert order is not None
+    assert order.shopify_shipment_status == "out_for_delivery"
+    # The two fields are never the same value here — proves they're
+    # genuinely independent, not one derived from the other.
+    assert order.fulfillment_status == "unfulfilled"
+    assert order.shopify_shipment_status != order.fulfillment_status
+
+
+async def test_order_sync_with_no_shopify_fulfillment_yet_leaves_shipment_status_none(
+    db_session: AsyncSession,
+) -> None:
+    client = _StubClient([_orders_response("516")])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="516"
+    )
+    assert order is not None
+    assert order.shopify_shipment_status is None
+
+
+async def test_resync_updates_shopify_shipment_status_on_an_existing_order(
+    db_session: AsyncSession,
+) -> None:
+    """Historical orders pick up Shopify's current delivery status on
+    their next resync — same always-overwritten `data` dict as every
+    other Shopify-owned field, no separate backfill path needed.
+    """
+    client = _StubClient(
+        [
+            _orders_response("517", shipment_display_status="IN_TRANSIT"),
+            _orders_response(
+                "517",
+                shipment_display_status="DELIVERED",
+                updated_at="2026-01-03T00:00:00Z",
+            ),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+    service = SyncService(db_session)
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="517"
+    )
+    assert order.shopify_shipment_status == "in_transit"
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    await db_session.refresh(order)
+    assert order.shopify_shipment_status == "delivered"
 
 
 # 19. Partial sync failure

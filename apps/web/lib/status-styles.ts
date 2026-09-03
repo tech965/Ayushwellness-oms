@@ -123,6 +123,32 @@ const FULFILLMENT_STATUS_TONES: Record<string, StatusTone> = {
   fulfilled: "success",
 }
 
+// Shopify `Fulfillment.displayStatus` values (the actual delivery/
+// shipment-progress status — see `Order.shopify_shipment_status`) — a
+// distinct vocabulary from `SHIPMENT_STATUS_TONES` above, which is
+// Shiprocket's own `ShipmentStatus` enum. Kept as a separate domain/map
+// so the two sources are never visually or semantically conflated.
+const SHOPIFY_SHIPMENT_STATUS_TONES: Record<string, StatusTone> = {
+  submitted: "neutral",
+  confirmed: "info",
+  label_purchased: "neutral",
+  label_printed: "neutral",
+  label_voided: "danger",
+  carrier_picked_up: "info",
+  picked_up: "info",
+  ready_for_pickup: "neutral",
+  in_transit: "info",
+  out_for_delivery: "purple",
+  delayed: "warning",
+  attempted_delivery: "warning",
+  delivered: "success",
+  not_delivered: "danger",
+  failure: "danger",
+  canceled: "danger",
+  fulfilled: "success",
+  marked_as_fulfilled: "success",
+}
+
 const SHIPMENT_DELAY_TONES: Record<string, StatusTone> = {
   on_time: "success",
   at_risk: "warning",
@@ -203,6 +229,7 @@ export type StatusDomain =
   | "payment"
   | "fulfillment"
   | "shipment"
+  | "shopify_shipment"
   | "shipment_delay"
   | "ndr"
   | "rto"
@@ -222,6 +249,7 @@ const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   payment: PAYMENT_STATUS_TONES,
   fulfillment: FULFILLMENT_STATUS_TONES,
   shipment: SHIPMENT_STATUS_TONES,
+  shopify_shipment: SHOPIFY_SHIPMENT_STATUS_TONES,
   shipment_delay: SHIPMENT_DELAY_TONES,
   ndr: NDR_STATUS_TONES,
   rto: RTO_STATUS_TONES,

@@ -85,6 +85,7 @@ const BASE_ORDER: OrderDetail = {
   notes: null,
   shopify_tags: null,
   shopify_order_note: null,
+  shopify_shipment_status: null,
   shipping_address: null,
   billing_address: null,
   source_system: "shopify",

@@ -93,6 +93,7 @@ describe("OrdersPage", () => {
               notes: null,
               shopify_tags: null,
               shopify_order_note: null,
+              shopify_shipment_status: null,
               shipping_address: null,
               billing_address: null,
               source_system: "manual",
@@ -108,13 +109,13 @@ describe("OrdersPage", () => {
     expect(screen.getByText("OMS-1001")).toBeInTheDocument()
   })
 
-  // Issue 2 regression: the visible-by-default "Shipment Status" column
-  // must render Shopify's `fulfillment_status`, never Shiprocket's
-  // `shipment_status` — Shiprocket's own status is still available, just
-  // under a separate "Courier Status" column that stays off by default
-  // (same as before), so the two sources are never conflated in the one
-  // column most viewers actually see.
-  it("renders the Shipment Status column from Shopify fulfillment_status, not Shiprocket shipment_status", () => {
+  // Regression test: "Fulfillment Status" and "Shipment Status" are two
+  // distinct, default-visible columns backed by two distinct fields and
+  // two distinct sources -- Shopify's `fulfillment_status` must never
+  // render as "Shipment Status", and Shipment Status must come from
+  // Shiprocket's real `shipment_status` (via `Shipment.current_status`),
+  // never from any Shopify field.
+  it("renders Fulfillment Status (Shopify) and Shipment Status (Shiprocket) from their own separate fields", () => {
     const order: Order = {
       id: "1",
       order_number: "OMS-SHIP-SRC",
@@ -135,12 +136,13 @@ describe("OrdersPage", () => {
       notes: null,
       shopify_tags: null,
       shopify_order_note: null,
+      shopify_shipment_status: "out_for_delivery",
       shipping_address: null,
       billing_address: null,
       source_system: "shopify",
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
-      shipment_status: "pending",
+      shipment_status: "out_for_delivery",
     }
 
     mockedUseOrders.mockReturnValue(
@@ -155,12 +157,103 @@ describe("OrdersPage", () => {
     )
     renderWithProviders(<OrdersPage />)
 
-    // Shopify's fulfillment_status ("unfulfilled") renders in the
-    // default-visible Shipment Status column...
+    // Fulfillment Status column shows Shopify's fulfillment_status.
     expect(screen.getByText("Unfulfilled")).toBeInTheDocument()
-    // ...while Shiprocket's shipment_status ("pending") is not shown,
-    // because its column (Courier Status) is off by default.
-    expect(screen.queryByText("Pending")).not.toBeInTheDocument()
+    // Shipment Status column shows Shiprocket's shipment_status.
+    expect(screen.getByText("Out For Delivery")).toBeInTheDocument()
+    // Only one badge for it -- not duplicated across two columns.
+    expect(screen.getAllByText("Out For Delivery")).toHaveLength(1)
+  })
+
+  it("distinguishes Shipment Status from Shopify's fulfillment_status when the two values differ", () => {
+    const order: Order = {
+      id: "1b",
+      order_number: "OMS-SHIP-DISTINCT",
+      shopify_order_id: "1001b",
+      customer_id: null,
+      order_datetime: "2026-01-01T00:00:00Z",
+      currency: "INR",
+      subtotal: "100.00",
+      discount_amount: "0.00",
+      tax_amount: "0.00",
+      shipping_charge: "0.00",
+      total_amount: "100.00",
+      payment_type: "prepaid",
+      payment_status: "paid",
+      status: "confirmed",
+      fulfillment_status: "fulfilled",
+      cancellation_status: "none",
+      notes: null,
+      shopify_tags: null,
+      shopify_order_note: null,
+      shopify_shipment_status: null,
+      shipping_address: null,
+      billing_address: null,
+      source_system: "shopify",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      shipment_status: "in_transit",
+    }
+
+    mockedUseOrders.mockReturnValue(
+      baseQueryResult({
+        data: {
+          success: true,
+          message: "Success",
+          data: [order],
+          meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+        },
+      })
+    )
+    renderWithProviders(<OrdersPage />)
+
+    // Both render, independently, from their own field.
+    expect(screen.getByText("Fulfilled")).toBeInTheDocument()
+    expect(screen.getByText("In Transit")).toBeInTheDocument()
+  })
+
+  it("shows a dash for Shipment Status when no Shiprocket shipment exists yet, never a fabricated value", () => {
+    const order: Order = {
+      id: "2",
+      order_number: "OMS-SHIP-NONE",
+      shopify_order_id: "1002",
+      customer_id: null,
+      order_datetime: "2026-01-01T00:00:00Z",
+      currency: "INR",
+      subtotal: "100.00",
+      discount_amount: "0.00",
+      tax_amount: "0.00",
+      shipping_charge: "0.00",
+      total_amount: "100.00",
+      payment_type: "prepaid",
+      payment_status: "pending",
+      status: "pending",
+      fulfillment_status: "unfulfilled",
+      cancellation_status: "none",
+      notes: null,
+      shopify_tags: null,
+      shopify_order_note: null,
+      shopify_shipment_status: null,
+      shipping_address: null,
+      billing_address: null,
+      source_system: "shopify",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    }
+
+    mockedUseOrders.mockReturnValue(
+      baseQueryResult({
+        data: {
+          success: true,
+          message: "Success",
+          data: [order],
+          meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+        },
+      })
+    )
+    renderWithProviders(<OrdersPage />)
+
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0)
   })
 
   // Regression coverage for the reported "Pending filter doesn't
@@ -258,6 +351,7 @@ describe("OrdersPage", () => {
       notes: null,
       shopify_tags: null,
       shopify_order_note: null,
+      shopify_shipment_status: null,
       shipping_address: null,
       billing_address: null,
       source_system: "manual",

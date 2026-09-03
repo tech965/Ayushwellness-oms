@@ -323,6 +323,34 @@ def normalize_tags(value: Any) -> list[str]:
     return []
 
 
+def normalize_shipment_status(raw_fulfillments: Any) -> str | None:
+    """Extracts the actual Shopify delivery/shipment-progress status --
+    `Fulfillment.displayStatus` (GraphQL `FulfillmentDisplayStatus`,
+    e.g. `IN_TRANSIT`/`OUT_FOR_DELIVERY`/`DELIVERED`) -- deliberately NOT
+    `Order.displayFulfillmentStatus` (only UNFULFILLED/PARTIALLY_FULFILLED/
+    FULFILLED), which stays mapped to `Order.fulfillment_status` unchanged.
+
+    Stored as Shopify's own raw (lowercased) enum string rather than a new
+    OMS enum: `FulfillmentDisplayStatus` has 18 documented values and no
+    natural OMS equivalent to collapse them into (unlike payment/
+    fulfillment status, which do), so inventing one here would either lose
+    information or need to be kept in lockstep with Shopify's own schema
+    forever. An order can have more than one `Fulfillment` (split
+    shipments); the LAST one in Shopify's list is treated as "current",
+    matching `_to_list_response`'s existing `order.shipments[-1]`
+    convention for Shiprocket shipments -- no fulfillment yet (or every
+    fulfillment's `displayStatus` still null, e.g. immediately after
+    creation before Shopify's tracking pipeline has an update) correctly
+    returns `None`, never a fabricated default.
+    """
+    fulfillments = raw_fulfillments if isinstance(raw_fulfillments, list) else []
+    for fulfillment in reversed(fulfillments):
+        display_status = (fulfillment or {}).get("displayStatus")
+        if display_status:
+            return str(display_status).lower()
+    return None
+
+
 def normalize_payment_status(raw_status: str | None) -> PaymentStatus:
     return _PAYMENT_STATUS_MAP.get((raw_status or "").upper(), PaymentStatus.PENDING)
 
@@ -376,6 +404,7 @@ class ShopifyOrderNormalizer(OrderNormalizer):
             # normalizer has never touched and still doesn't.
             "shopify_tags": normalize_tags(raw.get("tags")),
             "shopify_order_note": _clean_text(raw.get("note"), max_len=5000),
+            "shopify_shipment_status": normalize_shipment_status(raw.get("fulfillments")),
             "shipping_address": normalize_address(raw.get("shippingAddress")),
             "billing_address": normalize_address(raw.get("billingAddress")),
             "external_created_at": _parse_datetime(raw.get("createdAt")),

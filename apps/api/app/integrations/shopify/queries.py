@@ -153,6 +153,17 @@ query Orders($first: Int!, $after: String, $query: String) {
             }
           }
         }
+        # Plain list (not a connection — no edges/node), confirmed against
+        # the live schema. `displayStatus` is the actual delivery-progress
+        # status (IN_TRANSIT/OUT_FOR_DELIVERY/DELIVERED/... — 18 values),
+        # distinct from `displayFulfillmentStatus` above (only
+        # UNFULFILLED/PARTIALLY_FULFILLED/FULFILLED/...). An order can have
+        # more than one fulfillment (split shipments); the normalizer takes
+        # the last one as "current", matching `_to_list_response`'s existing
+        # `order.shipments[-1]` convention for Shiprocket shipments.
+        fulfillments(first: 10) {
+          displayStatus
+        }
       }
     }
   }

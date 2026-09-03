@@ -12,6 +12,7 @@ from app.integrations.shopify.normalizer import (
     normalize_fulfillment_status,
     normalize_payment_status,
     normalize_payment_type,
+    normalize_shipment_status,
     normalize_tags,
 )
 from app.integrations.shopify.webhook_shapes import order_webhook_to_graphql_shape
@@ -295,6 +296,100 @@ def test_order_webhook_shape_translates_rest_tags_and_note_for_the_normalizer() 
     data = ShopifyOrderNormalizer().normalize(graphql_shape)
     assert data["shopify_tags"] == ["COD", "VIP"]
     assert data["shopify_order_note"] == "Call before delivery"
+
+
+# Shipment Status regression: `Fulfillment.displayStatus` (the real
+# Shopify delivery/shipment-progress status) must never be conflated with
+# `Order.displayFulfillmentStatus` (fulfillment_status).
+
+
+def test_order_normalization_maps_shipment_status_from_fulfillment_display_status() -> None:
+    raw = _minimal_order_raw(fulfillments=[{"displayStatus": "IN_TRANSIT"}])
+    data = ShopifyOrderNormalizer().normalize(raw)
+    assert data["shopify_shipment_status"] == "in_transit"
+    # Never conflated with the unrelated, separately-mapped field.
+    assert data["fulfillment_status"] != data["shopify_shipment_status"]
+
+
+def test_order_normalization_with_no_fulfillments_yet_leaves_shipment_status_none() -> None:
+    """No fabricated default -- an order with zero fulfillments genuinely
+    has no delivery status yet.
+    """
+    raw = _minimal_order_raw(fulfillments=[])
+    data = ShopifyOrderNormalizer().normalize(raw)
+    assert data["shopify_shipment_status"] is None
+
+
+def test_order_normalization_missing_fulfillments_key_leaves_shipment_status_none() -> None:
+    raw = _minimal_order_raw()
+    assert "fulfillments" not in raw
+    data = ShopifyOrderNormalizer().normalize(raw)
+    assert data["shopify_shipment_status"] is None
+
+
+def test_normalize_shipment_status_takes_the_last_fulfillments_non_null_status() -> None:
+    """An order can have more than one Fulfillment (split shipments) --
+    the LAST one is treated as "current", matching `_to_list_response`'s
+    existing `order.shipments[-1]` convention for Shiprocket shipments.
+    """
+    assert (
+        normalize_shipment_status(
+            [{"displayStatus": "DELIVERED"}, {"displayStatus": "OUT_FOR_DELIVERY"}]
+        )
+        == "out_for_delivery"
+    )
+
+
+def test_normalize_shipment_status_skips_trailing_null_and_uses_the_last_real_value() -> None:
+    """A fulfillment can exist with `displayStatus` still null (right
+    after creation, before Shopify's tracking pipeline has an update) --
+    must fall back to the nearest real status, not report `None` while an
+    earlier fulfillment clearly does have one.
+    """
+    assert (
+        normalize_shipment_status([{"displayStatus": "DELIVERED"}, {"displayStatus": None}])
+        == "delivered"
+    )
+
+
+def test_normalize_shipment_status_of_empty_list_is_none() -> None:
+    assert normalize_shipment_status([]) is None
+
+
+def test_normalize_shipment_status_of_non_list_is_none() -> None:
+    assert normalize_shipment_status(None) is None
+
+
+def test_order_webhook_shape_translates_rest_fulfillment_shipment_status() -> None:
+    """REST webhook delivery shape -- `Fulfillment.shipment_status`
+    ("in_transit"/"delivered"/...) -> the same normalizer the GraphQL
+    pull-sync path uses, unmodified.
+    """
+    rest_payload = {
+        "id": 901,
+        "name": "#901",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "line_items": [],
+        "fulfillments": [{"shipment_status": "in_transit"}],
+    }
+    graphql_shape = order_webhook_to_graphql_shape(rest_payload)
+    data = ShopifyOrderNormalizer().normalize(graphql_shape)
+    assert data["shopify_shipment_status"] == "in_transit"
+
+
+def test_order_webhook_shape_handles_a_fulfillment_with_no_shipment_status_yet() -> None:
+    rest_payload = {
+        "id": 902,
+        "name": "#902",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "line_items": [],
+        "fulfillments": [{"shipment_status": None}],
+    }
+    graphql_shape = order_webhook_to_graphql_shape(rest_payload)
+    data = ShopifyOrderNormalizer().normalize(graphql_shape)
+    assert data["shopify_shipment_status"] is None
 
 
 def test_line_item_with_no_discount_still_gets_a_nonzero_total() -> None:
