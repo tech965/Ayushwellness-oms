@@ -23,6 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useRefunds } from "@/services/refunds"
@@ -39,7 +40,29 @@ const FILTER_DEFAULTS = {
   page_size: 20,
 }
 
+function RefundsSkeleton() {
+  return (
+    <>
+      <PageHeader title="Refunds" description="Customer refunds and their progress." />
+      <div className="flex flex-col gap-3">
+        <Skeleton className="h-10 w-full max-w-2xl" />
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Skeleton key={i} className="h-10 w-full" />
+        ))}
+      </div>
+    </>
+  )
+}
+
 export default function RefundsPage() {
+  return (
+    <React.Suspense fallback={<RefundsSkeleton />}>
+      <RefundsPageContent />
+    </React.Suspense>
+  )
+}
+
+function RefundsPageContent() {
   const router = useRouter()
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
 

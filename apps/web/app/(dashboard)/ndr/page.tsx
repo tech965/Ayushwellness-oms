@@ -33,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
 import { formatDate, formatMoney } from "@/lib/format"
@@ -161,7 +162,29 @@ function NdrReattemptAction({ ndr }: { ndr: NDR }) {
   )
 }
 
+function NdrSkeleton() {
+  return (
+    <>
+      <PageHeader title="NDR" description="Non-delivery reports awaiting resolution." />
+      <div className="flex flex-col gap-3">
+        <Skeleton className="h-10 w-full max-w-2xl" />
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Skeleton key={i} className="h-10 w-full" />
+        ))}
+      </div>
+    </>
+  )
+}
+
 export default function NdrPage() {
+  return (
+    <React.Suspense fallback={<NdrSkeleton />}>
+      <NdrPageContent />
+    </React.Suspense>
+  )
+}
+
+function NdrPageContent() {
   const router = useRouter()
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
 
