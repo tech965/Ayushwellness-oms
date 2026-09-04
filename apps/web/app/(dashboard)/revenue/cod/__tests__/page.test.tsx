@@ -78,10 +78,17 @@ describe("CodRevenuePage", () => {
     expect(screen.getByText("Paid vs Pending COD")).toBeInTheDocument()
     expect(screen.getByText("COD Revenue Timeline")).toBeInTheDocument()
 
-    // 12: clickable segments apply the right filter -- Paid/Pending link
+    // 12: clickable segments apply the right filter -- Paid links straight
     // to the existing Orders page pre-filtered by payment_type + status.
     const paidLink = screen.getByText("Paid COD").closest("a")
     expect(paidLink?.getAttribute("href")).toContain("payment_type=cod")
     expect(paidLink?.getAttribute("href")).toContain("payment_status=paid")
+
+    // Pending COD now drills into the Fulfilled/Unfulfilled breakdown
+    // first, instead of going straight to Orders (the one behavior change
+    // this request makes -- Prepaid's Pending is unaffected, see the
+    // prepaid page test).
+    const pendingLink = screen.getByText("Pending COD").closest("a")
+    expect(pendingLink?.getAttribute("href")).toContain("/revenue/cod/pending")
   })
 })

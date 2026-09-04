@@ -123,6 +123,32 @@ const FULFILLMENT_STATUS_TONES: Record<string, StatusTone> = {
   fulfilled: "success",
 }
 
+// Shopify `Fulfillment.displayStatus` values (the actual delivery/
+// shipment-progress status — see `Order.shopify_shipment_status`) — a
+// distinct vocabulary from `SHIPMENT_STATUS_TONES` above, which is
+// Shiprocket's own `ShipmentStatus` enum. Kept as a separate domain/map
+// so the two sources are never visually or semantically conflated.
+const SHOPIFY_SHIPMENT_STATUS_TONES: Record<string, StatusTone> = {
+  submitted: "neutral",
+  confirmed: "info",
+  label_purchased: "neutral",
+  label_printed: "neutral",
+  label_voided: "danger",
+  carrier_picked_up: "info",
+  picked_up: "info",
+  ready_for_pickup: "neutral",
+  in_transit: "info",
+  out_for_delivery: "purple",
+  delayed: "warning",
+  attempted_delivery: "warning",
+  delivered: "success",
+  not_delivered: "danger",
+  failure: "danger",
+  canceled: "danger",
+  fulfilled: "success",
+  marked_as_fulfilled: "success",
+}
+
 const SHIPMENT_DELAY_TONES: Record<string, StatusTone> = {
   on_time: "success",
   at_risk: "warning",
@@ -177,6 +203,22 @@ const TELECALLING_STATUS_TONES: Record<string, StatusTone> = {
   cancelled: "danger",
 }
 
+// `app.models.enums.LeadPriority` — computed, never stored (see
+// `app.services.lead_classification`).
+const LEAD_PRIORITY_TONES: Record<string, StatusTone> = {
+  high: "danger",
+  medium: "warning",
+  low: "neutral",
+}
+
+// `app.models.enums.LeadCategory`.
+const LEAD_CATEGORY_TONES: Record<string, StatusTone> = {
+  abandoned_checkout: "purple",
+  cod_unfulfilled: "warning",
+  cod_fulfilled: "info",
+  prepaid: "success",
+}
+
 const RECONCILIATION_RESULT_STATUS_TONES: Record<string, StatusTone> = {
   reconciled: "success",
   mismatch: "warning",
@@ -203,6 +245,7 @@ export type StatusDomain =
   | "payment"
   | "fulfillment"
   | "shipment"
+  | "shopify_shipment"
   | "shipment_delay"
   | "ndr"
   | "rto"
@@ -216,12 +259,15 @@ export type StatusDomain =
   | "reconciliation_result"
   | "telecalling"
   | "payment_method"
+  | "lead_priority"
+  | "lead_category"
 
 const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   order: ORDER_STATUS_TONES,
   payment: PAYMENT_STATUS_TONES,
   fulfillment: FULFILLMENT_STATUS_TONES,
   shipment: SHIPMENT_STATUS_TONES,
+  shopify_shipment: SHOPIFY_SHIPMENT_STATUS_TONES,
   shipment_delay: SHIPMENT_DELAY_TONES,
   ndr: NDR_STATUS_TONES,
   rto: RTO_STATUS_TONES,
@@ -235,6 +281,8 @@ const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   reconciliation_result: RECONCILIATION_RESULT_STATUS_TONES,
   telecalling: TELECALLING_STATUS_TONES,
   payment_method: PAYMENT_METHOD_TONES,
+  lead_priority: LEAD_PRIORITY_TONES,
+  lead_category: LEAD_CATEGORY_TONES,
 }
 
 export function getStatusTone(domain: StatusDomain, status: string): StatusTone {

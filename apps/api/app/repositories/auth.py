@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+import uuid
+
+from sqlalchemy import Select, select
 from sqlalchemy.orm import selectinload
 
 from app.models.auth import RefreshToken, User
@@ -10,6 +12,19 @@ from app.repositories.base import BaseRepository
 
 class UserRepository(BaseRepository[User]):
     model = User
+
+    def _base_query(self) -> Select:
+        # `BaseRepository.list` (used by `UserService.list_users` for
+        # `GET /users`) runs this with no further options -- without an
+        # eager-load here, `_to_response()` accessing `user.role_names`
+        # (which walks `user.user_roles[].role`) triggers a lazy load on
+        # an already-detached-from-IO-context AsyncSession result,
+        # raising `MissingGreenlet` in production. Only `user_roles.role`
+        # is loaded (not the deeper `role.role_permissions.permission`
+        # chain `get_by_email`/`get_with_permissions` below also need) --
+        # `role_names` never touches permissions, and listing users has
+        # no reason to pull in every role's full permission set.
+        return select(User).options(selectinload(User.user_roles).selectinload(UserRole.role))
 
     async def get_by_email(self, email: str) -> User | None:
         stmt = (
@@ -44,6 +59,39 @@ class UserRepository(BaseRepository[User]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_by_role(
+        self,
+        role_name: str,
+        *,
+        team_leader_id: uuid.UUID | None = None,
+        active_only: bool = True,
+    ) -> list[User]:
+        """Every user holding `role_name` — the roster source for
+        "assignable Telecaller" dropdowns (`TelecallingService.
+        list_assignable_telecallers`). Deliberately independent of
+        `OrderAssignmentRepository`/`CheckoutAssignmentRepository`'s
+        `telecaller_performance` (which only ever returns telecallers who
+        already have at least one active assignment) — a brand-new
+        Telecaller with zero assignments so far must still be selectable.
+        `team_leader_id=None` returns every holder of the role across
+        every team (the Admin case); a caller scoping to one Team Leader's
+        own roster passes their own id, matching every other `/team/*`
+        scoping convention in this codebase.
+        """
+        stmt = (
+            select(User)
+            .join(UserRole, UserRole.user_id == User.id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(Role.name == role_name)
+            .order_by(User.name)
+        )
+        if active_only:
+            stmt = stmt.where(User.is_active.is_(True))
+        if team_leader_id is not None:
+            stmt = stmt.where(User.team_leader_id == team_leader_id)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
 
 
 class RefreshTokenRepository(BaseRepository[RefreshToken]):

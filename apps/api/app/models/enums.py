@@ -210,3 +210,38 @@ class TelecallingStatus(StrEnum):
     FOLLOW_UP_REQUIRED = "follow_up_required"
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
+
+
+class LeadCategory(StrEnum):
+    """Which calling-opportunity bucket a telecalling lead belongs to —
+    derived, never stored redundantly: an order-based lead's category is
+    computed straight from its `Order.payment_type`/`fulfillment_status`
+    (see `app.services.lead_classification.classify_order`) so it can
+    never drift from the order it describes; `ABANDONED_CHECKOUT` is the
+    one category with its own dedicated source (`AbandonedCheckout`,
+    `app.models.abandoned_checkout`), since it has no backing `Order` at
+    all until/unless the customer completes the purchase.
+
+    Deliberately excludes a plain "Abandoned Cart" bucket — Shopify's
+    Admin API exposes no customer-identifiable data for a cart that never
+    reached checkout, and this codebase never fabricates a callable lead
+    without a real phone number to call (see the module docstring on
+    `AbandonedCheckout`).
+    """
+
+    ABANDONED_CHECKOUT = "abandoned_checkout"
+    COD_UNFULFILLED = "cod_unfulfilled"
+    COD_FULFILLED = "cod_fulfilled"
+    PREPAID = "prepaid"
+
+
+class LeadPriority(StrEnum):
+    """Computed display/sort hint for a telecalling lead — never a
+    persisted column (see `app.services.lead_classification.classify_priority`),
+    so it always reflects the lead's *current* category/follow-up state
+    rather than a snapshot that could go stale.
+    """
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"

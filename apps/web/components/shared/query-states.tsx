@@ -25,6 +25,19 @@ interface QueryStatesProps<T> {
  * Consistent loading/error/empty handling for any TanStack Query result —
  * every list/detail page renders this instead of reimplementing the same
  * three states (spec §48: no page may show a blank screen).
+ *
+ * Pre-demo fix: already-loaded `data` is now checked BEFORE `isError` --
+ * previously, a background refetch that failed on an already-populated
+ * query (e.g. navigating back to a page whose cached data is a few
+ * seconds stale, TanStack Query revalidates it in the background, and
+ * that one revalidation happens to fail) replaced the real, still-valid
+ * content with the full error Alert, which read as the whole page
+ * "blinking" back to a blank/error state during ordinary navigation.
+ * `data` that's already on screen must never be yanked away by a
+ * transient refresh error -- only a query that has NEVER successfully
+ * loaded anything shows the blocking error state; once real data exists,
+ * a failed background refresh is surfaced as a small, non-blocking
+ * notice above the unchanged content instead.
  */
 export function QueryStates<T>({
   isLoading,
@@ -48,6 +61,26 @@ export function QueryStates<T>({
     )
   }
 
+  const hasData = data !== undefined && !(isEmpty ? isEmpty(data) : false)
+
+  if (hasData) {
+    return (
+      <>
+        {isError && (
+          <div className="border-border bg-muted/50 text-muted-foreground mb-3 flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-xs">
+            <span>Could not refresh — showing the last loaded data.</span>
+            {onRetry && (
+              <Button variant="ghost" size="sm" onClick={onRetry} className="h-6 px-2 text-xs">
+                Retry
+              </Button>
+            )}
+          </div>
+        )}
+        {children(data as T)}
+      </>
+    )
+  }
+
   if (isError) {
     return (
       <Alert variant="destructive">
@@ -65,16 +98,12 @@ export function QueryStates<T>({
     )
   }
 
-  if (data === undefined || (isEmpty ? isEmpty(data) : false)) {
-    return (
-      <div className="border-border flex flex-col items-center gap-1 rounded-md border border-dashed py-16 text-center">
-        <p className="text-foreground text-sm font-medium">{emptyTitle}</p>
-        {emptyDescription && (
-          <p className="text-muted-foreground max-w-sm text-sm">{emptyDescription}</p>
-        )}
-      </div>
-    )
-  }
-
-  return <>{children(data)}</>
+  return (
+    <div className="border-border flex flex-col items-center gap-1 rounded-md border border-dashed py-16 text-center">
+      <p className="text-foreground text-sm font-medium">{emptyTitle}</p>
+      {emptyDescription && (
+        <p className="text-muted-foreground max-w-sm text-sm">{emptyDescription}</p>
+      )}
+    </div>
+  )
 }

@@ -3,9 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
+  AssignedCheckout,
   AssignedOrder,
   CallAttempt,
   CallHistoryEntry,
+  CheckoutAssignment,
+  CheckoutCallAttempt,
   LogCallInput,
   OrderAssignment,
   TelecallingSummary,
@@ -165,5 +168,139 @@ export function useMyCallHistory() {
   return useQuery({
     queryKey: ["telecaller", "calls"],
     queryFn: fetchMyCallHistory,
+  })
+}
+
+interface MyCheckoutsParams {
+  page: number
+  pageSize: number
+  call_status?: string
+  date_from?: string
+  date_to?: string
+}
+
+async function fetchMyCheckouts(
+  params: MyCheckoutsParams
+): Promise<PaginatedResponse<AssignedCheckout>> {
+  const response = await apiClient.get<PaginatedResponse<AssignedCheckout>>(
+    "/telecaller/checkouts",
+    {
+      params: {
+        page: params.page,
+        page_size: params.pageSize,
+        call_status: params.call_status || undefined,
+        date_from: params.date_from || undefined,
+        date_to: params.date_to || undefined,
+      },
+    }
+  )
+  return response.data
+}
+
+export function useMyCheckouts(params: MyCheckoutsParams) {
+  return useQuery({
+    queryKey: ["telecaller", "checkouts", params],
+    queryFn: () => fetchMyCheckouts(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchMyCheckout(checkoutId: string): Promise<AssignedCheckout> {
+  const response = await apiClient.get<ApiResponse<AssignedCheckout>>(
+    `/telecaller/checkouts/${checkoutId}`
+  )
+  if (!response.data.data) throw new Error("Checkout not found.")
+  return response.data.data
+}
+
+export function useMyCheckout(checkoutId: string) {
+  return useQuery({
+    queryKey: ["telecaller", "checkouts", checkoutId],
+    queryFn: () => fetchMyCheckout(checkoutId),
+    enabled: Boolean(checkoutId),
+  })
+}
+
+async function fetchCheckoutCallHistory(
+  checkoutId: string
+): Promise<CheckoutCallAttempt[]> {
+  const response = await apiClient.get<ApiResponse<CheckoutCallAttempt[]>>(
+    `/telecaller/checkouts/${checkoutId}/calls`
+  )
+  return response.data.data ?? []
+}
+
+export function useCheckoutCallHistory(checkoutId: string) {
+  return useQuery({
+    queryKey: ["telecaller", "checkouts", checkoutId, "calls"],
+    queryFn: () => fetchCheckoutCallHistory(checkoutId),
+    enabled: Boolean(checkoutId),
+  })
+}
+
+export function useLogCheckoutCall(checkoutId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: LogCallInput) => {
+      const response = await apiClient.post<ApiResponse<CheckoutCallAttempt>>(
+        `/telecaller/checkouts/${checkoutId}/calls`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["telecaller", "checkouts", checkoutId],
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["telecaller", "checkout-follow-ups"],
+      })
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "summary"] })
+    },
+  })
+}
+
+export function useScheduleCheckoutFollowUp(checkoutId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (nextFollowUpAt: string) => {
+      const response = await apiClient.post<ApiResponse<CheckoutAssignment>>(
+        `/telecaller/checkouts/${checkoutId}/follow-up`,
+        { next_follow_up_at: nextFollowUpAt }
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["telecaller", "checkouts", checkoutId],
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["telecaller", "checkout-follow-ups"],
+      })
+    },
+  })
+}
+
+interface CheckoutFollowUpsParams {
+  when: "today" | "overdue" | "upcoming"
+  page: number
+  pageSize: number
+}
+
+async function fetchMyCheckoutFollowUps(
+  params: CheckoutFollowUpsParams
+): Promise<PaginatedResponse<AssignedCheckout>> {
+  const response = await apiClient.get<PaginatedResponse<AssignedCheckout>>(
+    "/telecaller/checkout-follow-ups",
+    { params: { when: params.when, page: params.page, page_size: params.pageSize } }
+  )
+  return response.data
+}
+
+export function useMyCheckoutFollowUps(params: CheckoutFollowUpsParams) {
+  return useQuery({
+    queryKey: ["telecaller", "checkout-follow-ups", params],
+    queryFn: () => fetchMyCheckoutFollowUps(params),
+    placeholderData: (previous) => previous,
   })
 }

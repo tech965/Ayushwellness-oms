@@ -2,7 +2,8 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { Columns3, Download, X } from "lucide-react"
+import { format, parseISO } from "date-fns"
+import { Columns3, Download, Loader2, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
@@ -37,6 +38,7 @@ import {
 } from "@/components/ui/select"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
+import { istCalendarDateAsLocalMidnight } from "@/lib/ist-date"
 import { useLocalStorageState } from "@/lib/use-local-storage-state"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useCouriers } from "@/services/couriers"
@@ -63,6 +65,7 @@ const FILTER_DEFAULTS = {
   shipment_status: "",
   courier_id: "",
   sku: "",
+  tag: "",
   amount_min: "",
   amount_max: "",
   date_from: "",
@@ -71,6 +74,19 @@ const FILTER_DEFAULTS = {
   sort_order: "",
   page: 1,
   page_size: 20,
+}
+
+/** `formatDate` (lib/format.ts) formats in the viewer's browser-local
+ * timezone — fine for most of the app, but `order_datetime` is exactly
+ * the field the date-range filter above compares against IST calendar
+ * days (see `lib/ist-date.ts`), so displaying it in a non-IST browser's
+ * local time can show a different calendar date than the one the active
+ * filter range covers, reading as "the filter is wrong" when it isn't.
+ * Scoped to this page/column only — `formatDate` itself stays unchanged
+ * for the ~20 other places it's used.
+ */
+function formatIstDate(iso: string): string {
+  return format(istCalendarDateAsLocalMidnight(parseISO(iso)), "d MMM yyyy")
 }
 
 interface ColumnDef {
@@ -100,7 +116,7 @@ const ALL_COLUMNS: ColumnDef[] = [
       id: "order_datetime",
       header: "Order Date",
       sortKey: "order_datetime",
-      cell: (o) => formatDate(o.order_datetime),
+      cell: (o) => formatIstDate(o.order_datetime),
     },
   },
   {
@@ -212,13 +228,26 @@ const ALL_COLUMNS: ColumnDef[] = [
       cell: (o) => <StatusBadge domain="order" status={o.status} />,
     },
   },
+  // Three deliberately separate concepts, never conflated:
+  //   Order Status        -> OMS order lifecycle (`o.status`, above)
+  //   Fulfillment Status  -> Shopify's fulfilled/unfulfilled/partial
+  //                          (`o.fulfillment_status`, synced from
+  //                          GraphQL `displayFulfillmentStatus`)
+  //   Shipment Status     -> Shiprocket's actual delivery/shipment
+  //                          progress (`o.shipment_status`, synced from
+  //                          Shiprocket's own `status` field via
+  //                          `Shipment.current_status` — see
+  //                          `app/integrations/shiprocket/normalizer.py`)
+  // Must never render `fulfillment_status` as "Shipment Status", and
+  // must never derive Shipment Status from Shopify data at all — that
+  // was the exact reported bug this fix corrects.
   {
-    id: "fulfillment_status",
-    label: "Fulfillment",
-    defaultVisible: false,
+    id: "shopify_fulfillment_status",
+    label: "Fulfillment Status",
+    defaultVisible: true,
     column: {
-      id: "fulfillment_status",
-      header: "Fulfillment",
+      id: "shopify_fulfillment_status",
+      header: "Fulfillment Status",
       cell: (o) => <StatusBadge domain="fulfillment" status={o.fulfillment_status} />,
     },
   },
@@ -262,6 +291,27 @@ const ALL_COLUMNS: ColumnDef[] = [
       header: "Created At",
       sortKey: "created_at",
       cell: (o) => formatDate(o.created_at),
+    },
+  },
+  {
+    id: "shopify_tags",
+    label: "Shopify Tags",
+    defaultVisible: false,
+    column: {
+      id: "shopify_tags",
+      header: "Shopify Tags",
+      cell: (o) =>
+        o.shopify_tags?.length ? (
+          <div className="flex max-w-[200px] flex-wrap gap-1">
+            {o.shopify_tags.map((tag) => (
+              <Badge key={tag} variant="secondary" className="text-[10px]">
+                {tag}
+              </Badge>
+            ))}
+          </div>
+        ) : (
+          "—"
+        ),
     },
   },
 ]
@@ -338,10 +388,12 @@ function OrdersPageContent() {
 
   const [searchInput, setSearchInput] = React.useState(filters.q)
   const [skuInput, setSkuInput] = React.useState(filters.sku)
+  const [tagInput, setTagInput] = React.useState(filters.tag)
   const [amountMinInput, setAmountMinInput] = React.useState(filters.amount_min)
   const [amountMaxInput, setAmountMaxInput] = React.useState(filters.amount_max)
   const debouncedSearch = useDebouncedValue(searchInput, 400)
   const debouncedSku = useDebouncedValue(skuInput, 400)
+  const debouncedTag = useDebouncedValue(tagInput, 400)
   const debouncedAmountMin = useDebouncedValue(amountMinInput, 400)
   const debouncedAmountMax = useDebouncedValue(amountMaxInput, 400)
 
@@ -353,6 +405,10 @@ function OrdersPageContent() {
     setFilters({ sku: debouncedSku })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSku])
+  React.useEffect(() => {
+    setFilters({ tag: debouncedTag })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedTag])
   React.useEffect(() => {
     setFilters({ amount_min: debouncedAmountMin })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -377,6 +433,7 @@ function OrdersPageContent() {
     shipment_status: filters.shipment_status || undefined,
     courier_id: filters.courier_id || undefined,
     sku: filters.sku || undefined,
+    tag: filters.tag || undefined,
     amount_min: filters.amount_min || undefined,
     amount_max: filters.amount_max || undefined,
     date_from: filters.date_from || undefined,
@@ -404,6 +461,7 @@ function OrdersPageContent() {
   function handleClear() {
     setSearchInput("")
     setSkuInput("")
+    setTagInput("")
     setAmountMinInput("")
     setAmountMaxInput("")
     clearFilters()
@@ -420,6 +478,7 @@ function OrdersPageContent() {
   function clearField(field: string) {
     if (field === "q") setSearchInput("")
     if (field === "sku") setSkuInput("")
+    if (field === "tag") setTagInput("")
     if (field === "amount_min") setAmountMinInput("")
     if (field === "amount_max") setAmountMaxInput("")
     if (field === "date") {
@@ -468,13 +527,19 @@ function OrdersPageContent() {
     },
     filters.courier_id && { key: "courier_id", label: `Courier: ${courierName ?? "—"}` },
     filters.sku && { key: "sku", label: `SKU: ${filters.sku}` },
+    filters.tag && { key: "tag", label: `Tag: ${filters.tag}` },
     filters.amount_min && { key: "amount_min", label: `Min ₹${filters.amount_min}` },
     filters.amount_max && { key: "amount_max", label: `Max ₹${filters.amount_max}` },
     (filters.date_from || filters.date_to) && {
       key: "date",
-      label: `Date: ${dateRange.from ? formatDate(dateRange.from.toISOString()) : "…"} – ${
-        dateRange.to ? formatDate(dateRange.to.toISOString()) : "…"
-      }`,
+      // IST-calendar-date formatting (not plain `formatDate`, which
+      // formats in the viewer's browser-local timezone) — must read
+      // identically to `DateRangePicker`'s own button label for the exact
+      // same `dateRange` value, or the filter chip and the picker can
+      // disagree by a day for any viewer not in IST.
+      label: `Date: ${
+        dateRange.from ? formatIstDate(dateRange.from.toISOString()) : "…"
+      } – ${dateRange.to ? formatIstDate(dateRange.to.toISOString()) : "…"}`,
     },
   ].filter((chip): chip is { key: string; label: string } => Boolean(chip))
 
@@ -656,6 +721,12 @@ function OrdersPageContent() {
               className="w-[140px]"
             />
             <Input
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              placeholder="Shopify Tag"
+              className="w-[140px]"
+            />
+            <Input
               value={amountMinInput}
               onChange={(e) => setAmountMinInput(e.target.value)}
               placeholder="Min amount"
@@ -698,6 +769,21 @@ function OrdersPageContent() {
           </div>
         )}
 
+        {/* `useOrders` keeps the PREVIOUS filter's rows on screen
+         * (`placeholderData`) while a new filtered request is in flight, so
+         * `query.isLoading` alone stays false and `QueryStates` would render
+         * those stale rows with no visual signal — the exact "filter chip
+         * already says the new range, table still shows the old range's
+         * orders" bug. `query.isFetching` catches that in-flight window
+         * (true here whenever the previous page's data is still on screen
+         * pending a real refetch); dim + freeze interaction on the table
+         * for it instead of ever presenting stale rows as current. */}
+        {query.isFetching && !query.isLoading && (
+          <div className="text-muted-foreground flex items-center gap-2 text-xs">
+            <Loader2 className="size-3.5 animate-spin" />
+            Updating results for the selected filters…
+          </div>
+        )}
         <QueryStates
           isLoading={query.isLoading}
           isError={query.isError}
@@ -709,7 +795,13 @@ function OrdersPageContent() {
           emptyDescription="Try adjusting your search or filters."
         >
           {(data) => (
-            <>
+            <div
+              className={
+                query.isFetching && !query.isLoading
+                  ? "pointer-events-none opacity-50 transition-opacity"
+                  : undefined
+              }
+            >
               <DataTable
                 columns={columns}
                 data={data.data}
@@ -731,7 +823,7 @@ function OrdersPageContent() {
                 pageSizeOptions={[10, 20, 50, 100]}
                 onPageSizeChange={(page_size) => setFilters({ page_size, page: 1 })}
               />
-            </>
+            </div>
           )}
         </QueryStates>
       </div>

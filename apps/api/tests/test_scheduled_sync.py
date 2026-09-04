@@ -66,11 +66,19 @@ async def test_scheduled_sync_enqueues_only_entities_a_registered_adapter_suppor
         (IntegrationCode.SHOPIFY, "orders"),
         (IntegrationCode.SHOPIFY, "customers"),
         (IntegrationCode.SHOPIFY, "products"),
+        (IntegrationCode.SHOPIFY, "abandoned_checkouts"),
     ]
+    # Regression test for the historical-backlog production incident: a
+    # brand-new entity with no completed baseline and no `backlog_complete`
+    # flag must be scheduled as FULL (backlog), never INCREMENTAL -- the
+    # scheduler used to hand out INCREMENTAL unconditionally, which let a
+    # real historical gap (Shopify orders never imported) look, from Sync
+    # History alone, like an ordinary "nothing new" incremental run.
     assert calls == [
-        (str(shopify_integration.id), SyncType.INCREMENTAL.value, "orders"),
-        (str(shopify_integration.id), SyncType.INCREMENTAL.value, "customers"),
-        (str(shopify_integration.id), SyncType.INCREMENTAL.value, "products"),
+        (str(shopify_integration.id), SyncType.FULL.value, "orders"),
+        (str(shopify_integration.id), SyncType.FULL.value, "customers"),
+        (str(shopify_integration.id), SyncType.FULL.value, "products"),
+        (str(shopify_integration.id), SyncType.FULL.value, "abandoned_checkouts"),
     ]
 
 
@@ -103,10 +111,48 @@ async def test_scheduled_sync_enqueues_shiprocket_shipments_before_ndr(
         (IntegrationCode.SHIPROCKET, "shipments"),
         (IntegrationCode.SHIPROCKET, "ndr"),
     ]
+    # No completed baseline for either entity yet -- both scheduled as
+    # FULL (backlog), same reasoning as the Shopify test above.
     assert calls == [
-        (str(shiprocket_integration.id), SyncType.INCREMENTAL.value, "shipments"),
-        (str(shiprocket_integration.id), SyncType.INCREMENTAL.value, "ndr"),
+        (str(shiprocket_integration.id), SyncType.FULL.value, "shipments"),
+        (str(shiprocket_integration.id), SyncType.FULL.value, "ndr"),
     ]
+
+
+async def test_scheduled_sync_uses_incremental_once_backlog_is_known_complete(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once an entity's backlog has genuinely finished (the explicit
+    `backlog_complete` flag on `Integration.configuration`, set only by
+    `SyncService._run_entity_sync` observing a real `has_more=False` from
+    a non-incremental fetch), the scheduler goes back to the cheap
+    INCREMENTAL path -- this isn't a one-way "always FULL now" change.
+    """
+    shopify_integration = await _make_integration(db_session, IntegrationCode.SHOPIFY)
+    await IntegrationRepository(db_session).update(
+        shopify_integration, configuration={"backlog_complete": {"orders": True}}
+    )
+    await db_session.commit()
+    register_adapter(ShopifyAdapter(client=object()))
+
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        sync_tasks.run_sync_task,
+        "delay",
+        lambda integration_id, sync_type, entity_type: calls.append(
+            (integration_id, sync_type, entity_type)
+        ),
+    )
+    monkeypatch.setattr(sync_tasks, "AsyncSessionLocal", lambda: db_session_cm(db_session))
+
+    await sync_tasks._run_scheduled_sync()
+
+    orders_call = next(c for c in calls if c[2] == "orders")
+    assert orders_call[1] == SyncType.INCREMENTAL.value
+    # customers/products never got their own `backlog_complete` flag --
+    # each entity's completion is tracked independently.
+    assert next(c for c in calls if c[2] == "customers")[1] == SyncType.FULL.value
+    assert next(c for c in calls if c[2] == "products")[1] == SyncType.FULL.value
 
 
 async def test_scheduled_sync_enqueues_nothing_for_a_genuinely_unimplemented_provider(

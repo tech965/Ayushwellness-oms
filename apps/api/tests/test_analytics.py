@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
-from app.models.enums import OrderStatus, PaymentStatus, PaymentType
+from app.models.courier import Courier
+from app.models.enums import (
+    OrderStatus,
+    PaymentStatus,
+    PaymentType,
+    RefundStatus,
+    ReturnStatus,
+    ShipmentStatus,
+)
+from app.models.refund import Refund
+from app.models.returns import Return
+from app.models.shipment import Shipment
 from app.repositories.order import OrderRepository
 from app.schemas.order import OrderItemCreateRequest
 from app.services.analytics_service import AnalyticsService
@@ -200,6 +212,48 @@ async def test_orders_timeseries_buckets_by_ist_calendar_day_not_utc(
         points = {p["bucket"]: p["order_count"] for p in response.json()["data"]["points"]}
         assert points.get("2026-03-15") == 1
         assert "2026-03-14" not in points
+
+
+async def test_orders_timeseries_hour_interval_buckets_by_ist_hour(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """The dashboard's Today-vs-Yesterday comparison chart needs an hourly
+    bucket (day/week/month buckets are useless for a single calendar day).
+    An order at 2026-03-15T01:00:00+05:30 (stored as 2026-03-14T19:30:00Z)
+    must land in the "2026-03-15T01:00" IST-hour bucket, not a UTC one.
+    """
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ANALYTICS_PERMS
+    ) as auth_client:
+        payload = {
+            "order_number": "OMS-IST-HOUR",
+            "payment_type": "prepaid",
+            "shipping_charge": "0",
+            "order_datetime": "2026-03-14T19:30:00Z",  # == 2026-03-15T01:00:00+05:30
+            "items": [
+                {
+                    "sku": "SKU-1",
+                    "product_name": "Ashwagandha 60ct",
+                    "quantity": 1,
+                    "unit_price": "649.00",
+                }
+            ],
+        }
+        created = await auth_client.post("/api/v1/orders", json=payload)
+        assert created.status_code == 201
+
+        response = await auth_client.get(
+            "/api/v1/analytics/orders-timeseries",
+            params={
+                "date_from": "2026-03-14T00:00:00Z",
+                "date_to": "2026-03-16T00:00:00Z",
+                "interval": "hour",
+            },
+        )
+
+        assert response.status_code == 200
+        points = {p["bucket"]: p["order_count"] for p in response.json()["data"]["points"]}
+        assert points.get("2026-03-15T01:00") == 1
 
 
 # --- Revenue/order drill-down analytics (Total Revenue/Total Orders ->
@@ -528,3 +582,124 @@ async def test_payment_status_breakdown_endpoint_combined_filters(
         )
         assert status_ts.status_code == 200
         assert status_ts.json()["data"]["payment_type"] == "prepaid"
+
+
+# --- Dashboard Returns/Refunds cards + Courier Performance's in-transit/
+# pending breakdown. Direct ORM creation (not the HTTP API) for
+# Return/Refund/Shipment/Courier rows, same reasoning as `_make_order`
+# above: only the exact status/amount combination matters here, not the
+# workflow that produced it. ---------------------------------------------
+
+
+async def test_returns_refunds_summary_reports_pending_and_completed_buckets(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    order = await OrderService(db_session).create_order(
+        actor=None,
+        order_number="OMS-RR-1",
+        customer_id=None,
+        order_datetime=datetime.now(UTC),
+        currency="INR",
+        payment_type=PaymentType.PREPAID,
+        shipping_charge=0,
+        notes=None,
+        items=[
+            OrderItemCreateRequest(
+                sku="SKU-1", product_name="Ashwagandha 60ct", quantity=1, unit_price="500.00"
+            )
+        ],
+    )
+
+    db_session.add_all(
+        [
+            Return(order_id=order.id, status=ReturnStatus.REQUESTED, source_system="manual"),
+            Return(order_id=order.id, status=ReturnStatus.COMPLETED, source_system="manual"),
+            Refund(
+                order_id=order.id,
+                amount=Decimal("500.00"),
+                status=RefundStatus.COMPLETED,
+                source_system="manual",
+            ),
+            Refund(
+                order_id=order.id,
+                amount=Decimal("250.00"),
+                status=RefundStatus.PENDING,
+                source_system="manual",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ANALYTICS_PERMS
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/analytics/returns-refunds")
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["returns"]["total_returns"] == 2
+        assert data["returns"]["completed_returns"] == 1
+        assert data["returns"]["pending_returns"] == 1
+        assert data["returns"]["return_rate_pct"] == pytest.approx(200.0)
+        assert data["refunds"]["total_refunds"] == 2
+        assert data["refunds"]["completed_refunds"] == 1
+        assert data["refunds"]["pending_refunds"] == 1
+        assert data["refunds"]["total_refund_amount"] == "500.00"
+
+
+async def test_courier_performance_reports_in_transit_and_pending_counts(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    order = await OrderService(db_session).create_order(
+        actor=None,
+        order_number="OMS-CP-1",
+        customer_id=None,
+        order_datetime=datetime.now(UTC),
+        currency="INR",
+        payment_type=PaymentType.PREPAID,
+        shipping_charge=0,
+        notes=None,
+        items=[
+            OrderItemCreateRequest(
+                sku="SKU-1", product_name="Ashwagandha 60ct", quantity=1, unit_price="500.00"
+            )
+        ],
+    )
+    courier = Courier(name="Test Courier", code="test-courier")
+    db_session.add(courier)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            Shipment(
+                order_id=order.id,
+                courier_id=courier.id,
+                current_status=ShipmentStatus.IN_TRANSIT,
+                source_system="manual",
+            ),
+            Shipment(
+                order_id=order.id,
+                courier_id=courier.id,
+                current_status=ShipmentStatus.PENDING,
+                source_system="manual",
+            ),
+            Shipment(
+                order_id=order.id,
+                courier_id=courier.id,
+                current_status=ShipmentStatus.DELIVERED,
+                source_system="manual",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ANALYTICS_PERMS
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/analytics/couriers")
+
+        assert response.status_code == 200
+        courier_data = response.json()["data"][0]
+        assert courier_data["shipment_count"] == 3
+        assert courier_data["delivered_count"] == 1
+        assert courier_data["in_transit_count"] == 1
+        assert courier_data["pending_count"] == 1

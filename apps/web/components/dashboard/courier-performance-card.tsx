@@ -51,6 +51,8 @@ export function CourierPerformanceCard({
                 <TableHead>Courier</TableHead>
                 <TableHead className="text-right">Shipments</TableHead>
                 <TableHead className="text-right">Delivered</TableHead>
+                <TableHead className="text-right">In Transit</TableHead>
+                <TableHead className="text-right">Pending</TableHead>
                 <TableHead className="text-right">NDR</TableHead>
                 <TableHead className="text-right">RTO</TableHead>
               </TableRow>
@@ -68,8 +70,10 @@ export function CourierPerformanceCard({
                   </TableCell>
                   <TableCell className="text-right">{courier.shipment_count}</TableCell>
                   <TableCell className="text-right">
-                    <Pct value={courier.delivered_pct} tone="success" />
+                    {courier.delivered_count} (<Pct value={courier.delivered_pct} tone="success" />)
                   </TableCell>
+                  <TableCell className="text-right">{courier.in_transit_count}</TableCell>
+                  <TableCell className="text-right">{courier.pending_count}</TableCell>
                   <TableCell className="text-right">
                     <Pct value={courier.ndr_pct} tone="danger" />
                   </TableCell>
@@ -81,6 +85,12 @@ export function CourierPerformanceCard({
             </TableBody>
           </Table>
         )}
+        {data?.length ? (
+          <p className="text-muted-foreground mt-3 text-xs">
+            Reflects shipments successfully matched to an OMS order. Historical Shiprocket
+            shipments that failed matching are not counted here.
+          </p>
+        ) : null}
       </CardContent>
     </Card>
   )

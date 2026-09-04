@@ -82,6 +82,12 @@ PERMISSIONS: dict[str, str] = {
         "is still gated by the user's other module permissions "
         "(analytics.read, orders.read, ...)."
     ),
+    # No "settings.manage"-gated read counterpart: `GET /settings` only
+    # requires authentication (see `app/api/v1/endpoints/settings.py`) --
+    # nothing in it is sensitive, and it's read in the background by every
+    # role (page size, dashboard refresh interval, session timeout), not
+    # just whoever can change it.
+    "settings.manage": "Update OMS settings (Administration -> Settings)",
 }
 
 ROLE_PERMISSIONS: dict[str, list[str] | str] = {

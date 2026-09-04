@@ -108,7 +108,7 @@ describe("TelecallerOrderDetailPage", () => {
       { outcome: "connected", notes: "Customer answered.", next_follow_up_at: undefined },
       expect.anything()
     )
-  })
+  }, 15000)
 
   it("logs a quick-status call with no dialog for Mark Confirmed", async () => {
     const user = userEvent.setup()

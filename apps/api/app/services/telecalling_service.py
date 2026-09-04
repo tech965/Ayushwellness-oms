@@ -20,11 +20,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AuthorizationError, ConflictError, NotFoundError, ValidationError
 from app.core.timezone import ist_day_bounds
 from app.models.auth import User
-from app.models.enums import AssignmentStatus, TelecallingStatus
-from app.models.telecalling import CallAttempt, OrderAssignment
+from app.models.enums import AssignmentStatus, LeadCategory, TelecallingStatus
+from app.models.telecalling import CallAttempt, CheckoutAssignment, OrderAssignment
+from app.repositories.abandoned_checkout import AbandonedCheckoutRepository
 from app.repositories.auth import UserRepository
 from app.repositories.order import OrderRepository
-from app.repositories.telecalling import CallAttemptRepository, OrderAssignmentRepository
+from app.repositories.telecalling import (
+    CallAttemptRepository,
+    CheckoutAssignmentRepository,
+    CheckoutCallAttemptRepository,
+    OrderAssignmentRepository,
+)
 from app.schemas.common import PageParams, SortParams
 from app.services.audit_service import AuditService
 
@@ -67,6 +73,9 @@ class TelecallingService:
         self.orders = OrderRepository(session)
         self.users = UserRepository(session)
         self.audit = AuditService(session)
+        self.checkout_assignments = CheckoutAssignmentRepository(session)
+        self.checkout_call_attempts = CheckoutCallAttemptRepository(session)
+        self.checkouts = AbandonedCheckoutRepository(session)
 
     # ------------------------------------------------------------------
     # Listing / detail (read paths — every one takes a `scope`, never a
@@ -121,6 +130,47 @@ class TelecallingService:
             page_params=page_params,
         )
 
+    async def list_lead_pool(
+        self,
+        *,
+        scope: ScopeFilter,
+        category: LeadCategory | None,
+        page_params: PageParams,
+        call_status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ):
+        """The widened Admin/Manager Lead Pool — COD Unfulfilled / COD
+        Fulfilled / Prepaid orders, filterable by `category`. Leaves
+        `list_unfulfilled_pool` above completely untouched (still backing
+        the original all-unfulfilled-regardless-of-payment-type page).
+        """
+        return await self.assignments.list_category_pool(
+            team_leader_id=scope.team_leader_id,
+            category=category,
+            call_status=call_status,
+            date_from=date_from,
+            date_to=date_to,
+            page_params=page_params,
+        )
+
+    async def list_checkout_pool(
+        self,
+        *,
+        scope: ScopeFilter,
+        page_params: PageParams,
+        call_status: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ):
+        return await self.checkout_assignments.list_pool(
+            team_leader_id=scope.team_leader_id,
+            call_status=call_status,
+            date_from=date_from,
+            date_to=date_to,
+            page_params=page_params,
+        )
+
     async def get_scoped_assignment(
         self, order_id: uuid.UUID, *, scope: ScopeFilter
     ) -> OrderAssignment:
@@ -148,53 +198,192 @@ class TelecallingService:
         """
         return await self.call_attempts.list_for_telecaller(telecaller_id)
 
-    async def team_summary(self, *, scope: ScopeFilter) -> dict[str, int]:
-        counts = await self.assignments.team_summary_counts(team_leader_id=scope.team_leader_id)
-        return _summary_from_counts(counts, await self._follow_ups_today_count(scope))
+    # ------------------------------------------------------------------
+    # Checkout-lead listing / detail — `CheckoutAssignment`'s exact
+    # counterparts of the order-assignment methods above.
+    # ------------------------------------------------------------------
 
-    async def telecaller_summary(self, *, scope: ScopeFilter) -> dict[str, int]:
+    async def list_checkout_assignments(
+        self,
+        *,
+        scope: ScopeFilter,
+        page_params: PageParams,
+        sort_params: SortParams,
+        call_status: str | None = None,
+        when: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> tuple[list[CheckoutAssignment], int]:
+        follow_up_from, follow_up_to = _follow_up_window(when)
+        query = self.checkout_assignments.search_query(
+            assigned_to=scope.assigned_to,
+            team_leader_id=scope.team_leader_id,
+            call_status=call_status,
+            follow_up_from=follow_up_from,
+            follow_up_to=follow_up_to,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        items, total = await self.checkout_assignments.list(
+            page_params=page_params,
+            sort_params=sort_params,
+            query=query,
+            default_sort_column="created_at",
+        )
+        return list(items), total
+
+    async def get_scoped_checkout_assignment(
+        self, checkout_id: uuid.UUID, *, scope: ScopeFilter
+    ) -> CheckoutAssignment:
+        assignment = await self.checkout_assignments.get_scoped(
+            checkout_id, assigned_to=scope.assigned_to, team_leader_id=scope.team_leader_id
+        )
+        if assignment is None:
+            raise AuthorizationError("Checkout not found or not assigned to you.")
+        return assignment
+
+    async def list_checkout_call_history(self, checkout_id: uuid.UUID, *, scope: ScopeFilter):
+        await self.get_scoped_checkout_assignment(checkout_id, scope=scope)
+        return await self.checkout_call_attempts.list_for_checkout(checkout_id)
+
+    async def list_my_checkout_call_history(self, telecaller_id: uuid.UUID):
+        return await self.checkout_call_attempts.list_for_telecaller(telecaller_id)
+
+    async def team_summary(self, *, scope: ScopeFilter) -> dict[str, int | float]:
+        """Combines order-lead and checkout-lead status counts into one
+        set of numbers (spec: "Pending Calls"/"Completed Calls"/etc. are
+        single dashboard tiles, not split by lead type) plus the
+        per-category breakdown (Abandoned Checkouts / COD Unfulfilled /
+        COD Fulfilled / Prepaid) and pool-wide total/unassigned counts —
+        every number here is a real aggregate query, never a fabricated
+        placeholder.
+        """
+        order_counts = await self.assignments.team_summary_counts(
+            team_leader_id=scope.team_leader_id
+        )
+        checkout_counts = await self.checkout_assignments.team_summary_counts(
+            team_leader_id=scope.team_leader_id
+        )
+        counts = _merge_counts(order_counts, checkout_counts)
+
+        category_counts = await self.assignments.category_counts(
+            team_leader_id=scope.team_leader_id
+        )
+        checkout_pool = await self.checkout_assignments.pool_counts(
+            team_leader_id=scope.team_leader_id
+        )
+
+        total_leads = sum(c["total"] for c in category_counts.values()) + checkout_pool["total"]
+        unassigned_leads = (
+            sum(c["unassigned"] for c in category_counts.values()) + checkout_pool["unassigned"]
+        )
+
+        return {
+            **_summary_from_counts(counts, await self._follow_ups_today_count(scope)),
+            "total_leads": total_leads,
+            "unassigned_leads": unassigned_leads,
+            "abandoned_checkouts": checkout_pool["total"],
+            "cod_unfulfilled": category_counts[LeadCategory.COD_UNFULFILLED.value]["total"],
+            "cod_fulfilled": category_counts[LeadCategory.COD_FULFILLED.value]["total"],
+            "prepaid": category_counts[LeadCategory.PREPAID.value]["total"],
+        }
+
+    async def telecaller_summary(self, *, scope: ScopeFilter) -> dict[str, int | float]:
         # `team_summary_counts` only supports team_leader-scoped grouping,
         # so a single telecaller's own summary re-derives counts here
         # instead — a dedicated single-telecaller aggregate query.
-        query = self.assignments.search_query(assigned_to=scope.assigned_to)
+        order_counts = await self._status_counts_for_assigned_to(
+            self.assignments, OrderAssignment, scope.assigned_to
+        )
+        checkout_counts = await self._status_counts_for_assigned_to(
+            self.checkout_assignments, CheckoutAssignment, scope.assigned_to
+        )
+        counts = _merge_counts(order_counts, checkout_counts)
+        category_counts = await self.assignments.category_counts(assigned_to=scope.assigned_to)
+        return {
+            **_summary_from_counts(counts, await self._follow_ups_today_count(scope)),
+            "total_leads": sum(counts.values()),
+            "unassigned_leads": 0,
+            "abandoned_checkouts": sum(checkout_counts.values()),
+            "cod_unfulfilled": category_counts[LeadCategory.COD_UNFULFILLED.value]["total"],
+            "cod_fulfilled": category_counts[LeadCategory.COD_FULFILLED.value]["total"],
+            "prepaid": category_counts[LeadCategory.PREPAID.value]["total"],
+        }
+
+    async def _status_counts_for_assigned_to(
+        self, repository, model, assigned_to: uuid.UUID | None
+    ) -> dict[str, int]:
+        query = repository.search_query(assigned_to=assigned_to)
         rows = (
-            (await self.session.execute(query.with_only_columns(OrderAssignment.current_status)))
+            (await self.session.execute(query.with_only_columns(model.current_status)))
             .scalars()
             .all()
         )
         counts: dict[str, int] = {}
         for status in rows:
             counts[status.value] = counts.get(status.value, 0) + 1
-        return _summary_from_counts(counts, await self._follow_ups_today_count(scope))
+        return counts
 
     async def _follow_ups_today_count(self, scope: ScopeFilter) -> int:
         from sqlalchemy import func, select
 
         start, end = ist_day_bounds()
-        query = self.assignments.search_query(
+        order_query = self.assignments.search_query(
             assigned_to=scope.assigned_to,
             team_leader_id=scope.team_leader_id,
             follow_up_from=start,
             follow_up_to=end,
         )
-        total = await self.session.scalar(select(func.count()).select_from(query.subquery()))
-        return total or 0
+        checkout_query = self.checkout_assignments.search_query(
+            assigned_to=scope.assigned_to,
+            team_leader_id=scope.team_leader_id,
+            follow_up_from=start,
+            follow_up_to=end,
+        )
+        order_total = await self.session.scalar(
+            select(func.count()).select_from(order_query.subquery())
+        )
+        checkout_total = await self.session.scalar(
+            select(func.count()).select_from(checkout_query.subquery())
+        )
+        return (order_total or 0) + (checkout_total or 0)
 
     async def team_telecaller_performance(self, *, scope: ScopeFilter) -> list[dict]:
-        breakdown = await self.assignments.telecaller_performance(
-            team_leader_id=scope.team_leader_id
+        order_breakdown = dict(
+            await self.assignments.telecaller_performance(team_leader_id=scope.team_leader_id)
         )
+        checkout_breakdown = dict(
+            await self.checkout_assignments.telecaller_performance(
+                team_leader_id=scope.team_leader_id
+            )
+        )
+        telecaller_ids = set(order_breakdown) | set(checkout_breakdown)
+
         results = []
-        for telecaller_id, counts in breakdown:
+        for telecaller_id in telecaller_ids:
             telecaller = await self.users.get_by_id(telecaller_id)
+            merged = _merge_counts(
+                order_breakdown.get(telecaller_id, {}), checkout_breakdown.get(telecaller_id, {})
+            )
             results.append(
                 {
                     "telecaller_id": telecaller_id,
                     "telecaller_name": telecaller.name if telecaller else "Unknown",
-                    **_performance_from_counts(counts),
+                    **_performance_from_counts(merged),
                 }
             )
         return results
+
+    async def list_assignable_telecallers(self, *, scope: ScopeFilter) -> list[User]:
+        """The roster for a "Select Telecaller" assignment dropdown — every
+        active TELECALLER-role user in scope, regardless of whether they
+        already have any lead assigned (unlike `team_telecaller_performance`
+        above, which only ever surfaces telecallers with existing assignment
+        activity and is the wrong data source for "who can I assign to").
+        Reuses `UserRepository`/the same `resolve_team_scope` convention as
+        every other `/team/*` read — no second Telecaller list.
+        """
+        return await self.users.list_by_role("TELECALLER", team_leader_id=scope.team_leader_id)
 
     async def assert_telecaller_in_team_scope(
         self, telecaller_id: uuid.UUID, *, actor: User
@@ -332,6 +521,118 @@ class TelecallingService:
         return resolved
 
     # ------------------------------------------------------------------
+    # Checkout assignment mutations — `OrderAssignment`'s exact
+    # counterparts (`assign_orders`/`reassign_order` above), operating on
+    # `AbandonedCheckout`/`CheckoutAssignment` instead.
+    # ------------------------------------------------------------------
+
+    async def assign_checkouts(
+        self,
+        *,
+        checkout_ids: list[uuid.UUID],
+        mode: str,
+        telecaller_id: uuid.UUID | None,
+        telecaller_ids: list[uuid.UUID] | None,
+        actor: User,
+    ) -> list[CheckoutAssignment]:
+        if mode == "manual":
+            if telecaller_id is None:
+                raise ValidationError("telecaller_id is required for manual assignment.")
+            candidate_ids: list[uuid.UUID] = [telecaller_id]
+        else:
+            candidate_ids = telecaller_ids or []
+        telecallers = await self._resolve_and_validate_telecallers(candidate_ids, actor=actor)
+
+        conflicts: list[str] = []
+        for checkout_id in checkout_ids:
+            checkout = await self.checkouts.get_by_id(checkout_id)
+            if checkout is None:
+                raise NotFoundError(f"Abandoned checkout {checkout_id} not found.")
+            if checkout.is_recovered:
+                raise ConflictError(
+                    f"Checkout {checkout_id} has already been recovered (completed as an order) "
+                    "and can no longer be assigned as a lead."
+                )
+            if await self.checkout_assignments.get_active_for_checkout(checkout_id) is not None:
+                conflicts.append(str(checkout_id))
+        if conflicts:
+            raise ConflictError(
+                "The following checkouts already have an active assignment — "
+                "use reassign instead: " + ", ".join(conflicts),
+                details={"checkout_ids": conflicts},
+            )
+
+        now = datetime.now(UTC)
+        created: list[CheckoutAssignment] = []
+        for index, checkout_id in enumerate(checkout_ids):
+            telecaller = telecallers[index % len(telecallers)]
+            assignment = await self.checkout_assignments.create(
+                checkout_id=checkout_id,
+                assigned_to=telecaller.id,
+                assigned_by=actor.id,
+                assigned_at=now,
+                team_leader_id=telecaller.team_leader_id,
+                assignment_status=AssignmentStatus.ACTIVE,
+                current_status=TelecallingStatus.NOT_CALLED,
+            )
+            created.append(assignment)
+            await self.audit.record(
+                user=actor,
+                action="checkout.assigned",
+                entity_type="abandoned_checkout",
+                entity_id=str(checkout_id),
+                new_value={"assigned_to": str(telecaller.id), "mode": mode},
+            )
+
+        await self.session.commit()
+        return created
+
+    async def reassign_checkout(
+        self, *, checkout_id: uuid.UUID, new_telecaller_id: uuid.UUID, reason: str, actor: User
+    ) -> CheckoutAssignment:
+        current = await self.checkout_assignments.get_active_for_checkout(checkout_id)
+        if current is None:
+            raise NotFoundError(
+                "Checkout has no active assignment to reassign — use assign instead."
+            )
+
+        (new_telecaller,) = await self._resolve_and_validate_telecallers(
+            [new_telecaller_id], actor=actor
+        )
+        if not actor.is_superuser and current.team_leader_id != actor.id:
+            raise AuthorizationError("That checkout is not on your team.")
+
+        previous_telecaller_id = current.assigned_to
+        now = datetime.now(UTC)
+
+        await self.checkout_assignments.update(current, assignment_status=AssignmentStatus.INACTIVE)
+
+        new_assignment = await self.checkout_assignments.create(
+            checkout_id=checkout_id,
+            assigned_to=new_telecaller.id,
+            assigned_by=actor.id,
+            assigned_at=now,
+            team_leader_id=new_telecaller.team_leader_id,
+            assignment_status=AssignmentStatus.ACTIVE,
+            reassigned_from=previous_telecaller_id,
+            reassigned_to=new_telecaller.id,
+            reassigned_at=now,
+            reassignment_reason=reason,
+            current_status=TelecallingStatus.NOT_CALLED,
+        )
+
+        await self.audit.record(
+            user=actor,
+            action="checkout.reassigned",
+            entity_type="abandoned_checkout",
+            entity_id=str(checkout_id),
+            previous_value={"telecaller_id": str(previous_telecaller_id)},
+            new_value={"telecaller_id": str(new_telecaller.id), "reason": reason},
+        )
+        await self.session.commit()
+        return new_assignment
+
+    # ------------------------------------------------------------------
     # Calling / follow-up mutations (Telecaller-only — a Team Leader has
     # no `calls.manage` permission, so never reaches these; the extra
     # `assigned_to == actor.id` check here is defense-in-depth, not the
@@ -403,6 +704,76 @@ class TelecallingService:
         await self.session.commit()
         return assignment
 
+    # ------------------------------------------------------------------
+    # Checkout calling / follow-up mutations — `log_call`/
+    # `schedule_follow_up`'s exact counterparts.
+    # ------------------------------------------------------------------
+
+    async def log_checkout_call(
+        self,
+        checkout_id: uuid.UUID,
+        *,
+        outcome: TelecallingStatus,
+        notes: str | None,
+        next_follow_up_at: datetime | None,
+        actor: User,
+    ):
+        assignment = await self.checkout_assignments.get_active_for_checkout(checkout_id)
+        if assignment is None:
+            raise NotFoundError("Checkout is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This checkout is not assigned to you.")
+
+        attempt_number = await self.checkout_call_attempts.next_attempt_number(checkout_id)
+        now = datetime.now(UTC)
+        attempt = await self.checkout_call_attempts.create(
+            checkout_id=checkout_id,
+            telecaller_id=actor.id,
+            attempt_number=attempt_number,
+            attempted_at=now,
+            outcome=outcome,
+            notes=notes,
+            next_follow_up_at=next_follow_up_at,
+        )
+        await self.checkout_assignments.update(
+            assignment,
+            current_status=outcome,
+            attempt_count=assignment.attempt_count + 1,
+            last_attempt_at=now,
+            next_follow_up_at=next_follow_up_at,
+        )
+        await self.audit.record(
+            user=actor,
+            action="checkout_call.logged",
+            entity_type="abandoned_checkout",
+            entity_id=str(checkout_id),
+            new_value={"outcome": outcome.value, "attempt_number": attempt_number},
+        )
+        await self.session.commit()
+        return attempt
+
+    async def schedule_checkout_follow_up(
+        self, checkout_id: uuid.UUID, *, next_follow_up_at: datetime, actor: User
+    ) -> CheckoutAssignment:
+        assignment = await self.checkout_assignments.get_active_for_checkout(checkout_id)
+        if assignment is None:
+            raise NotFoundError("Checkout is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This checkout is not assigned to you.")
+
+        previous = assignment.next_follow_up_at
+        await self.checkout_assignments.update(assignment, next_follow_up_at=next_follow_up_at)
+        await self.audit.record(
+            user=actor,
+            action="checkout_followup.scheduled",
+            entity_type="abandoned_checkout",
+            entity_id=str(checkout_id),
+            previous_value={"next_follow_up_at": previous.isoformat() if previous else None},
+            new_value={"next_follow_up_at": next_follow_up_at.isoformat()},
+        )
+        await self.session.commit()
+        return assignment
+
 
 def _follow_up_window(when: str | None) -> tuple[datetime | None, datetime | None]:
     if when is None:
@@ -417,7 +788,21 @@ def _follow_up_window(when: str | None) -> tuple[datetime | None, datetime | Non
     raise ValidationError(f"Unknown follow-up window: {when!r}")
 
 
-def _performance_from_counts(counts: dict[str, int]) -> dict[str, int]:
+def _merge_counts(*count_dicts: dict[str, int]) -> dict[str, int]:
+    """Sums two status-count dicts key-by-key — order-lead and
+    checkout-lead breakdowns share the exact same `TelecallingStatus`
+    vocabulary (plus the `"_follow_ups"` pseudo-status), so a combined
+    dashboard/performance number is just an elementwise sum, never a
+    second aggregate query.
+    """
+    merged: dict[str, int] = {}
+    for counts in count_dicts:
+        for key, value in counts.items():
+            merged[key] = merged.get(key, 0) + value
+    return merged
+
+
+def _performance_from_counts(counts: dict[str, int]) -> dict[str, int | float]:
     """Shapes one telecaller's status-count breakdown (from
     `OrderAssignmentRepository.telecaller_performance`, including its
     `"_follow_ups"` pseudo-status) into `TelecallerPerformanceResponse`'s
@@ -427,13 +812,18 @@ def _performance_from_counts(counts: dict[str, int]) -> dict[str, int]:
     follow_ups = counts.pop("_follow_ups", 0)
     assigned = sum(counts.values())
     not_called = counts.get(TelecallingStatus.NOT_CALLED.value, 0)
+    called = assigned - not_called
+    confirmed = counts.get(TelecallingStatus.CONFIRMED.value, 0)
     return {
         "assigned": assigned,
-        "called": assigned - not_called,
+        "called": called,
+        "pending": not_called,
         "connected": counts.get(TelecallingStatus.CONNECTED.value, 0),
+        "interested": counts.get(TelecallingStatus.INTERESTED.value, 0),
         "follow_ups": follow_ups,
-        "confirmed": counts.get(TelecallingStatus.CONFIRMED.value, 0),
+        "confirmed": confirmed,
         "not_interested": counts.get(TelecallingStatus.NOT_INTERESTED.value, 0),
+        "conversion_rate": round((confirmed / assigned) * 100, 1) if assigned else 0.0,
     }
 
 

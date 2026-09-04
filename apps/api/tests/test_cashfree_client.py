@@ -302,6 +302,81 @@ async def test_client_raises_timeout_error_after_retries_exhausted() -> None:
     assert exc_info.value.error_type == "timeout"
 
 
+# reconciliation / settlements (bulk sync endpoints)
+async def test_get_reconciliation_posts_recon_with_date_filters_and_cursor() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = httpx_json(request)
+        return httpx.Response(200, json={"data": [], "cursor": None})
+
+    client = _client_with(handler)
+    await client.get_reconciliation(
+        start_date="2026-09-03T00:00:00Z", end_date="2026-09-03T23:59:59Z", cursor="abc"
+    )
+
+    assert seen["path"] == "/pg/recon"
+    assert seen["body"]["filters"] == {
+        "start_date": "2026-09-03T00:00:00Z",
+        "end_date": "2026-09-03T23:59:59Z",
+    }
+    assert seen["body"]["pagination"] == {"limit": 1000, "cursor": "abc"}
+
+
+async def test_get_reconciliation_caps_limit_at_1000() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = httpx_json(request)
+        return httpx.Response(200, json={"data": [], "cursor": None})
+
+    client = _client_with(handler)
+    await client.get_reconciliation(start_date="2026-01-01", end_date="2026-01-02", limit=5000)
+
+    assert seen["body"]["pagination"]["limit"] == 1000
+
+
+async def test_get_settlements_posts_settlements_with_status_filter() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = httpx_json(request)
+        return httpx.Response(200, json={"data": [], "cursor": None})
+
+    client = _client_with(handler)
+    await client.get_settlements(
+        start_date="2026-09-01", end_date="2026-09-03", settlement_status=["SUCCESS", "PENDING"]
+    )
+
+    assert seen["path"] == "/pg/settlements"
+    assert seen["body"]["filters"] == {
+        "start_date": "2026-09-01",
+        "end_date": "2026-09-03",
+        "settlement_status": ["SUCCESS", "PENDING"],
+    }
+
+
+async def test_get_settlements_omits_absent_filters() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = httpx_json(request)
+        return httpx.Response(200, json={"data": [], "cursor": None})
+
+    client = _client_with(handler)
+    await client.get_settlements()
+
+    assert seen["body"]["filters"] == {}
+
+
+def httpx_json(request: httpx.Request) -> dict:
+    import json
+
+    return json.loads(request.content)
+
+
 async def test_config_from_settings_returns_none_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

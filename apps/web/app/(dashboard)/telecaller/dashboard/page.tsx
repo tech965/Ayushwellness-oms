@@ -4,6 +4,7 @@ import Link from "next/link"
 import {
   CalendarClock,
   CheckCircle2,
+  MousePointerClick,
   PhoneCall,
   PhoneIncoming,
   Users,
@@ -21,13 +22,13 @@ export default function TelecallerDashboardPage() {
     <>
       <PageHeader title="My Dashboard" description="Your calling activity at a glance." />
       {isLoading ? (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
-          {Array.from({ length: 6 }).map((_, i) => (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-7">
+          {Array.from({ length: 7 }).map((_, i) => (
             <Skeleton key={i} className="h-24 w-full" />
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-7">
           <StatTile
             label="Assigned"
             value={summary?.assigned ?? 0}
@@ -59,10 +60,16 @@ export default function TelecallerDashboardPage() {
             accent="orange"
           />
           <StatTile
-            label="Confirmed"
+            label="Converted"
             value={summary?.confirmed ?? 0}
             icon={CheckCircle2}
             accent="emerald"
+          />
+          <StatTile
+            label="Checkout Leads"
+            value={summary?.abandoned_checkouts ?? 0}
+            icon={MousePointerClick}
+            accent="violet"
           />
         </div>
       )}
@@ -73,6 +80,12 @@ export default function TelecallerDashboardPage() {
           className="border-border bg-card hover:border-primary/40 min-w-[220px] flex-1 rounded-lg border p-4 text-sm font-medium transition-colors"
         >
           View my assigned orders →
+        </Link>
+        <Link
+          href="/telecaller/checkouts"
+          className="border-border bg-card hover:border-primary/40 min-w-[220px] flex-1 rounded-lg border p-4 text-sm font-medium transition-colors"
+        >
+          View my checkout leads →
         </Link>
         <Link
           href="/telecaller/follow-ups"

@@ -354,6 +354,43 @@ async def test_sku_filter(db_session: AsyncSession, make_authenticated_client) -
         assert [o["order_number"] for o in response.json()["data"]] == ["OMS-SKU-1"]
 
 
+# --- Shopify tag filter (Issue 4) -------------------------------------------
+
+
+async def test_tag_filter_matches_orders_carrying_that_shopify_tag(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    from app.repositories.order import OrderRepository
+
+    repo = OrderRepository(db_session)
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="tag-vip",
+        order_number="OMS-TAG-VIP",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+        shopify_tags=["VIP", "Repeat Customer"],
+    )
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="tag-cod",
+        order_number="OMS-TAG-COD",
+        order_datetime=datetime.now(UTC),
+        total_amount=Decimal("100.00"),
+        shopify_tags=["COD"],
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/orders", params={"tag": "VIP"})
+        assert [o["order_number"] for o in response.json()["data"]] == ["OMS-TAG-VIP"]
+
+        none_match = await auth_client.get("/api/v1/orders", params={"tag": "High Value"})
+        assert none_match.json()["data"] == []
+
+
 # --- 10. Search by order number / customer name / phone / email -----------
 
 
@@ -437,6 +474,60 @@ async def test_date_range_filter_is_inclusive_of_ist_day_boundaries(
             params={"date_from": "2026-03-15T18:30:00Z", "date_to": "2026-03-16T18:30:00Z"},
         )
         assert out_of_range.json()["data"] == []
+
+
+async def test_full_month_custom_range_returns_only_that_months_orders(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Reproduces the reported "filter says Jul 2026, table shows other
+    months" symptom directly against the real API: a full calendar-month
+    custom range (matching what `DateRangePicker`'s popover calendar
+    actually sends) must return orders from that month only, never
+    neighbouring months — confirms the backend query itself is correct so
+    any remaining mismatch is a frontend display issue, not a data bug.
+    """
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from app.repositories.order import OrderRepository
+
+    repo = OrderRepository(db_session)
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="mr-jun-2026",
+        order_number="OMS-MR-JUN",
+        order_datetime=dt(2026, 6, 15, 10, 0, tzinfo=UTC),
+        total_amount=Decimal("100.00"),
+    )
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="mr-jul-2026",
+        order_number="AWL81350",
+        order_datetime=dt(2026, 7, 12, 10, 0, tzinfo=UTC),
+        total_amount=Decimal("649.00"),
+        status="confirmed",
+        payment_status="paid",
+    )
+    await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="mr-aug-2026",
+        order_number="OMS-MR-AUG",
+        order_datetime=dt(2026, 8, 5, 10, 0, tzinfo=UTC),
+        total_amount=Decimal("200.00"),
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        # "1 Jul 2026 - 30 Jul 2026" as the IST-day-boundary UTC instants
+        # `istMidnightFromLocalParts`/`istEndOfDayFromLocalParts` produce.
+        response = await auth_client.get(
+            "/api/v1/orders",
+            params={"date_from": "2026-06-30T18:30:00Z", "date_to": "2026-07-30T18:29:59Z"},
+        )
+        order_numbers = [o["order_number"] for o in response.json()["data"]]
+        assert order_numbers == ["AWL81350"], order_numbers
 
 
 # --- 20. Combined filters ----------------------------------------------------

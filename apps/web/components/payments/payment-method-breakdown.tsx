@@ -7,10 +7,14 @@ interface PaymentMethodBreakdownProps {
   hrefFor: (paymentMethod: string) => string
 }
 
-/** Cashfree payment-method distribution (UPI/card/netbanking/...) — reuses
- * the same `StatusDonut` engine every other status/type breakdown on the
- * dashboard already uses, via the `payment_method` tone domain
- * (`lib/status-styles.ts`).
+/** Payment-method distribution (UPI/card/netbanking/... for Cashfree
+ * rows; falls back to cod/prepaid for Shopify rows, which never carry
+ * the finer-grained metadata) — reuses the same `StatusDonut` engine
+ * every other status/type breakdown on the dashboard already uses, via
+ * the `payment_method` tone domain (`lib/status-styles.ts`). Fed by
+ * `usePaymentMethodBreakdown` (provider-agnostic); still typed as
+ * `CashfreePaymentMethodBreakdown` purely because it's the same
+ * response shape, reused rather than duplicated.
  */
 export function PaymentMethodBreakdown({
   data,

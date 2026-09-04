@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.core.security import create_access_token, hash_password
+from app.models.abandoned_checkout import AbandonedCheckout
 from app.models.auth import User
 from app.models.customer import Customer
 from app.models.enums import FulfillmentStatus, OrderStatus, PaymentStatus, PaymentType
@@ -110,6 +111,7 @@ async def make_order(
     order_number: str,
     customer: Customer | None = None,
     fulfillment_status: FulfillmentStatus = FulfillmentStatus.UNFULFILLED,
+    payment_type: PaymentType = PaymentType.PREPAID,
     total_amount: Decimal = Decimal("999.00"),
     order_datetime: datetime | None = None,
 ) -> Order:
@@ -120,8 +122,10 @@ async def make_order(
         currency="INR",
         subtotal=total_amount,
         total_amount=total_amount,
-        payment_type=PaymentType.PREPAID,
-        payment_status=PaymentStatus.PAID,
+        payment_type=payment_type,
+        payment_status=(
+            PaymentStatus.PENDING if payment_type == PaymentType.COD else PaymentStatus.PAID
+        ),
         status=OrderStatus.CONFIRMED,
         fulfillment_status=fulfillment_status,
     )
@@ -135,3 +139,30 @@ async def make_customer(session: AsyncSession, *, phone: str = "9999999999") -> 
     session.add(customer)
     await session.flush()
     return customer
+
+
+async def make_abandoned_checkout(
+    session: AsyncSession,
+    *,
+    external_id: str,
+    customer_phone: str | None = "8888888888",
+    customer_email: str | None = "lead@example.com",
+    is_recovered: bool = False,
+    total_amount: Decimal = Decimal("499.00"),
+    checkout_created_at: datetime | None = None,
+) -> AbandonedCheckout:
+    checkout = AbandonedCheckout(
+        source_system="shopify",
+        external_id=external_id,
+        shopify_checkout_id=external_id,
+        customer_name="Lead Customer",
+        customer_phone=customer_phone,
+        customer_email=customer_email,
+        total_amount=total_amount,
+        subtotal_amount=total_amount,
+        is_recovered=is_recovered,
+        checkout_created_at=checkout_created_at or (datetime.now(UTC) - timedelta(hours=2)),
+    )
+    session.add(checkout)
+    await session.flush()
+    return checkout

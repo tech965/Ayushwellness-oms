@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react"
 import {
+  Activity,
   BarChart3,
   Bell,
   Boxes,
@@ -11,6 +12,8 @@ import {
   History,
   LayoutDashboard,
   ListChecks,
+  Map,
+  MousePointerClick,
   Package,
   PackageX,
   Phone,
@@ -31,6 +34,10 @@ export interface NavItem {
   label: string
   href: string
   icon: LucideIcon
+  /** Gates this item on `useAuth().hasPermission(code)` (see
+   * `SidebarNav`) -- omit for items every `navGroups` user should see.
+   */
+  permission?: string
 }
 
 export interface NavGroup {
@@ -65,7 +72,15 @@ export const navGroups: NavGroup[] = [
   },
   {
     label: "Intelligence",
-    items: [{ label: "Analytics", href: "/analytics", icon: BarChart3 }],
+    items: [
+      { label: "Analytics", href: "/analytics", icon: BarChart3 },
+      { label: "🇮🇳 Supply Intelligence", href: "/supply-intelligence", icon: Map },
+      {
+        label: "🤖 Operations Command Center",
+        href: "/operations-command-center",
+        icon: Activity,
+      },
+    ],
   },
   {
     label: "Operations",
@@ -79,10 +94,25 @@ export const navGroups: NavGroup[] = [
     ],
   },
   {
+    // Admin/superuser view of the same Telecalling pages `teamLeaderNavGroups`
+    // links to below -- same routes, same icons, just surfaced in the full
+    // Admin OMS menu too (previously only reachable by a Team Leader/
+    // Telecaller account or a direct URL; Admin already has every
+    // `telecalling.manage`/`calls.manage` permission via the "*" role).
+    label: "Telecalling",
+    items: [
+      { label: "Dashboard", href: "/team/dashboard", icon: LayoutDashboard },
+      { label: "Lead Pool", href: "/team/leads", icon: ListChecks },
+      { label: "Abandoned Checkouts", href: "/team/checkouts", icon: MousePointerClick },
+      { label: "Unfulfilled Orders", href: "/team/orders/unfulfilled", icon: ListChecks },
+      { label: "Telecallers", href: "/team/telecallers", icon: Users },
+    ],
+  },
+  {
     label: "Administration",
     items: [
-      { label: "Users", href: "/users", icon: ShieldCheck },
-      { label: "Roles", href: "/roles", icon: Gauge },
+      { label: "Users", href: "/users", icon: ShieldCheck, permission: "users.manage" },
+      { label: "Roles", href: "/roles", icon: Gauge, permission: "roles.manage" },
       { label: "Settings", href: "/settings", icon: Settings },
     ],
   },
@@ -101,6 +131,11 @@ export const telecallerNavGroups: NavGroup[] = [
     items: [
       { label: "Dashboard", href: "/telecaller/dashboard", icon: LayoutDashboard },
       { label: "My Assigned Orders", href: "/telecaller/orders", icon: Phone },
+      {
+        label: "My Checkout Leads",
+        href: "/telecaller/checkouts",
+        icon: MousePointerClick,
+      },
       { label: "Follow-ups", href: "/telecaller/follow-ups", icon: CalendarClock },
       { label: "Call History", href: "/telecaller/calls", icon: PhoneCall },
     ],
@@ -113,6 +148,8 @@ export const teamLeaderNavGroups: NavGroup[] = [
     label: "Team",
     items: [
       { label: "Dashboard", href: "/team/dashboard", icon: LayoutDashboard },
+      { label: "Lead Pool", href: "/team/leads", icon: ListChecks },
+      { label: "Abandoned Checkouts", href: "/team/checkouts", icon: MousePointerClick },
       { label: "Unfulfilled Orders", href: "/team/orders/unfulfilled", icon: ListChecks },
       { label: "Telecallers", href: "/team/telecallers", icon: Users },
     ],

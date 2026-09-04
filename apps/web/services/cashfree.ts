@@ -11,7 +11,10 @@ import type {
   CashfreePaymentOverview,
   CashfreePaymentStatus,
   CashfreePaymentTrend,
+  CashfreeSettlementSummary,
   CashfreeStatus,
+  CashfreeSyncRequest,
+  CashfreeSyncResult,
 } from "@/types/cashfree"
 
 async function fetchCashfreePayment(orderId: string): Promise<CashfreePaymentStatus | null> {
@@ -165,5 +168,66 @@ export function useCashfreePaymentMethodBreakdown(params: AnalyticsDateRangePara
     queryKey: ["cashfree-payment-method-breakdown", params],
     queryFn: () => fetchCashfreePaymentMethodBreakdown(params),
     placeholderData: (previous) => previous,
+  })
+}
+
+// --- Bulk transaction/settlement sync (operator-triggered only) --------
+// Neither of these is ever called automatically -- both back a single
+// "Sync ..." button click (spec: no background auto-polling).
+
+function invalidateCashfreeAnalytics(queryClient: ReturnType<typeof useQueryClient>) {
+  void queryClient.invalidateQueries({ queryKey: ["cashfree-payment-overview"] })
+  void queryClient.invalidateQueries({ queryKey: ["cashfree-payment-trend"] })
+  void queryClient.invalidateQueries({ queryKey: ["cashfree-payment-method-breakdown"] })
+  void queryClient.invalidateQueries({ queryKey: ["payments", "list"] })
+}
+
+export function useSyncCashfreeTransactions() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: CashfreeSyncRequest) => {
+      const response = await apiClient.post<ApiResponse<CashfreeSyncResult>>(
+        "/payments/cashfree/sync",
+        payload
+      )
+      if (!response.data.data) throw new Error("Cashfree sync did not return a result.")
+      return response.data.data
+    },
+    onSuccess: () => invalidateCashfreeAnalytics(queryClient),
+  })
+}
+
+export function useSyncCashfreeSettlements() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (payload: CashfreeSyncRequest) => {
+      const response = await apiClient.post<ApiResponse<CashfreeSyncResult>>(
+        "/payments/cashfree/settlements/sync",
+        payload
+      )
+      if (!response.data.data) throw new Error("Cashfree settlement sync did not return a result.")
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["cashfree-settlement-summary"] })
+    },
+  })
+}
+
+async function fetchCashfreeSettlementSummary(): Promise<CashfreeSettlementSummary> {
+  const response = await apiClient.get<ApiResponse<CashfreeSettlementSummary>>(
+    "/payments/cashfree/analytics/settlements"
+  )
+  if (!response.data.data) throw new Error("Cashfree settlement summary not available.")
+  return response.data.data
+}
+
+/** Reads only the locally-synced settlement table -- run
+ * `useSyncCashfreeSettlements` first to populate/refresh it.
+ */
+export function useCashfreeSettlementSummary() {
+  return useQuery({
+    queryKey: ["cashfree-settlement-summary"],
+    queryFn: fetchCashfreeSettlementSummary,
   })
 }

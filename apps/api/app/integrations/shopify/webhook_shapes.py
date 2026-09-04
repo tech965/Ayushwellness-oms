@@ -104,6 +104,12 @@ def order_webhook_to_graphql_shape(raw: dict[str, Any]) -> dict[str, Any]:
         "displayFulfillmentStatus": _REST_FULFILLMENT_STATUS_TO_GRAPHQL.get(
             raw.get("fulfillment_status"), "UNFULFILLED"
         ),
+        # REST gives a comma-joined string for tags (same shape as the
+        # product webhook below); `note` is already a plain string on
+        # both shapes -- `_normalize_tags`/`_clean_text` in normalizer.py
+        # accept either shape unchanged.
+        "tags": raw.get("tags"),
+        "note": raw.get("note"),
         "paymentGatewayNames": raw.get("payment_gateway_names"),
         "customer": {"id": _gid("Customer", customer.get("id"))} if customer.get("id") else {},
         "subtotalPriceSet": _amount(raw.get("subtotal_price")),
@@ -118,7 +124,20 @@ def order_webhook_to_graphql_shape(raw: dict[str, Any]) -> dict[str, Any]:
         "lineItems": {
             "edges": [{"node": _order_line_item_to_graphql_shape(item)} for item in line_items]
         },
+        "fulfillments": [
+            _fulfillment_to_graphql_shape(f) for f in (raw.get("fulfillments") or [])
+        ],
     }
+
+
+# REST `Fulfillment.shipment_status` values ("confirmed"/"in_transit"/
+# "delivered"/"failure"/... — see shopify.dev's REST Fulfillment resource)
+# already match `FulfillmentDisplayStatus`'s GraphQL enum spelling
+# case-insensitively; the normalizer upper()s/lower()s consistently with
+# every other status map in this module, so a plain uppercase is enough.
+def _fulfillment_to_graphql_shape(raw: dict[str, Any]) -> dict[str, Any]:
+    shipment_status = raw.get("shipment_status")
+    return {"displayStatus": shipment_status.upper() if shipment_status else None}
 
 
 def _order_line_item_to_graphql_shape(raw: dict[str, Any]) -> dict[str, Any]:

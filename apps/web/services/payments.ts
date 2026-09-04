@@ -2,6 +2,12 @@ import { useMutation, useQuery } from "@tanstack/react-query"
 
 import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
+import type { AnalyticsDateRangeParams, TimeseriesInterval } from "@/types/analytics"
+import type {
+  CashfreePaymentMethodBreakdown,
+  CashfreePaymentOverview,
+  CashfreePaymentTrend,
+} from "@/types/cashfree"
 import type { Payment, PaymentDetail, PaymentListFilters } from "@/types/payment"
 
 interface ListParams extends PaymentListFilters {
@@ -98,5 +104,72 @@ async function downloadPaymentsExport(filters: PaymentListFilters): Promise<void
 export function useExportPayments() {
   return useMutation({
     mutationFn: downloadPaymentsExport,
+  })
+}
+
+// --- Payment analytics (dashboard cards/charts) --------------------------
+// Provider-agnostic sibling of `services/cashfree.ts`'s own
+// `useCashfreePayment*` analytics hooks (untouched, still Cashfree-only).
+// `provider` omitted/undefined means every provider, matching exactly
+// what `usePayments`/the payments table already treat an absent provider
+// filter as — so the dashboard cards above the table and the table can
+// never silently disagree about what "no provider selected" shows.
+
+interface AnalyticsParams extends AnalyticsDateRangeParams {
+  provider?: string
+}
+
+async function fetchPaymentOverview(params: AnalyticsParams): Promise<CashfreePaymentOverview> {
+  const response = await apiClient.get<ApiResponse<CashfreePaymentOverview>>(
+    "/payments/analytics/overview",
+    { params }
+  )
+  if (!response.data.data) throw new Error("Payment overview not available.")
+  return response.data.data
+}
+
+export function usePaymentOverview(params: AnalyticsParams) {
+  return useQuery({
+    queryKey: ["payments", "analytics-overview", params],
+    queryFn: () => fetchPaymentOverview(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchPaymentTrend(
+  params: AnalyticsParams & { interval: TimeseriesInterval }
+): Promise<CashfreePaymentTrend> {
+  const response = await apiClient.get<ApiResponse<CashfreePaymentTrend>>(
+    "/payments/analytics/trend",
+    { params }
+  )
+  if (!response.data.data) throw new Error("Payment trend not available.")
+  return response.data.data
+}
+
+export function usePaymentTrend(params: AnalyticsParams & { interval: TimeseriesInterval }) {
+  return useQuery({
+    queryKey: ["payments", "analytics-trend", params],
+    queryFn: () => fetchPaymentTrend(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchPaymentMethodBreakdown(
+  params: AnalyticsParams
+): Promise<CashfreePaymentMethodBreakdown> {
+  const response = await apiClient.get<ApiResponse<CashfreePaymentMethodBreakdown>>(
+    "/payments/analytics/method-breakdown",
+    { params }
+  )
+  if (!response.data.data) throw new Error("Payment method breakdown not available.")
+  return response.data.data
+}
+
+export function usePaymentMethodBreakdown(params: AnalyticsParams) {
+  return useQuery({
+    queryKey: ["payments", "analytics-method-breakdown", params],
+    queryFn: () => fetchPaymentMethodBreakdown(params),
+    placeholderData: (previous) => previous,
   })
 }

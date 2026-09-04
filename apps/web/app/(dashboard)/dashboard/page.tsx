@@ -17,14 +17,14 @@ import {
   Users,
   Wallet,
 } from "lucide-react"
-import { endOfDay, startOfDay, subDays } from "date-fns"
-
+import { format } from "date-fns"
 import { CourierPerformanceCard } from "@/components/dashboard/courier-performance-card"
 import { KpiCard } from "@/components/dashboard/kpi-card"
 import { BreakdownList } from "@/components/dashboard/breakdown-list"
 import { OrdersRevenueChart } from "@/components/dashboard/orders-revenue-chart"
 import { PaymentBreakdownCard } from "@/components/dashboard/payment-breakdown-card"
 import { RecentActivityCard } from "@/components/dashboard/recent-activity-card"
+import { ReturnsRefundsCard } from "@/components/dashboard/returns-refunds-card"
 import {
   ShipmentOverviewStrip,
   type ShipmentOverviewItem,
@@ -40,12 +40,22 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { useAuth } from "@/lib/auth-context"
 import { formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
+import { useAppSettings } from "@/lib/settings-context"
+import {
+  isSameIstDay,
+  istCalendarDateAsLocalMidnight,
+  istEndOfDay,
+  istHourOfDay,
+  istStartOfDay,
+  resolveDashboardDateRangePreset,
+} from "@/lib/ist-date"
 import {
   useAnalyticsSummary,
   useBreakdowns,
   useCourierPerformance,
   useOrdersTimeseries,
   useRecentActivity,
+  useReturnsRefundsSummary,
   useTopProducts,
 } from "@/services/analytics"
 import type { TimeseriesInterval } from "@/types/analytics"
@@ -88,8 +98,11 @@ export default function DashboardPage() {
 
 function DashboardContent() {
   const { hasRole } = useAuth()
+  const settings = useAppSettings()
   const { filters, setFilters } = useUrlFilters(FILTER_DEFAULTS)
-  const [interval, setInterval] = React.useState<TimeseriesInterval>("day")
+  const [intervalOverride, setIntervalOverride] = React.useState<TimeseriesInterval>()
+  const interval = intervalOverride ?? settings?.dashboard.default_chart_interval ?? "day"
+  const setInterval = setIntervalOverride
 
   // Resolved to concrete Dates (never left undefined) so every KPI/chart
   // request AND every drill-down link below is built from the exact same
@@ -100,15 +113,20 @@ function DashboardContent() {
   // drill-down link with no date params landed on Orders with no date
   // filter at all (i.e. all-time), silently mismatching whatever count
   // the dashboard had just shown — the "Dashboard says 4, Orders shows 7"
-  // class of bug. `endOfDay` (not `new Date()`) as the default upper
-  // bound also matches the Orders page's own "Last 30 Days" preset
-  // (`components/shared/date-range-picker.tsx`'s `endOfToday()`), so the
-  // two pages agree even when a user separately re-picks the same preset
-  // on Orders instead of following a drill-down link.
-  const resolvedFrom = filters.date_from
-    ? new Date(filters.date_from)
-    : startOfDay(subDays(new Date(), 29))
-  const resolvedTo = filters.date_to ? new Date(filters.date_to) : endOfDay(new Date())
+  // class of bug. The fallback range (when no URL filter is set) is the
+  // "Default dashboard date range" setting (Administration -> Settings ->
+  // Dashboard, "last_30_days" until changed) rather than a hardcoded
+  // window, resolved against IST calendar boundaries the same way
+  // `components/shared/date-range-picker.tsx`'s presets are, so the two
+  // pages agree even when a user separately re-picks the same preset on
+  // Orders instead of following a drill-down link.
+  const now = new Date()
+  const defaultRange = resolveDashboardDateRangePreset(
+    settings?.dashboard.default_date_range ?? "last_30_days",
+    now
+  )
+  const resolvedFrom = filters.date_from ? new Date(filters.date_from) : defaultRange.from
+  const resolvedTo = filters.date_to ? new Date(filters.date_to) : defaultRange.to
 
   const displayRange: DateRangeValue = { from: resolvedFrom, to: resolvedTo }
 
@@ -117,12 +135,59 @@ function DashboardContent() {
     date_to: resolvedTo.toISOString(),
   }
 
-  const summaryQuery = useAnalyticsSummary(dateParams)
-  const timeseriesQuery = useOrdersTimeseries({ ...dateParams, interval })
-  const breakdownsQuery = useBreakdowns(dateParams)
-  const topProductsQuery = useTopProducts({ ...dateParams, limit: 10 })
-  const courierQuery = useCourierPerformance(dateParams)
-  const recentActivityQuery = useRecentActivity()
+  // 0 (the default) means "no auto-refresh," matching the setting's own
+  // description (Administration -> Settings -> Dashboard).
+  const refreshSeconds = settings?.dashboard.refresh_interval_seconds ?? 0
+  const refetchInterval: number | false = refreshSeconds > 0 ? refreshSeconds * 1000 : false
+
+  // "Today" and "Yesterday" each get a dedicated hourly comparison view
+  // (spec: the selected day's data prominent, the previous calendar day
+  // subdued as context) instead of the day/week/month chart every other
+  // range shows — a single IST calendar day has nothing useful to bucket
+  // by day/week/month. The comparison direction is always "selected day
+  // vs. the day immediately before it" -- Yesterday must never compare
+  // against Today.
+  const isTodayRange = isSameIstDay(resolvedFrom, now) && isSameIstDay(resolvedTo, now)
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  const isYesterdayRange =
+    !isTodayRange && isSameIstDay(resolvedFrom, yesterday) && isSameIstDay(resolvedTo, yesterday)
+  const isSingleDayComparisonRange = isTodayRange || isYesterdayRange
+  const effectiveInterval: TimeseriesInterval = isSingleDayComparisonRange ? "hour" : interval
+
+  // The day being compared against is always the calendar day immediately
+  // before whichever single day is selected -- `now - 1` when Today is
+  // selected, `now - 2` when Yesterday is selected.
+  const comparisonPrimaryDay = isYesterdayRange ? yesterday : now
+  const comparisonPreviousDay = new Date(comparisonPrimaryDay.getTime() - 24 * 60 * 60 * 1000)
+  const comparisonPreviousParams = {
+    date_from: istStartOfDay(comparisonPreviousDay).toISOString(),
+    date_to: istEndOfDay(comparisonPreviousDay).toISOString(),
+  }
+  // "Today" is the only case where part of the primary day hasn't
+  // happened yet -- Yesterday (or any other single past day) is always
+  // fully elapsed, so every hour bucket may show real data (including a
+  // genuine zero), never a blanked-out "hasn't happened yet" hour.
+  const primaryLabel = isTodayRange ? "Today" : "Yesterday"
+  const previousLabel = isTodayRange
+    ? "Yesterday"
+    : format(istCalendarDateAsLocalMidnight(comparisonPreviousDay), "d MMM")
+
+  const summaryQuery = useAnalyticsSummary(dateParams, { refetchInterval })
+  const timeseriesQuery = useOrdersTimeseries(
+    { ...dateParams, interval: effectiveInterval },
+    { refetchInterval }
+  )
+  const comparisonPreviousTimeseriesQuery = useOrdersTimeseries(
+    { ...comparisonPreviousParams, interval: "hour" },
+    // Only needed for the Today/Yesterday comparison chart -- skip the
+    // request entirely for every other date range.
+    { enabled: isSingleDayComparisonRange, refetchInterval }
+  )
+  const breakdownsQuery = useBreakdowns(dateParams, { refetchInterval })
+  const topProductsQuery = useTopProducts({ ...dateParams, limit: 10 }, { refetchInterval })
+  const courierQuery = useCourierPerformance(dateParams, { refetchInterval })
+  const returnsRefundsQuery = useReturnsRefundsSummary(dateParams, { refetchInterval })
+  const recentActivityQuery = useRecentActivity({ refetchInterval })
 
   const orderQueryString = new URLSearchParams(dateParams).toString()
 
@@ -320,9 +385,20 @@ function DashboardContent() {
 
         <OrdersRevenueChart
           data={timeseriesQuery.data}
-          interval={interval}
+          interval={effectiveInterval}
           onIntervalChange={setInterval}
           isLoading={timeseriesQuery.isLoading}
+          comparison={
+            isSingleDayComparisonRange
+              ? {
+                  previous: comparisonPreviousTimeseriesQuery.data,
+                  isLoading: comparisonPreviousTimeseriesQuery.isLoading,
+                  currentIstHour: isTodayRange ? istHourOfDay(now) : 23,
+                  primaryLabel,
+                  previousLabel,
+                }
+              : undefined
+          }
         />
 
         <section className="grid gap-4 lg:grid-cols-2">
@@ -375,6 +451,11 @@ function DashboardContent() {
             isLoading={courierQuery.isLoading}
           />
         </section>
+
+        <ReturnsRefundsCard
+          data={returnsRefundsQuery.data}
+          isLoading={returnsRefundsQuery.isLoading}
+        />
 
         <RecentActivityCard
           data={recentActivityQuery.data}

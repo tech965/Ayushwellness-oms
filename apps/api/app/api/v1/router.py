@@ -24,6 +24,7 @@ from app.api.v1.endpoints import (
     dashboard,
     integrations,
     ndr,
+    operations_command_center,
     orders,
     payments,
     permissions,
@@ -35,6 +36,7 @@ from app.api.v1.endpoints import (
     rto,
     shipment_events,
     shipments,
+    supply_intelligence,
     sync,
     sync_jobs,
     tasks,
@@ -42,6 +44,9 @@ from app.api.v1.endpoints import (
     telecaller,
     users,
     webhook_events,
+)
+from app.api.v1.endpoints import (
+    settings as settings_endpoints,
 )
 from app.api.v1.webhooks import cashfree as cashfree_webhooks
 from app.api.v1.webhooks import couriers as courier_webhooks
@@ -73,6 +78,16 @@ api_router.include_router(refunds.router, prefix="/refunds", tags=["refunds"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
+api_router.include_router(
+    supply_intelligence.router,
+    prefix="/analytics/supply-intelligence",
+    tags=["analytics:supply-intelligence"],
+)
+api_router.include_router(
+    operations_command_center.router,
+    prefix="/analytics/operations-command-center",
+    tags=["analytics:operations-command-center"],
+)
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(sync.router, prefix="/sync", tags=["sync"])
 api_router.include_router(sync_jobs.router, prefix="/sync-jobs", tags=["sync-jobs"])
@@ -82,6 +97,7 @@ api_router.include_router(automation.router, prefix="/automation", tags=["automa
 api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(audit_logs.router, prefix="/audit-logs", tags=["audit-logs"])
+api_router.include_router(settings_endpoints.router, prefix="/settings", tags=["settings"])
 api_router.include_router(team.router, prefix="/team", tags=["team"])
 api_router.include_router(telecaller.router, prefix="/telecaller", tags=["telecaller"])
 
@@ -90,6 +106,19 @@ api_router.include_router(
 )
 api_router.include_router(
     shiprocket_webhooks.router, prefix="/webhooks/shiprocket", tags=["webhooks:shiprocket"]
+)
+# Same router, same handler, mounted a second time under a URL that
+# doesn't contain "shiprocket" -- confirmed live: Shiprocket's own
+# "Webhooks" dashboard page refuses the URL above with "Please refrain
+# from using keywords like shiprocket, kartrocket, sr, or kr in the
+# webhook url." The `/webhooks/shiprocket/...` path stays registered
+# (nothing depends on removing it, and any docs/tests referencing it
+# keep working) -- this is purely an additive alias to actually enter
+# into Shiprocket's dashboard.
+api_router.include_router(
+    shiprocket_webhooks.router,
+    prefix="/webhooks/shipment-updates",
+    tags=["webhooks:shiprocket"],
 )
 api_router.include_router(
     courier_webhooks.router, prefix="/webhooks/couriers", tags=["webhooks:couriers"]

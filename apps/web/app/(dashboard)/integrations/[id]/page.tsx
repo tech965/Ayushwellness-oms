@@ -32,12 +32,18 @@ const SYNC_ENTITY_TYPES_BY_CODE: Record<string, { label: string; value: string }
     { label: "Sync Products", value: "products" },
     { label: "Sync Orders", value: "orders" },
   ],
-  // Shipment creation is a per-order push action (see the order detail
-  // page's "Ship via Shiprocket" button), not a bulk sync — so there's no
-  // "Sync Shipments" entry here. RTO has no separate sync path either;
-  // RTO records are derived automatically as a side effect of tracking
-  // refresh (see docs/integrations/shiprocket.md).
+  // "Sync Shipments" pulls the account's existing Shiprocket shipments
+  // (GET /shipments) into the OMS -- distinct from shipment *creation*,
+  // which stays a per-order push action (see the order detail page's
+  // "Ship via Shiprocket" button). This entity has been fully supported
+  // by the backend (app.integrations.shiprocket.adapter's `_FETCH_ROUTES`,
+  // entity_sync._upsert_shipment) since it was built, but was missing
+  // from this list -- Full Sync silently never triggered it. RTO still
+  // has no separate sync path: RTO records are derived automatically as
+  // a side effect of tracking refresh (see docs/integrations/shiprocket.md),
+  // which requires shipments to already be pulled in for NDR/RTO matching.
   shiprocket: [
+    { label: "Sync Shipments", value: "shipments" },
     { label: "Sync Tracking", value: "tracking" },
     { label: "Sync NDR", value: "ndr" },
   ],
@@ -255,7 +261,7 @@ export default function IntegrationDetailPage() {
   )
 }
 
-function SyncActions({ integrationId, code }: { integrationId: string; code: string }) {
+export function SyncActions({ integrationId, code }: { integrationId: string; code: string }) {
   const triggerSync = useTriggerSync(integrationId)
   const [pendingEntity, setPendingEntity] = React.useState<string | null>(null)
   const entityTypes = SYNC_ENTITY_TYPES_BY_CODE[code] ?? []
@@ -274,15 +280,25 @@ function SyncActions({ integrationId, code }: { integrationId: string; code: str
 
   async function triggerFullSync() {
     setPendingEntity("full")
-    try {
-      for (const { value } of entityTypes) {
+    // Each entity is queued independently -- one entity failing to queue
+    // (e.g. a sync already active for it) must never stop the rest from
+    // being triggered, matching how a failure inside one entity's sync
+    // job already never aborts another entity's job on the backend.
+    const failures: string[] = []
+    for (const { value } of entityTypes) {
+      try {
         await triggerSync.mutateAsync({ entityType: value, syncType: "full" })
+      } catch (error) {
+        failures.push(`${value}: ${getApiErrorMessage(error)}`)
       }
+    }
+    setPendingEntity(null)
+    if (failures.length === 0) {
       toast.success("Full sync queued.")
-    } catch (error) {
-      toast.error(getApiErrorMessage(error))
-    } finally {
-      setPendingEntity(null)
+    } else if (failures.length < entityTypes.length) {
+      toast.warning(`Full sync partially queued. ${failures.join("; ")}`)
+    } else {
+      toast.error(`Full sync failed to queue. ${failures.join("; ")}`)
     }
   }
 

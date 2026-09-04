@@ -111,6 +111,8 @@ query Orders($first: Int!, $after: String, $query: String) {
         currencyCode
         displayFinancialStatus
         displayFulfillmentStatus
+        tags
+        note
         subtotalPriceSet { shopMoney { amount } }
         totalDiscountsSet { shopMoney { amount } }
         totalTaxSet { shopMoney { amount } }
@@ -151,6 +153,65 @@ query Orders($first: Int!, $after: String, $query: String) {
             }
           }
         }
+        # Plain list (not a connection — no edges/node), confirmed against
+        # the live schema. `displayStatus` is the actual delivery-progress
+        # status (IN_TRANSIT/OUT_FOR_DELIVERY/DELIVERED/... — 18 values),
+        # distinct from `displayFulfillmentStatus` above (only
+        # UNFULFILLED/PARTIALLY_FULFILLED/FULFILLED/...). An order can have
+        # more than one fulfillment (split shipments); the normalizer takes
+        # the last one as "current", matching `_to_list_response`'s existing
+        # `order.shipments[-1]` convention for Shiprocket shipments.
+        fulfillments(first: 10) {
+          displayStatus
+        }
+      }
+    }
+  }
+}
+"""
+
+ABANDONED_CHECKOUTS_QUERY = """
+query AbandonedCheckouts($first: Int!, $after: String, $query: String) {
+  abandonedCheckouts(first: $first, after: $after, query: $query, sortKey: UPDATED_AT) {
+    pageInfo { hasNextPage endCursor }
+    edges {
+      node {
+        id
+        name
+        email
+        phone
+        abandonedCheckoutUrl
+        completedAt
+        createdAt
+        updatedAt
+        totalPriceSet { shopMoney { amount } }
+        subtotalPriceSet { shopMoney { amount } }
+        customer {
+          id
+          firstName
+          lastName
+          email
+          phone
+        }
+        billingAddress {
+          name
+          phone
+        }
+        # Kept intentionally minimal (title/quantity only) -- this is
+        # display-only data for the calling workflow ("Products,
+        # Quantity" per spec), and every extra field requested here is
+        # one more chance to reference a field name this schema version
+        # doesn't actually have (unlike REST, an unknown GraphQL field
+        # fails the whole query, not just that one value -- see this
+        # file's module docstring).
+        lineItems(first: 100) {
+          edges {
+            node {
+              title
+              quantity
+            }
+          }
+        }
       }
     }
   }
@@ -161,6 +222,7 @@ ENTITY_QUERIES: dict[str, str] = {
     "customers": CUSTOMERS_QUERY,
     "products": PRODUCTS_QUERY,
     "orders": ORDERS_QUERY,
+    "abandoned_checkouts": ABANDONED_CHECKOUTS_QUERY,
 }
 
 

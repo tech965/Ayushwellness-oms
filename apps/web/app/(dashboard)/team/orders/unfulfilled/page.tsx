@@ -13,8 +13,8 @@ import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
+import { TelecallerRosterField } from "@/components/team/telecaller-roster-field"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
   DialogContent,
@@ -313,44 +313,19 @@ function UnfulfilledTeamOrdersContent() {
               </SelectContent>
             </Select>
 
-            {mode === "manual" ? (
-              <Select value={manualTelecallerId} onValueChange={setManualTelecallerId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select telecaller" />
-                </SelectTrigger>
-                <SelectContent>
-                  {telecallersQuery.data?.map((t) => (
-                    <SelectItem key={t.telecaller_id} value={t.telecaller_id}>
-                      {t.telecaller_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-                  Distribute equally across
-                </p>
-                {telecallersQuery.data?.map((t) => (
-                  <label
-                    key={t.telecaller_id}
-                    className="flex items-center gap-2 text-sm"
-                  >
-                    <Checkbox
-                      checked={equalTelecallerIds.has(t.telecaller_id)}
-                      onCheckedChange={() => toggleEqualTelecaller(t.telecaller_id)}
-                    />
-                    {t.telecaller_name}
-                  </label>
-                ))}
-                {equalTelecallerIds.size > 0 && (
-                  <p className="text-muted-foreground text-xs">
-                    ~{Math.floor(selectedIds.size / equalTelecallerIds.size)}–
-                    {Math.ceil(selectedIds.size / equalTelecallerIds.size)} orders per
-                    telecaller.
-                  </p>
-                )}
-              </div>
+            <TelecallerRosterField
+              mode={mode}
+              manualValue={manualTelecallerId}
+              onManualChange={setManualTelecallerId}
+              selectedIds={equalTelecallerIds}
+              onToggle={toggleEqualTelecaller}
+            />
+            {mode === "equal" && equalTelecallerIds.size > 0 && (
+              <p className="text-muted-foreground text-xs">
+                ~{Math.floor(selectedIds.size / equalTelecallerIds.size)}–
+                {Math.ceil(selectedIds.size / equalTelecallerIds.size)} orders per
+                telecaller.
+              </p>
             )}
           </div>
 

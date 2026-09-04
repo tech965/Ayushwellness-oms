@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 
 import { PaymentOverviewCards } from "@/components/payments/payment-overview-cards"
 import type { CashfreePaymentOverview } from "@/types/cashfree"
@@ -29,7 +30,7 @@ describe("PaymentOverviewCards", () => {
     expect(screen.getByText("Paid")).toBeInTheDocument()
     expect(screen.getByText("Pending")).toBeInTheDocument()
     expect(screen.getByText("Failed")).toBeInTheDocument()
-    expect(screen.getByText("Total Amount")).toBeInTheDocument()
+    expect(screen.getByText("Paid Amount")).toBeInTheDocument()
     expect(screen.getByText("10")).toBeInTheDocument()
     expect(screen.getByText("6")).toBeInTheDocument()
   })
@@ -37,5 +38,36 @@ describe("PaymentOverviewCards", () => {
   it("renders a dash for every tile while data is still loading", () => {
     render(<PaymentOverviewCards data={undefined} hrefFor={() => "/payments"} />)
     expect(screen.getAllByText("—").length).toBe(5)
+  })
+
+  it("shows an error banner instead of the tiles on a genuine fetch failure", () => {
+    render(
+      <PaymentOverviewCards
+        data={undefined}
+        hrefFor={() => "/payments"}
+        isError
+        error={new Error("Network error")}
+      />
+    )
+    expect(screen.getByText("Unable to load Cashfree data")).toBeInTheDocument()
+    // A failed fetch must never render as if it were legitimate zero data.
+    expect(screen.queryByText("Total Payments")).not.toBeInTheDocument()
+    expect(screen.queryAllByText("—").length).toBe(0)
+  })
+
+  it("calls onRetry when the error banner's Retry button is clicked", async () => {
+    let retried = false
+    render(
+      <PaymentOverviewCards
+        data={undefined}
+        hrefFor={() => "/payments"}
+        isError
+        onRetry={() => {
+          retried = true
+        }}
+      />
+    )
+    await userEvent.setup().click(screen.getByRole("button", { name: "Retry" }))
+    expect(retried).toBe(true)
   })
 })

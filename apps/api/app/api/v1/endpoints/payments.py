@@ -15,6 +15,11 @@ from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
 from app.models.enums import PaymentStatus
+from app.schemas.cashfree import (
+    CashfreePaymentMethodBreakdownResponse,
+    CashfreePaymentOverviewResponse,
+    CashfreePaymentTrendResponse,
+)
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.payment import (
     PaymentDetailResponse,
@@ -88,6 +93,54 @@ async def export_payments(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=payments-export.xlsx"},
     )
+
+
+@router.get("/analytics/overview", response_model=ApiResponse[CashfreePaymentOverviewResponse])
+async def get_payment_overview(
+    provider: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("payments.read")),
+) -> ApiResponse[CashfreePaymentOverviewResponse]:
+    """Provider-agnostic sibling of `GET /payments/cashfree/analytics/
+    overview` (untouched) — `provider=None` (or omitted) means every
+    provider, exactly like the payments table above it on the dashboard.
+    """
+    overview = await PaymentService(session).get_payment_overview(date_from, date_to, provider)
+    return ApiResponse(data=overview)
+
+
+@router.get("/analytics/trend", response_model=ApiResponse[CashfreePaymentTrendResponse])
+async def get_payment_trend(
+    provider: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    interval: str = Query(default="day", pattern="^(day|week|month)$"),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("payments.read")),
+) -> ApiResponse[CashfreePaymentTrendResponse]:
+    trend = await PaymentService(session).get_payment_trend(
+        date_from, date_to, interval, provider
+    )
+    return ApiResponse(data=trend)
+
+
+@router.get(
+    "/analytics/method-breakdown",
+    response_model=ApiResponse[CashfreePaymentMethodBreakdownResponse],
+)
+async def get_payment_method_breakdown(
+    provider: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("payments.read")),
+) -> ApiResponse[CashfreePaymentMethodBreakdownResponse]:
+    breakdown = await PaymentService(session).get_payment_method_breakdown(
+        date_from, date_to, provider
+    )
+    return ApiResponse(data=breakdown)
 
 
 @router.get("/{payment_id}", response_model=ApiResponse[PaymentDetailResponse])

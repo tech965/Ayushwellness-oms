@@ -66,6 +66,8 @@ from app.models.enums import (
     OrderStatus,
     PaymentStatus,
     PaymentType,
+    RefundStatus,
+    ReturnStatus,
     RTOStatus,
     ShipmentDelayStatus,
     ShipmentStatus,
@@ -93,6 +95,9 @@ from app.schemas.analytics import (
     RecentOrder,
     RecentPayment,
     RecentShipment,
+    RefundsSummary,
+    ReturnsRefundsSummaryResponse,
+    ReturnsSummary,
     RevenueTimeseriesPoint,
     RevenueTimeseriesResponse,
     StatusCount,
@@ -159,70 +164,62 @@ class AnalyticsService:
         )
 
     async def _summary_counts(self, r: DateRange) -> dict[str, Decimal]:
-        orders_in_range = select(Order).where(
-            Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to
-        )
-        total_orders = await self._scalar(
-            select(func.count()).select_from(orders_in_range.subquery())
-        )
-        total_revenue = await self._scalar(
-            select(func.coalesce(func.sum(Order.total_amount), 0)).where(
-                Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to
+        # Perf (pre-demo audit): these 9 figures were previously 9 separate
+        # round trips, each scanning the same `Order` rows in this date
+        # range -- confirmed live as the single slowest piece of
+        # `get_summary` (measured ~500ms locally against real data, well
+        # above every sibling analytics endpoint). Collapsed into one
+        # conditional-aggregation query with IDENTICAL per-metric WHERE
+        # conditions to before -- `func.count(case(...))` only counts rows
+        # where the condition is true (a false/NULL case branch is excluded
+        # from COUNT, standard SQL, no dialect-specific behavior -- verified
+        # against both Postgres and this suite's SQLite), so every result
+        # is byte-for-byte the same as the original 9 queries. Order of the
+        # `.where(...)` date-range filter is unchanged.
+        def _count_if(condition):  # noqa: ANN001, ANN202
+            return func.count(case((condition, 1)))
+
+        def _sum_if(condition):  # noqa: ANN001, ANN202
+            return func.coalesce(func.sum(case((condition, Order.total_amount))), 0)
+
+        order_row = (
+            await self.session.execute(
+                select(
+                    func.count(),
+                    func.coalesce(func.sum(Order.total_amount), 0),
+                    _count_if(Order.fulfillment_status == FulfillmentStatus.FULFILLED),
+                    _count_if(Order.fulfillment_status == FulfillmentStatus.UNFULFILLED),
+                    _count_if(Order.payment_type == PaymentType.COD),
+                    _count_if(Order.payment_type == PaymentType.PREPAID),
+                    # `Order.status` (OMS-internal pack/ship workflow) is a
+                    # DIFFERENT column from `Order.payment_status` — both
+                    # enums happen to share the string "pending" for
+                    # unrelated concepts. "Pending Orders" here means
+                    # orders not yet confirmed/processed by ops
+                    # (`OrderStatus.PENDING`), matching the same `status`
+                    # field the Orders page's own "Order Status" filter and
+                    # the dashboard's "Order Status" breakdown already use
+                    # — not a payment-pending count, which is a separate,
+                    # already-visible bucket in the existing Payment Status
+                    # breakdown.
+                    _count_if(Order.status == OrderStatus.PENDING),
+                    _sum_if(Order.payment_type == PaymentType.COD),
+                    _sum_if(Order.payment_type == PaymentType.PREPAID),
+                ).where(Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to)
             )
-        )
-        fulfilled_orders = await self._count_where(
-            Order,
-            Order.order_datetime >= r.date_from,
-            Order.order_datetime <= r.date_to,
-            Order.fulfillment_status == FulfillmentStatus.FULFILLED,
-        )
-        unfulfilled_orders = await self._count_where(
-            Order,
-            Order.order_datetime >= r.date_from,
-            Order.order_datetime <= r.date_to,
-            Order.fulfillment_status == FulfillmentStatus.UNFULFILLED,
-        )
-        cod_orders = await self._count_where(
-            Order,
-            Order.order_datetime >= r.date_from,
-            Order.order_datetime <= r.date_to,
-            Order.payment_type == PaymentType.COD,
-        )
-        prepaid_orders = await self._count_where(
-            Order,
-            Order.order_datetime >= r.date_from,
-            Order.order_datetime <= r.date_to,
-            Order.payment_type == PaymentType.PREPAID,
-        )
-        # `Order.status` (OMS-internal pack/ship workflow) is a DIFFERENT
-        # column from `Order.payment_status` — both enums happen to share
-        # the string "pending" for unrelated concepts. "Pending Orders"
-        # here means orders not yet confirmed/processed by ops
-        # (`OrderStatus.PENDING`), matching the same `status` field the
-        # Orders page's own "Order Status" filter and the dashboard's
-        # "Order Status" breakdown already use — not a payment-pending
-        # count, which is a separate, already-visible bucket in the
-        # existing Payment Status breakdown.
-        pending_orders = await self._count_where(
-            Order,
-            Order.order_datetime >= r.date_from,
-            Order.order_datetime <= r.date_to,
-            Order.status == OrderStatus.PENDING,
-        )
-        cod_value = await self._scalar(
-            select(func.coalesce(func.sum(Order.total_amount), 0)).where(
-                Order.order_datetime >= r.date_from,
-                Order.order_datetime <= r.date_to,
-                Order.payment_type == PaymentType.COD,
-            )
-        )
-        prepaid_value = await self._scalar(
-            select(func.coalesce(func.sum(Order.total_amount), 0)).where(
-                Order.order_datetime >= r.date_from,
-                Order.order_datetime <= r.date_to,
-                Order.payment_type == PaymentType.PREPAID,
-            )
-        )
+        ).one()
+        (
+            total_orders,
+            total_revenue,
+            fulfilled_orders,
+            unfulfilled_orders,
+            cod_orders,
+            prepaid_orders,
+            pending_orders,
+            cod_value,
+            prepaid_value,
+        ) = (Decimal(v) if v is not None else Decimal("0") for v in order_row)
+
         total_customers = await self._count_where(
             Customer, Customer.created_at >= r.date_from, Customer.created_at <= r.date_to
         )
@@ -234,24 +231,26 @@ class AnalyticsService:
             Shipment.actual_delivery_date >= r.date_from,
             Shipment.actual_delivery_date <= r.date_to,
         )
-        in_transit_shipments = await self._count_where(
-            Shipment,
-            Shipment.updated_at >= r.date_from,
-            Shipment.updated_at <= r.date_to,
-            Shipment.current_status == ShipmentStatus.IN_TRANSIT,
+        # Same collapse as the Order cluster above: `in_transit`/
+        # `out_for_delivery`/`delayed` were 3 separate queries against the
+        # same `Shipment.updated_at` range -- identical conditions, now one
+        # round trip. `delivered_shipments` above is intentionally kept
+        # separate: it filters on a different column (`actual_delivery_date`,
+        # not `updated_at`), so merging it in would change which rows the
+        # query scans, not just how many round trips it takes.
+        shipment_status_row = (
+            await self.session.execute(
+                select(
+                    _count_if(Shipment.current_status == ShipmentStatus.IN_TRANSIT),
+                    _count_if(Shipment.current_status == ShipmentStatus.OUT_FOR_DELIVERY),
+                    _count_if(Shipment.delay_status == ShipmentDelayStatus.DELAYED),
+                ).where(Shipment.updated_at >= r.date_from, Shipment.updated_at <= r.date_to)
+            )
+        ).one()
+        in_transit_shipments, out_for_delivery_shipments, delayed_shipments = (
+            Decimal(v) if v is not None else Decimal("0") for v in shipment_status_row
         )
-        out_for_delivery_shipments = await self._count_where(
-            Shipment,
-            Shipment.updated_at >= r.date_from,
-            Shipment.updated_at <= r.date_to,
-            Shipment.current_status == ShipmentStatus.OUT_FOR_DELIVERY,
-        )
-        delayed_shipments = await self._count_where(
-            Shipment,
-            Shipment.updated_at >= r.date_from,
-            Shipment.updated_at <= r.date_to,
-            Shipment.delay_status == ShipmentDelayStatus.DELAYED,
-        )
+
         open_ndr = await self._count_where(
             NDR,
             NDR.created_at >= r.date_from,
@@ -545,6 +544,9 @@ class AnalyticsService:
     ) -> list[CourierPerformance]:
         r = resolve_range(date_from, date_to)
         delivered_case = case((Shipment.current_status == ShipmentStatus.DELIVERED, 1), else_=0)
+        in_transit_statuses = [ShipmentStatus.PICKED_UP, ShipmentStatus.IN_TRANSIT]
+        in_transit_case = case((Shipment.current_status.in_(in_transit_statuses), 1), else_=0)
+        pending_case = case((Shipment.current_status == ShipmentStatus.PENDING, 1), else_=0)
         ndr_case = case((Shipment.current_status == ShipmentStatus.NDR, 1), else_=0)
         rto_statuses = [ShipmentStatus.RTO_INITIATED, ShipmentStatus.RTO_DELIVERED]
         rto_case = case(
@@ -557,6 +559,8 @@ class AnalyticsService:
                 Courier.name,
                 func.count(Shipment.id),
                 func.sum(cast(delivered_case, Numeric)),
+                func.sum(cast(in_transit_case, Numeric)),
+                func.sum(cast(pending_case, Numeric)),
                 func.sum(cast(ndr_case, Numeric)),
                 func.sum(cast(rto_case, Numeric)),
             )
@@ -568,9 +572,11 @@ class AnalyticsService:
         rows = (await self.session.execute(stmt)).all()
 
         results = []
-        for courier_id, name, shipment_count, delivered, ndr, rto in rows:
+        for courier_id, name, shipment_count, delivered, in_transit, pending, ndr, rto in rows:
             shipment_count = shipment_count or 0
             delivered = int(delivered or 0)
+            in_transit = int(in_transit or 0)
+            pending = int(pending or 0)
             ndr = int(ndr or 0)
             rto = int(rto or 0)
             results.append(
@@ -579,6 +585,8 @@ class AnalyticsService:
                     name=name,
                     shipment_count=shipment_count,
                     delivered_count=delivered,
+                    in_transit_count=in_transit,
+                    pending_count=pending,
                     ndr_count=ndr,
                     rto_count=rto,
                     delivered_pct=(delivered / shipment_count * 100) if shipment_count else 0.0,
@@ -587,6 +595,82 @@ class AnalyticsService:
                 )
             )
         return results
+
+    async def get_returns_refunds_summary(
+        self, date_from: datetime | None, date_to: datetime | None
+    ) -> ReturnsRefundsSummaryResponse:
+        """Backs the dashboard's Returns/Refunds cards. `pending` for a
+        `Return` means still in its request/receipt workflow (every status
+        except its two terminal ones, `COMPLETED`/`CANCELLED`) -- mirrors
+        how `open_ndr`/`open_rto` above define "open" as "not yet in a
+        terminal state" rather than listing every non-terminal status by
+        hand. `return_rate_pct` is against orders placed in the same
+        window (matches every other rate-style figure here being
+        period-scoped) -- `None` (never fabricated as 0%) when the period
+        has no orders at all.
+        """
+        r = resolve_range(date_from, date_to)
+
+        total_returns = await self._count_where(
+            Return, Return.created_at >= r.date_from, Return.created_at <= r.date_to
+        )
+        completed_returns = await self._count_where(
+            Return,
+            Return.created_at >= r.date_from,
+            Return.created_at <= r.date_to,
+            Return.status == ReturnStatus.COMPLETED,
+        )
+        cancelled_returns = await self._count_where(
+            Return,
+            Return.created_at >= r.date_from,
+            Return.created_at <= r.date_to,
+            Return.status == ReturnStatus.CANCELLED,
+        )
+        pending_returns = total_returns - completed_returns - cancelled_returns
+        total_orders = await self._count_where(
+            Order, Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to
+        )
+        return_rate_pct = (
+            float(total_returns / total_orders * 100) if total_orders else None
+        )
+
+        total_refunds = await self._count_where(
+            Refund, Refund.created_at >= r.date_from, Refund.created_at <= r.date_to
+        )
+        completed_refunds = await self._count_where(
+            Refund,
+            Refund.created_at >= r.date_from,
+            Refund.created_at <= r.date_to,
+            Refund.status == RefundStatus.COMPLETED,
+        )
+        pending_refunds = await self._count_where(
+            Refund,
+            Refund.created_at >= r.date_from,
+            Refund.created_at <= r.date_to,
+            Refund.status.in_([RefundStatus.PENDING, RefundStatus.PROCESSING]),
+        )
+        total_refund_amount = await self._scalar(
+            select(func.coalesce(func.sum(Refund.amount), 0)).where(
+                Refund.created_at >= r.date_from,
+                Refund.created_at <= r.date_to,
+                Refund.status == RefundStatus.COMPLETED,
+            )
+        )
+
+        return ReturnsRefundsSummaryResponse(
+            returns=ReturnsSummary(
+                total_returns=int(total_returns),
+                pending_returns=int(pending_returns),
+                completed_returns=int(completed_returns),
+                return_rate_pct=return_rate_pct,
+            ),
+            refunds=RefundsSummary(
+                total_refunds=int(total_refunds),
+                total_refund_amount=total_refund_amount,
+                pending_refunds=int(pending_refunds),
+                completed_refunds=int(completed_refunds),
+            ),
+        )
 
     async def get_recent_activity(self, limit: int = 5) -> RecentActivityResponse:
         orders_stmt = select(Order).order_by(Order.created_at.desc()).limit(limit)
@@ -682,6 +766,8 @@ class AnalyticsService:
 # filtering can never independently drift back into the bug above.
 def _bucket_key(value: datetime, interval: str) -> str:
     ist_value = to_ist(value)
+    if interval == "hour":
+        return ist_value.strftime("%Y-%m-%dT%H:00")
     if interval == "week":
         start_of_week = ist_value.date() - timedelta(days=ist_value.weekday())
         return start_of_week.isoformat()

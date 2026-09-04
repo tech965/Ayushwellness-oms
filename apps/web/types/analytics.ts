@@ -28,7 +28,7 @@ export interface AnalyticsSummary {
   refunds: KPIValue
 }
 
-export type TimeseriesInterval = "day" | "week" | "month"
+export type TimeseriesInterval = "hour" | "day" | "week" | "month"
 
 export interface TimeseriesPoint {
   bucket: string
@@ -66,6 +66,8 @@ export interface CourierPerformance {
   name: string
   shipment_count: number
   delivered_count: number
+  in_transit_count: number
+  pending_count: number
   ndr_count: number
   rto_count: number
   delivered_pct: number
@@ -169,4 +171,23 @@ export interface PaymentStatusTimeseries {
   interval: TimeseriesInterval
   payment_type: "cod" | "prepaid"
   points: PaymentStatusTimeseriesPoint[]
+}
+
+export interface ReturnsSummary {
+  total_returns: number
+  pending_returns: number
+  completed_returns: number
+  return_rate_pct: number | null
+}
+
+export interface RefundsSummary {
+  total_refunds: number
+  total_refund_amount: string
+  pending_refunds: number
+  completed_refunds: number
+}
+
+export interface ReturnsRefundsSummary {
+  returns: ReturnsSummary
+  refunds: RefundsSummary
 }

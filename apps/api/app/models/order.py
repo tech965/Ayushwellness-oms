@@ -49,7 +49,15 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
         ForeignKey("customers.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
-    order_datetime: Mapped[datetime] = mapped_column(AwareDateTime(), nullable=False)
+    # Confirmed live (EXPLAIN ANALYZE against production, 48k orders): every
+    # analytics/dashboard query filters on this column (`resolve_range` in
+    # analytics_service.py), and without an index this was a sequential
+    # scan costing ~700ms per query alone -- the dashboard fires roughly
+    # eight such queries per navigation, directly explaining the reported
+    # multi-second-to-tens-of-seconds dashboard load delay.
+    order_datetime: Mapped[datetime] = mapped_column(
+        AwareDateTime(), nullable=False, index=True
+    )
     currency: Mapped[str] = mapped_column(
         String(8), nullable=False, default="INR", server_default="INR"
     )
@@ -95,6 +103,27 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     )
 
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Shopify-owned order tags/note (spec: "Issue 4" — tags/note import).
+    # Deliberately separate from `notes` above: `notes` is OMS-internal,
+    # staff-entered free text (set via `OrderCreateRequest.notes` at
+    # manual-order-creation time and never touched by sync); these two
+    # columns are the opposite — always overwritten wholesale on every
+    # Shopify sync (`ShopifyOrderNormalizer` always includes both keys,
+    # even when empty/None) so a resync's tag list/note exactly mirrors
+    # Shopify's current state — added/removed tags and note edits/clears
+    # are reflected, never appended or left stale. Never written to by
+    # OMS staff.
+    shopify_tags: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
+    shopify_order_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The actual Shopify delivery/shipment-progress status
+    # (`Fulfillment.displayStatus` — IN_TRANSIT/OUT_FOR_DELIVERY/
+    # DELIVERED/... 18 values), stored as Shopify's own raw lowercased
+    # string rather than a new OMS enum (no natural, non-lossy mapping
+    # exists — see `normalize_shipment_status`'s docstring). Deliberately
+    # a separate column from `fulfillment_status` above (Shopify's much
+    # coarser UNFULFILLED/PARTIALLY_FULFILLED/FULFILLED) — the two must
+    # never be conflated in the UI.
+    shopify_shipment_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # Point-in-time snapshot of the address used for this order — not a
     # CustomerAddress FK, matching OrderItem's existing snapshot
     # convention (an order's shipping/billing address must never change

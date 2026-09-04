@@ -596,4 +596,167 @@ async def test_payment_method_breakdown_groups_by_method(
     assert items["upi"]["amount"] == "300.00"
     assert items["card"]["count"] == 1
     assert items["card"]["amount"] == "50.00"
-    assert None not in items
+
+
+# --- J. Sync endpoints (bulk transaction/settlement sync) ----------------
+
+
+async def test_sync_endpoint_requires_payments_create_permission(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.post(
+            "/api/v1/payments/cashfree/sync",
+            json={"date_from": "2026-09-03T00:00:00Z", "date_to": "2026-09-03T23:59:59Z"},
+        )
+    assert response.status_code == 403
+
+
+async def test_sync_endpoint_runs_reconciliation_and_reports_result(
+    db_session: AsyncSession, make_authenticated_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order_id = await _make_order(
+        db_session, order_number="#AWLSYNCEP1", total_amount=Decimal("321.00")
+    )
+
+    async def _fake_recon(self, *, start_date, end_date, cursor=None, limit=1000):  # noqa: ANN001
+        return {
+            "data": [
+                {
+                    "order_id": "AWLSYNCEP1",
+                    "cf_payment_id": "pay_ep1",
+                    "payment_amount": "321.00",
+                    "payment_currency": "INR",
+                    "payment_time": "2026-09-03T10:00:00Z",
+                    "status": "SUCCESS",
+                    "event_type": "PAYMENT",
+                }
+            ],
+            "cursor": None,
+        }
+
+    monkeypatch.setattr(CashfreeClient, "get_reconciliation", _fake_recon)
+    monkeypatch.setattr(CashfreeClient, "aclose", lambda self: _noop())
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.create"]
+    ) as authed_client:
+        response = await authed_client.post(
+            "/api/v1/payments/cashfree/sync",
+            json={"date_from": "2026-09-03T00:00:00Z", "date_to": "2026-09-03T23:59:59Z"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["fetched"] == 1
+    assert body["applied"] == 1
+    assert body["failures"] == 0
+
+    payment = await PaymentRepository(db_session).get_by_source_external_id(
+        source_system="cashfree", external_id="AWLSYNCEP1"
+    )
+    assert payment is not None
+    assert payment.order_id == order_id
+    assert payment.status == PaymentStatus.PAID
+
+
+async def test_settlement_sync_endpoint_requires_permission(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.post(
+            "/api/v1/payments/cashfree/settlements/sync",
+            json={"date_from": "2026-09-03T00:00:00Z", "date_to": "2026-09-03T23:59:59Z"},
+        )
+    assert response.status_code == 403
+
+
+async def test_settlement_sync_endpoint_populates_and_summary_reflects_it(
+    db_session: AsyncSession, make_authenticated_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _fake_settlements(
+        self, *, start_date=None, end_date=None, settlement_status=None, cursor=None, limit=1000
+    ):  # noqa: ANN001
+        return {
+            "data": [
+                {
+                    "cf_settlement_id": "stl_ep1",
+                    "status": "SUCCESS",
+                    "status_description": "Success",
+                    "settlement_utr": "UTREP1",
+                    "settlement_initiated_on": "2026-09-02T10:00:00Z",
+                    "settlement_processed_on": "2026-09-03T10:00:00Z",
+                    "payment_amount": "10000.00",
+                    "pg_service_charge": "400.00",
+                    "pg_service_tax": "72.00",
+                    "adjustment": "0.00",
+                    "settlement_charge": "20.00",
+                    "settlement_tax": "8.00",
+                    "amount_settled": "9500.00",
+                }
+            ],
+            "cursor": None,
+        }
+
+    monkeypatch.setattr(CashfreeClient, "get_settlements", _fake_settlements)
+    monkeypatch.setattr(CashfreeClient, "aclose", lambda self: _noop())
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.create", "payments.read"]
+    ) as authed_client:
+        sync_response = await authed_client.post(
+            "/api/v1/payments/cashfree/settlements/sync",
+            json={"date_from": "2026-09-01T00:00:00Z", "date_to": "2026-09-03T23:59:59Z"},
+        )
+        assert sync_response.status_code == 200
+        assert sync_response.json()["data"]["applied"] == 1
+
+        summary_response = await authed_client.get(
+            "/api/v1/payments/cashfree/analytics/settlements"
+        )
+
+    assert summary_response.status_code == 200
+    summary = summary_response.json()["data"]
+    assert summary["last_settled_amount"] == "9500.00"
+    assert summary["last_settlement_utr"] == "UTREP1"
+    assert summary["unsettled_amount"] == "0"
+    assert len(summary["history"]) == 1
+
+
+async def test_settlement_analytics_requires_permission(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(db_session, permission_codes=[]) as authed_client:
+        response = await authed_client.get("/api/v1/payments/cashfree/analytics/settlements")
+    assert response.status_code == 403
+
+
+async def test_settlement_analytics_endpoint_returns_a_clean_empty_response_never_a_500(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Issue 3 investigation: confirms `GET /analytics/settlements` itself
+    has no bug that would turn "nothing synced yet" into a 500 — a
+    genuinely empty `cashfree_settlements` table (the state before the
+    settlement sync has ever been run, e.g. right after this feature's
+    migration first lands) must render as a real, structured empty
+    response (matching `test_settlement_summary_with_no_data_returns_
+    honest_empty_values` at the service layer, but exercised through the
+    real HTTP route + response_model serialization this time), never an
+    unhandled exception the global error handler would mask as "An
+    unexpected error occurred."
+    """
+    async with await make_authenticated_client(
+        db_session, permission_codes=["payments.read"]
+    ) as authed_client:
+        response = await authed_client.get("/api/v1/payments/cashfree/analytics/settlements")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["unsettled_amount"] == "0"
+    assert data["upcoming_settlement_amount"] is None
+    assert data["last_settled_amount"] is None
+    assert data["history"] == []

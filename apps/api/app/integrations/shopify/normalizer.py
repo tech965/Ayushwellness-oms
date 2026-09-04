@@ -16,6 +16,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.integrations.normalizer import (
+    AbandonedCheckoutNormalizer,
     CustomerNormalizer,
     Normalizer,
     OrderNormalizer,
@@ -300,6 +301,57 @@ _FULFILLMENT_STATUS_MAP: dict[str, FulfillmentStatus] = {
 _COD_GATEWAY_MARKERS = ("cod", "cash on delivery", "cash_on_delivery")
 
 
+def normalize_tags(value: Any) -> list[str]:
+    """Order.tags` on Shopify's GraphQL Admin API is `[String!]!`; the
+    REST/webhook shape (`webhook_shapes.order_webhook_to_graphql_shape`)
+    gives the same data as a comma-joined string instead -- unlike
+    `ShopifyProductNormalizer.normalize`, which keeps the product's tags
+    as a single comma-joined string column, this always converges to a
+    `list[str]` (Order.tags is stored as a structured JSON array — see
+    `app/models/order.py`). Always returns a list (never `None`) so a
+    resync always fully replaces the stored list with Shopify's current
+    tags, satisfying the idempotent-resync/removed-tags-removed
+    requirement for free, with no dedup/append logic needed anywhere.
+    """
+    if isinstance(value, list):
+        return [cleaned for t in value if (cleaned := _clean_text(t, max_len=255))]
+    if isinstance(value, str):
+        return [
+            cleaned
+            for t in value.split(",")
+            if (cleaned := _clean_text(t.strip(), max_len=255))
+        ]
+    return []
+
+
+def normalize_shipment_status(raw_fulfillments: Any) -> str | None:
+    """Extracts the actual Shopify delivery/shipment-progress status --
+    `Fulfillment.displayStatus` (GraphQL `FulfillmentDisplayStatus`,
+    e.g. `IN_TRANSIT`/`OUT_FOR_DELIVERY`/`DELIVERED`) -- deliberately NOT
+    `Order.displayFulfillmentStatus` (only UNFULFILLED/PARTIALLY_FULFILLED/
+    FULFILLED), which stays mapped to `Order.fulfillment_status` unchanged.
+
+    Stored as Shopify's own raw (lowercased) enum string rather than a new
+    OMS enum: `FulfillmentDisplayStatus` has 18 documented values and no
+    natural OMS equivalent to collapse them into (unlike payment/
+    fulfillment status, which do), so inventing one here would either lose
+    information or need to be kept in lockstep with Shopify's own schema
+    forever. An order can have more than one `Fulfillment` (split
+    shipments); the LAST one in Shopify's list is treated as "current",
+    matching `_to_list_response`'s existing `order.shipments[-1]`
+    convention for Shiprocket shipments -- no fulfillment yet (or every
+    fulfillment's `displayStatus` still null, e.g. immediately after
+    creation before Shopify's tracking pipeline has an update) correctly
+    returns `None`, never a fabricated default.
+    """
+    fulfillments = raw_fulfillments if isinstance(raw_fulfillments, list) else []
+    for fulfillment in reversed(fulfillments):
+        display_status = (fulfillment or {}).get("displayStatus")
+        if display_status:
+            return str(display_status).lower()
+    return None
+
+
 def normalize_payment_status(raw_status: str | None) -> PaymentStatus:
     return _PAYMENT_STATUS_MAP.get((raw_status or "").upper(), PaymentStatus.PENDING)
 
@@ -345,6 +397,15 @@ class ShopifyOrderNormalizer(OrderNormalizer):
             "fulfillment_status": normalize_fulfillment_status(raw.get("displayFulfillmentStatus")),
             "payment_type": normalize_payment_type(raw.get("paymentGatewayNames")),
             "is_cancelled": bool(raw.get("cancelledAt")),
+            # Always included (even when empty/None) so every sync fully
+            # replaces the stored value with Shopify's current state —
+            # see `normalize_tags`'s docstring and `Order.shopify_tags`/
+            # `Order.shopify_order_note` in app/models/order.py. Distinct
+            # from `Order.notes`, the OMS-internal staff note field this
+            # normalizer has never touched and still doesn't.
+            "shopify_tags": normalize_tags(raw.get("tags")),
+            "shopify_order_note": _clean_text(raw.get("note"), max_len=5000),
+            "shopify_shipment_status": normalize_shipment_status(raw.get("fulfillments")),
             "shipping_address": normalize_address(raw.get("shippingAddress")),
             "billing_address": normalize_address(raw.get("billingAddress")),
             "external_created_at": _parse_datetime(raw.get("createdAt")),
@@ -445,14 +506,84 @@ class ShopifyRefundNormalizer(RefundNormalizer):
         }
 
 
+# --- Abandoned checkout ----------------------------------------------------
+
+
+class ShopifyAbandonedCheckoutNormalizer(AbandonedCheckoutNormalizer):
+    """Maps a raw `abandonedCheckouts` GraphQL node to
+    `AbandonedCheckoutService.upsert_synced_checkout`'s kwargs — same
+    `.get()`-everywhere defensiveness as every other normalizer in this
+    module, since `ABANDONED_CHECKOUTS_QUERY` (queries.py) is authored
+    against the documented schema shape and not yet verified against a
+    live store's introspection (see that query's own comment).
+    """
+
+    def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
+        external_id = _gid_to_external_id(raw.get("id"))
+        customer = raw.get("customer") or {}
+        billing = raw.get("billingAddress") or {}
+
+        customer_name = _clean_text(
+            billing.get("name")
+            or " ".join(filter(None, [customer.get("firstName"), customer.get("lastName")]))
+            or None,
+            max_len=255,
+        )
+        # Checkout-level `email`/`phone` (present even for a guest
+        # checkout with no linked Shopify `Customer`) is tried first;
+        # the linked customer's/billing address's own values are the
+        # fallback -- never fabricated when all three are absent (see
+        # `AbandonedCheckout`'s module docstring: a row with neither is
+        # never surfaced as an assignable lead).
+        customer_phone = _clean_text(
+            raw.get("phone") or customer.get("phone") or billing.get("phone"), max_len=32
+        )
+        customer_email = _clean_text(raw.get("email") or customer.get("email"), max_len=255)
+
+        line_items = [
+            {
+                "title": _clean_text((edge.get("node") or {}).get("title"), max_len=500)
+                or "Unknown item",
+                "quantity": (edge.get("node") or {}).get("quantity") or 0,
+            }
+            for edge in (raw.get("lineItems", {}).get("edges") or [])
+        ]
+
+        total = _money(raw.get("totalPriceSet"))
+        subtotal = _money(raw.get("subtotalPriceSet")) or total
+
+        return {
+            "source_system": SourceSystem.SHOPIFY,
+            "external_id": external_id,
+            "shopify_checkout_id": external_id,
+            "customer_external_id": _gid_to_external_id(customer.get("id")),
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "customer_email": customer_email,
+            "checkout_url": _clean_text(raw.get("abandonedCheckoutUrl"), max_len=2000),
+            "currency": "INR",
+            "subtotal_amount": subtotal,
+            "total_amount": total,
+            "line_items": line_items or None,
+            "is_recovered": bool(raw.get("completedAt")),
+            "checkout_created_at": _parse_datetime(raw.get("createdAt")),
+            "checkout_updated_at": _parse_datetime(raw.get("updatedAt")),
+            "external_created_at": _parse_datetime(raw.get("createdAt")),
+            "external_updated_at": _parse_datetime(raw.get("updatedAt")),
+            "raw_external_payload": _sanitize_raw_payload(raw),
+        }
+
+
 CUSTOMER_NORMALIZER: Normalizer = ShopifyCustomerNormalizer()
 PRODUCT_NORMALIZER: Normalizer = ShopifyProductNormalizer()
 ORDER_NORMALIZER: Normalizer = ShopifyOrderNormalizer()
 REFUND_NORMALIZER: Normalizer = ShopifyRefundNormalizer()
+ABANDONED_CHECKOUT_NORMALIZER: Normalizer = ShopifyAbandonedCheckoutNormalizer()
 
 ENTITY_NORMALIZERS: dict[str, Normalizer] = {
     "customers": CUSTOMER_NORMALIZER,
     "products": PRODUCT_NORMALIZER,
     "orders": ORDER_NORMALIZER,
     "refunds": REFUND_NORMALIZER,
+    "abandoned_checkouts": ABANDONED_CHECKOUT_NORMALIZER,
 }

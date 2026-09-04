@@ -2,19 +2,21 @@
 
 import * as React from "react"
 import { CalendarIcon } from "lucide-react"
-import {
-  endOfMonth,
-  format,
-  startOfDay,
-  startOfMonth,
-  subDays,
-  subMonths,
-} from "date-fns"
+import { format } from "date-fns"
 
 import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
+import {
+  istCalendarDateAsLocalMidnight,
+  istEndOfDay,
+  istEndOfDayFromLocalParts,
+  istMidnightFromLocalParts,
+  istStartOfDay,
+  istStartOfMonth,
+  istStartOfWeek,
+} from "@/lib/ist-date"
 
 export interface DateRangeValue {
   from?: Date
@@ -26,40 +28,72 @@ interface Preset {
   range: () => DateRangeValue
 }
 
-function endOfToday(): Date {
-  const now = new Date()
-  now.setHours(23, 59, 59, 999)
-  return now
-}
-
+// Every preset below resolves against the IST calendar day/week/month
+// containing "now" (see `lib/ist-date.ts`) rather than the browser's
+// local timezone — the OMS's business calendar is IST regardless of
+// which timezone the viewer's machine happens to be set to, matching
+// `app/core/timezone.py`'s convention on the backend. "This Month"/"This
+// Week" resolve to-date (start of period -> end of today), matching the
+// existing "Last N Days" presets' own to-date shape.
 const PRESETS: Preset[] = [
-  { label: "Today", range: () => ({ from: startOfDay(new Date()), to: endOfToday() }) },
+  {
+    label: "Today",
+    range: () => {
+      const now = new Date()
+      return { from: istStartOfDay(now), to: istEndOfDay(now) }
+    },
+  },
   {
     label: "Yesterday",
     range: () => {
-      const yesterday = subDays(new Date(), 1)
-      const end = new Date(yesterday)
-      end.setHours(23, 59, 59, 999)
-      return { from: startOfDay(yesterday), to: end }
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      return { from: istStartOfDay(yesterday), to: istEndOfDay(yesterday) }
+    },
+  },
+  {
+    label: "This Week",
+    range: () => {
+      const now = new Date()
+      return { from: istStartOfWeek(now), to: istEndOfDay(now) }
     },
   },
   {
     label: "Last 7 Days",
-    range: () => ({ from: startOfDay(subDays(new Date(), 6)), to: endOfToday() }),
+    range: () => {
+      const now = new Date()
+      return {
+        from: istStartOfDay(new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000)),
+        to: istEndOfDay(now),
+      }
+    },
   },
   {
     label: "Last 30 Days",
-    range: () => ({ from: startOfDay(subDays(new Date(), 29)), to: endOfToday() }),
+    range: () => {
+      const now = new Date()
+      return {
+        from: istStartOfDay(new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000)),
+        to: istEndOfDay(now),
+      }
+    },
   },
   {
     label: "This Month",
-    range: () => ({ from: startOfMonth(new Date()), to: endOfToday() }),
+    range: () => {
+      const now = new Date()
+      return { from: istStartOfMonth(now), to: istEndOfDay(now) }
+    },
   },
   {
     label: "Last Month",
     range: () => {
-      const lastMonth = subMonths(new Date(), 1)
-      return { from: startOfMonth(lastMonth), to: endOfMonth(lastMonth) }
+      const now = new Date()
+      const firstOfThisMonth = istStartOfMonth(now)
+      const lastMonthInstant = new Date(firstOfThisMonth.getTime() - 1)
+      return {
+        from: istStartOfMonth(lastMonthInstant),
+        to: istEndOfDay(new Date(firstOfThisMonth.getTime() - 1)),
+      }
     },
   },
 ]
@@ -94,9 +128,11 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
     return sameInstant(range.from, value.from) && sameInstant(range.to, value.to)
   })
 
+  // Formatted off the IST calendar date (not the raw UTC instant) so the
+  // label reads correctly regardless of the viewer's browser timezone.
   const customLabel =
     !activePreset && value.from && value.to
-      ? `${format(value.from, "d MMM yyyy")} – ${format(value.to, "d MMM yyyy")}`
+      ? `${format(istCalendarDateAsLocalMidnight(value.from), "d MMM yyyy")} – ${format(istCalendarDateAsLocalMidnight(value.to), "d MMM yyyy")}`
       : "Custom Range"
 
   return (
@@ -128,9 +164,19 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
         <PopoverContent className="w-auto p-0" align="end">
           <Calendar
             mode="range"
-            selected={{ from: value.from, to: value.to }}
+            // The calendar widget compares/highlights day cells via local
+            // Y/M/D getters, so it's fed the IST calendar date re-expressed
+            // as a local midnight — not the raw UTC instant `value` holds
+            // (see `istCalendarDateAsLocalMidnight`'s docstring).
+            selected={{
+              from: value.from ? istCalendarDateAsLocalMidnight(value.from) : undefined,
+              to: value.to ? istCalendarDateAsLocalMidnight(value.to) : undefined,
+            }}
             onSelect={(range) => {
-              onChange({ from: range?.from, to: range?.to })
+              onChange({
+                from: range?.from ? istMidnightFromLocalParts(range.from) : undefined,
+                to: range?.to ? istEndOfDayFromLocalParts(range.to) : undefined,
+              })
               if (range?.from && range?.to) setOpen(false)
             }}
             numberOfMonths={2}

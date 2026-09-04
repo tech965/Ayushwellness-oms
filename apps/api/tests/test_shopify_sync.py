@@ -7,7 +7,7 @@ returns hand-built GraphQL response shapes.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from app.integrations.registry import clear_adapters, register_adapter
@@ -124,7 +124,15 @@ def _products_response(product_id: str, variant_id: str, sku: str) -> dict:
     }
 
 
-def _orders_response(order_id: str) -> dict:
+def _orders_response(
+    order_id: str,
+    *,
+    tags: list[str] | None = None,
+    note: str | None = None,
+    updated_at: str = "2026-01-02T00:00:00Z",
+    fulfillment_status: str = "UNFULFILLED",
+    shipment_display_status: str | None = None,
+) -> dict:
     return {
         "orders": {
             "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -134,11 +142,18 @@ def _orders_response(order_id: str) -> dict:
                         "id": f"gid://shopify/Order/{order_id}",
                         "name": f"#{order_id}",
                         "createdAt": "2026-01-01T00:00:00Z",
-                        "updatedAt": "2026-01-02T00:00:00Z",
+                        "updatedAt": updated_at,
                         "cancelledAt": None,
                         "currencyCode": "INR",
                         "displayFinancialStatus": "PAID",
-                        "displayFulfillmentStatus": "UNFULFILLED",
+                        "displayFulfillmentStatus": fulfillment_status,
+                        "tags": tags,
+                        "note": note,
+                        "fulfillments": (
+                            [{"displayStatus": shipment_display_status}]
+                            if shipment_display_status
+                            else []
+                        ),
                         "subtotalPriceSet": {"shopMoney": {"amount": "500.00"}},
                         "totalDiscountsSet": {"shopMoney": {"amount": "0.00"}},
                         "totalTaxSet": {"shopMoney": {"amount": "0.00"}},
@@ -318,6 +333,242 @@ async def test_resyncing_the_same_order_does_not_duplicate(db_session: AsyncSess
     assert total.scalar_one() == 1
 
 
+# Issue 4: Shopify order tags/note import.
+
+
+async def test_order_sync_imports_tags_and_note(db_session: AsyncSession) -> None:
+    client = _StubClient(
+        [_orders_response("510", tags=["COD", "VIP"], note="Please deliver after 6 PM")]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="510"
+    )
+    assert order is not None
+    assert order.shopify_tags == ["COD", "VIP"]
+    assert order.shopify_order_note == "Please deliver after 6 PM"
+    # Distinct from the OMS-internal `notes` field -- Shopify sync must
+    # never write to it.
+    assert order.notes is None
+
+
+async def test_order_sync_with_no_tags_or_note_stores_empty_list_and_none(
+    db_session: AsyncSession,
+) -> None:
+    client = _StubClient([_orders_response("511")])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="511"
+    )
+    assert order is not None
+    assert order.shopify_tags == []
+    assert order.shopify_order_note is None
+
+
+async def test_resync_reflects_new_and_removed_tags_and_updated_note(
+    db_session: AsyncSession,
+) -> None:
+    """Idempotent resync: Shopify is the source of truth for tags/note --
+    a resync must fully replace the stored value, not append to it, so an
+    added tag appears, a removed tag disappears, and an edited note
+    overwrites the old one (spec section D).
+    """
+    client = _StubClient(
+        [
+            _orders_response(
+                "512", tags=["COD", "Repeat Customer"], note="Call before delivery",
+                updated_at="2026-01-02T00:00:00Z",
+            ),
+            _orders_response(
+                "512", tags=["VIP", "High Value"], note="Leave at the gate",
+                updated_at="2026-01-03T00:00:00Z",
+            ),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+    service = SyncService(db_session)
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="512"
+    )
+    assert order.shopify_tags == ["COD", "Repeat Customer"]
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    await db_session.refresh(order)
+    # "COD"/"Repeat Customer" are gone, replaced wholesale -- not appended.
+    assert order.shopify_tags == ["VIP", "High Value"]
+    assert order.shopify_order_note == "Leave at the gate"
+
+    total = await db_session.execute(select(func.count()).select_from(Order))
+    assert total.scalar_one() == 1
+
+
+async def test_order_tags_are_returned_as_a_structured_list_not_a_joined_string(
+    db_session: AsyncSession,
+) -> None:
+    """Regression guard distinguishing this from `Product.tags` (a single
+    comma-joined string column) -- Order tags must stay a real list.
+    """
+    client = _StubClient([_orders_response("513", tags=["A", "B", "C"])])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="513"
+    )
+    assert isinstance(order.shopify_tags, list)
+    assert order.shopify_tags == ["A", "B", "C"]
+
+
+# Issue 2: Orders page "Shipment Status" column must be Shopify-sourced
+# (`Order.fulfillment_status`), never Shiprocket's `Shipment.current_status`.
+
+
+async def test_resync_updates_fulfillment_status_on_an_existing_order(
+    db_session: AsyncSession,
+) -> None:
+    """A historical order must pick up Shopify's current fulfillment
+    status on its NEXT resync — `fulfillment_status` is part of the same
+    always-overwritten `data` dict as every other Shopify-owned field
+    (`OrderService.upsert_synced_order`), so no separate backfill path is
+    needed; this proves that in practice, not just by code inspection.
+    """
+    client = _StubClient(
+        [
+            _orders_response("514", fulfillment_status="UNFULFILLED"),
+            _orders_response(
+                "514", fulfillment_status="FULFILLED", updated_at="2026-01-03T00:00:00Z"
+            ),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+    service = SyncService(db_session)
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="514"
+    )
+    assert order.fulfillment_status == "unfulfilled"
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    await db_session.refresh(order)
+    assert order.fulfillment_status == "fulfilled"
+
+
+async def test_order_sync_imports_the_real_shopify_shipment_status(
+    db_session: AsyncSession,
+) -> None:
+    """Regression test for the reported bug: the "Shipment Status" column
+    must never render `fulfillment_status` — it must come from Shopify's
+    actual delivery/shipment-progress status (`Fulfillment.displayStatus`),
+    stored on a separate column.
+    """
+    client = _StubClient(
+        [
+            _orders_response(
+                "515", fulfillment_status="UNFULFILLED", shipment_display_status="OUT_FOR_DELIVERY"
+            )
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="515"
+    )
+    assert order is not None
+    assert order.shopify_shipment_status == "out_for_delivery"
+    # The two fields are never the same value here — proves they're
+    # genuinely independent, not one derived from the other.
+    assert order.fulfillment_status == "unfulfilled"
+    assert order.shopify_shipment_status != order.fulfillment_status
+
+
+async def test_order_sync_with_no_shopify_fulfillment_yet_leaves_shipment_status_none(
+    db_session: AsyncSession,
+) -> None:
+    client = _StubClient([_orders_response("516")])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    await SyncService(db_session).run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="516"
+    )
+    assert order is not None
+    assert order.shopify_shipment_status is None
+
+
+async def test_resync_updates_shopify_shipment_status_on_an_existing_order(
+    db_session: AsyncSession,
+) -> None:
+    """Historical orders pick up Shopify's current delivery status on
+    their next resync — same always-overwritten `data` dict as every
+    other Shopify-owned field, no separate backfill path needed.
+    """
+    client = _StubClient(
+        [
+            _orders_response("517", shipment_display_status="IN_TRANSIT"),
+            _orders_response(
+                "517",
+                shipment_display_status="DELIVERED",
+                updated_at="2026-01-03T00:00:00Z",
+            ),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+    service = SyncService(db_session)
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    order = await OrderRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="517"
+    )
+    assert order.shopify_shipment_status == "in_transit"
+
+    await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    await db_session.refresh(order)
+    assert order.shopify_shipment_status == "delivered"
+
+
 # 19. Partial sync failure
 async def test_one_bad_record_does_not_fail_the_whole_sync_job(db_session: AsyncSession) -> None:
     """Two products in one page; the second has a structurally malformed
@@ -451,6 +702,154 @@ async def test_full_sync_does_not_apply_an_incremental_filter(db_session: AsyncS
     await service.execute_sync(job.id)
 
     assert client.calls[0]["query"] is None
+
+
+# --- Historical-orders production incident: a backlog crawl that ran out
+# of its per-job time budget mid-crawl still `COMPLETED` with a real
+# `completed_at` — the only thing that had stood between that and being
+# mistaken for "backlog genuinely finished" was `resume_cursor is None`,
+# which is itself just an inference, not an explicit signal. Shopify
+# orders older than ~2026-03 (e.g. #AWL46048, confirmed live in Shopify,
+# created 2025-12-28) were never imported as a result. `backlog_complete`
+# is now explicit, persisted state, set ONLY at the exact moment a crawl
+# that wasn't already incremental observes a genuine `hasNextPage: false`
+# — never inferred from `since`/`resume_cursor` alone. ------------------
+
+
+async def test_interrupted_backlog_stays_backlog_even_once_since_is_set(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the exact reported production bug: a backlog
+    crawl that hits the time budget mid-crawl (persisting a resume
+    cursor) must still be treated as an incomplete backlog on the NEXT
+    run, even though that first job's own successful completion now
+    makes `since` non-None -- `since is not None` alone must never be
+    read as "the backlog is done".
+    """
+    import app.services.sync_service as sync_service_module
+
+    monkeypatch.setattr(sync_service_module, "_MAX_ENTITY_SYNC_DURATION", timedelta(seconds=-1))
+
+    page_1 = _orders_response("46048")
+    page_1["orders"]["pageInfo"] = {"hasNextPage": True, "endCursor": "cursor-2"}
+    client_1 = _StubClient([page_1])
+    register_adapter(ShopifyAdapter(client=client_1))
+    integration = await _make_shopify_integration(db_session)
+
+    service = SyncService(db_session)
+    job_1 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    assert job_1.status == SyncJobStatus.COMPLETED  # ran out of time budget, not an error
+    assert job_1.completed_at is not None  # `since` is now non-None for the next run
+
+    await db_session.refresh(integration)
+    assert integration.configuration["sync_cursors"]["orders"] == "cursor-2"
+    assert "orders" not in (integration.configuration.get("backlog_complete") or {})
+
+    # Second run: even requested as INCREMENTAL (what a caller unaware of
+    # the interrupted backlog might reasonably pass), the fetch must still
+    # be unfiltered (no `updated_at` query) and must resume from the
+    # persisted cursor, not restart at page 1 or switch to incremental.
+    page_2 = _orders_response("46049")
+    page_2["orders"]["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+    client_2 = _StubClient([page_2])
+    register_adapter(ShopifyAdapter(client=client_2))
+
+    job_2 = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="orders"
+    )
+
+    assert client_2.calls[0]["query"] is None  # still a backlog fetch, not filtered by since
+    assert client_2.calls[0]["after"] == "cursor-2"  # resumed, did not restart at page 1
+    assert job_2.status == SyncJobStatus.COMPLETED
+
+    await db_session.refresh(integration)
+    assert integration.configuration["backlog_complete"]["orders"] is True
+    assert integration.configuration["sync_cursors"].get("orders") is None
+
+
+async def test_backlog_complete_flag_set_only_on_genuine_has_more_false(
+    db_session: AsyncSession,
+) -> None:
+    """A single-page backlog crawl that completes cleanly (no time-budget
+    interruption) must still set `backlog_complete` explicitly -- and a
+    THIRD run must then correctly switch to a real incremental
+    (`since`-filtered) fetch.
+    """
+    client = _StubClient([_orders_response("50001")])
+    register_adapter(ShopifyAdapter(client=client))
+    integration = await _make_shopify_integration(db_session)
+
+    service = SyncService(db_session)
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+    assert job.status == SyncJobStatus.COMPLETED
+
+    await db_session.refresh(integration)
+    assert integration.configuration["backlog_complete"]["orders"] is True
+
+    incremental_client = _StubClient(
+        [{"orders": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "edges": []}}]
+    )
+    register_adapter(ShopifyAdapter(client=incremental_client))
+    incremental_job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.INCREMENTAL, entity_type="orders"
+    )
+
+    assert incremental_client.calls[0]["query"] is not None
+    assert "updated_at" in incremental_client.calls[0]["query"]
+    assert incremental_job.status == SyncJobStatus.COMPLETED
+
+
+async def test_reset_backlog_recovers_a_missing_historical_order(
+    db_session: AsyncSession,
+) -> None:
+    """End-to-end proof of the recovery path
+    (`scripts/reset_shopify_orders_backlog.py`'s core operation,
+    `SyncService.reset_backlog`): an entity whose backlog *looks* done
+    under the legacy `since`/`resume_cursor` inference (no explicit flag
+    ever recorded) is forced back into a genuine unfiltered crawl, and a
+    historical order missing from the OMS (the #AWL46048 scenario) is
+    imported without duplicating or disturbing anything already synced.
+    """
+    integration = await _make_shopify_integration(db_session)
+
+    # Simulate the pre-existing, misleading state: a completed job with
+    # no resume cursor and no explicit backlog_complete flag -- exactly
+    # what production had before this fix existed.
+    await SyncJobRepository(db_session).create(
+        integration_id=integration.id,
+        sync_type=SyncType.FULL,
+        entity_type="orders",
+        status=SyncJobStatus.COMPLETED,
+        completed_at=datetime(2026, 3, 1, tzinfo=UTC),
+    )
+    await db_session.commit()
+
+    service = SyncService(db_session)
+    await service.reset_backlog(integration_id=integration.id, entity_type="orders")
+
+    await db_session.refresh(integration)
+    assert integration.configuration["backlog_complete"]["orders"] is False
+    assert integration.configuration["sync_cursors"].get("orders") is None
+
+    historical_order = _orders_response("AWL46048")
+    client = _StubClient([historical_order])
+    register_adapter(ShopifyAdapter(client=client))
+
+    job = await service.run_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="orders"
+    )
+
+    assert client.calls[0]["query"] is None  # a genuine, unfiltered backlog crawl
+    assert job.status == SyncJobStatus.COMPLETED
+    assert job.records_created == 1
+
+    order = await OrderRepository(db_session).get_by_order_number("#AWL46048")
+    assert order is not None
+    assert order.order_number == "#AWL46048"
 
 
 # Round 5 — Task 9: an HTTP 200 with a GraphQL-level error must not be

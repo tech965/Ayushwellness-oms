@@ -4,9 +4,12 @@ import * as React from "react"
 import { useRouter } from "next/navigation"
 import { useQueryClient } from "@tanstack/react-query"
 import { Columns3, Download } from "lucide-react"
+import { endOfDay, startOfDay, subDays } from "date-fns"
 import { toast } from "sonner"
 
+import { CashfreeSettlementSection } from "@/components/payments/cashfree-settlement-section"
 import { CashfreeStatusCard } from "@/components/payments/cashfree-status-card"
+import { CashfreeSyncTransactionsButton } from "@/components/payments/cashfree-sync-transactions-button"
 import { PaymentMethodBreakdown } from "@/components/payments/payment-method-breakdown"
 import { PaymentOverviewCards } from "@/components/payments/payment-overview-cards"
 import { PaymentTrendChart } from "@/components/payments/payment-trend-chart"
@@ -39,17 +42,19 @@ import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
+import { buildPaymentDrilldownHref } from "@/lib/build-payment-drilldown-href"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useLocalStorageState } from "@/lib/use-local-storage-state"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import type { TimeseriesInterval } from "@/types/analytics"
+import { useReconcileCashfreePayment } from "@/services/cashfree"
 import {
-  useCashfreePaymentMethodBreakdown,
-  useCashfreePaymentOverview,
-  useCashfreePaymentTrend,
-  useReconcileCashfreePayment,
-} from "@/services/cashfree"
-import { useExportPayments, usePayments } from "@/services/payments"
+  useExportPayments,
+  usePaymentMethodBreakdown,
+  usePaymentOverview,
+  usePaymentTrend,
+  usePayments,
+} from "@/services/payments"
 import {
   PAYMENT_PROVIDER_OPTIONS,
   PAYMENT_STATUS_OPTIONS,
@@ -347,6 +352,13 @@ function PaymentsPageContent() {
     to: filters.date_to ? new Date(filters.date_to) : undefined,
   }
 
+  // The Cashfree sync actions need a concrete date range (the sync
+  // endpoints' `date_from`/`date_to` are required, unlike the optional
+  // analytics query params below) -- same "last 30 days when nothing is
+  // picked" fallback the Dashboard/Revenue Analytics pages already use.
+  const resolvedSyncFrom = dateRange.from ?? startOfDay(subDays(new Date(), 29))
+  const resolvedSyncTo = dateRange.to ?? endOfDay(new Date())
+
   const activeFilters = {
     q: filters.q || undefined,
     provider: filters.provider || undefined,
@@ -364,25 +376,38 @@ function PaymentsPageContent() {
     ...activeFilters,
   })
 
-  // Cashfree analytics share the table's own date range so the KPI
-  // cards/charts and the rows below them always describe the same
-  // period -- same contract the main Dashboard's KPIs/drill-down links
-  // already use.
-  const analyticsDateParams = {
+  // The trend chart/method-breakdown/table share the table's own date
+  // range AND provider filter, so they always describe exactly the same
+  // slice of data the rows below them show -- same contract the main
+  // Dashboard's KPIs/drill-down links already use. Provider-agnostic by
+  // default ("All providers" -> every payment, Shopify included); the
+  // dedicated Cashfree-only analytics endpoints this page used to call
+  // are untouched and still power nothing here now, on purpose.
+  const analyticsParams = {
+    provider: filters.provider || undefined,
     date_from: filters.date_from || undefined,
     date_to: filters.date_to || undefined,
   }
-  const overviewQuery = useCashfreePaymentOverview(analyticsDateParams)
-  const trendQuery = useCashfreePaymentTrend({ ...analyticsDateParams, interval })
-  const methodBreakdownQuery = useCashfreePaymentMethodBreakdown(analyticsDateParams)
+  // The 5 KPI tiles above (Total Payments/Paid/Pending/Failed/Paid
+  // Amount) are this page's own "Cashfree Payments" summary -- always
+  // scoped to `provider: "cashfree"`, independent of the general
+  // Provider filter above (which stays "every provider" by default for
+  // the trend/breakdown/table). Every Shopify-synced order, COD
+  // included, already gets its own `Payment` row (`provider="shopify"`,
+  // see `OrderService.upsert_synced_order`) -- with no provider filter,
+  // this query's `total_amount` was silently summing COD's collected
+  // amount right alongside real Cashfree transactions, which is exactly
+  // why it read close to overall Total Revenue instead of Revenue
+  // Analytics' much smaller Prepaid Revenue figure for the same range.
+  // Same date range/timezone convention as Revenue Analytics either way
+  // (`date_from`/`date_to` pass straight through to the same
+  // `resolve_range` helper, untouched).
+  const overviewQuery = usePaymentOverview({ ...analyticsParams, provider: "cashfree" })
+  const trendQuery = usePaymentTrend({ ...analyticsParams, interval })
+  const methodBreakdownQuery = usePaymentMethodBreakdown(analyticsParams)
 
   function hrefFor(extra: Record<string, string>): string {
-    const params = new URLSearchParams()
-    params.set("provider", "cashfree")
-    if (filters.date_from) params.set("date_from", filters.date_from)
-    if (filters.date_to) params.set("date_to", filters.date_to)
-    for (const [key, value] of Object.entries(extra)) params.set(key, value)
-    return `/payments?${params.toString()}`
+    return buildPaymentDrilldownHref(filters, extra)
   }
 
   function handleSortChange(sortKey: string) {
@@ -458,7 +483,25 @@ function PaymentsPageContent() {
       <div className="flex flex-col gap-6">
         <CashfreeStatusCard />
 
-        <PaymentOverviewCards data={overviewQuery.data} hrefFor={hrefFor} />
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold">Cashfree Transactions</h2>
+          <CashfreeSyncTransactionsButton
+            dateFrom={resolvedSyncFrom.toISOString()}
+            dateTo={resolvedSyncTo.toISOString()}
+          />
+        </div>
+        <PaymentOverviewCards
+          data={overviewQuery.data}
+          hrefFor={hrefFor}
+          isError={overviewQuery.isError}
+          error={overviewQuery.error}
+          onRetry={() => void overviewQuery.refetch()}
+        />
+
+        <CashfreeSettlementSection
+          dateFrom={resolvedSyncFrom.toISOString()}
+          dateTo={resolvedSyncTo.toISOString()}
+        />
 
         <div className="grid gap-4 lg:grid-cols-2">
           <PaymentTrendChart

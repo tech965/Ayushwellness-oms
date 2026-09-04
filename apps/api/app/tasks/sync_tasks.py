@@ -55,7 +55,7 @@ STALE_SYNC_JOB_THRESHOLD = timedelta(minutes=20)
 # guarantee — an NDR for a shipment that arrives moments later in the
 # same store will simply be picked up on the next scheduled cycle.
 _SCHEDULED_SYNC_ENTITIES: dict[str, list[str]] = {
-    IntegrationCode.SHOPIFY: ["orders", "customers", "products"],
+    IntegrationCode.SHOPIFY: ["orders", "customers", "products", "abandoned_checkouts"],
     IntegrationCode.SHIPROCKET: ["shipments", "ndr"],
 }
 
@@ -102,9 +102,28 @@ def run_sync_task(integration_id: str, sync_type: str, entity_type: str) -> None
 
 
 async def _run_scheduled_sync() -> list[tuple[str, str]]:
+    """Real production incident this fixes: this loop used to hand every
+    entity `SyncType.INCREMENTAL.value` unconditionally, on every single
+    10-minute cycle, including the very first one an entity ever saw.
+    `SyncService._run_entity_sync`'s own `since`/`resume_cursor` checks
+    already stopped that from *executing* as a real incremental fetch
+    before a backlog baseline existed — but the *label* on every one of
+    those `SyncJob` rows still read "incremental", which is exactly what
+    made a real gap (Shopify orders older than ~2026-03 never imported)
+    look, from Sync History and Render logs alone, like ordinary
+    incremental runs turning up nothing new rather than an interrupted or
+    never-attempted backlog crawl. Each entity now gets `SyncType.FULL`
+    until its own `backlog_complete` flag is genuinely set (see
+    `SyncService.backlog_known_complete_for` / `_mark_backlog_complete`) —
+    `_run_entity_sync` already resumes a `FULL` request from any
+    persisted cursor rather than restarting at page 1, so this changes
+    nothing about execution for an entity whose backlog is already done
+    or already in progress; it only fixes what gets recorded.
+    """
     enqueued: list[tuple[str, str]] = []
     async with AsyncSessionLocal() as session:
         integrations = (await session.execute(select(Integration))).scalars().all()
+        sync_jobs = SyncJobRepository(session)
         for integration in integrations:
             entity_types = _SCHEDULED_SYNC_ENTITIES.get(integration.code)
             # Skip providers with no registered adapter (see the map above)
@@ -116,7 +135,20 @@ async def _run_scheduled_sync() -> list[tuple[str, str]]:
             if not entity_types or get_adapter(integration.code) is None:
                 continue
             for entity_type in entity_types:
-                run_sync_task.delay(str(integration.id), SyncType.INCREMENTAL.value, entity_type)
+                last_successful = await sync_jobs.get_last_successful_for_entity(
+                    integration_id=integration.id, entity_type=entity_type
+                )
+                since = last_successful.completed_at if last_successful else None
+                resume_cursor = (
+                    (integration.configuration or {}).get("sync_cursors", {}).get(entity_type)
+                )
+                backlog_done = SyncService.backlog_known_complete_for(
+                    integration, entity_type=entity_type, since=since, resume_cursor=resume_cursor
+                )
+                sync_type = (
+                    SyncType.INCREMENTAL.value if backlog_done else SyncType.FULL.value
+                )
+                run_sync_task.delay(str(integration.id), sync_type, entity_type)
                 enqueued.append((integration.code, entity_type))
     return enqueued
 

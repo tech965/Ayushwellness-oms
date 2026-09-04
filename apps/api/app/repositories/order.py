@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import String, and_, exists, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.models.customer import Customer
@@ -65,6 +65,7 @@ class OrderRepository(BaseRepository[Order]):
         shipment_status: str | None = None,
         courier_id: uuid.UUID | None = None,
         sku: str | None = None,
+        tag: str | None = None,
         amount_min: Decimal | None = None,
         amount_max: Decimal | None = None,
         customer_id: uuid.UUID | None = None,
@@ -134,6 +135,18 @@ class OrderRepository(BaseRepository[Order]):
                         and_(OrderItem.order_id == Order.id, OrderItem.sku.ilike(f"%{sku}%"))
                     )
                 )
+            )
+        if tag:
+            # `shopify_tags` is a JSON array (`app/models/order.py`); no
+            # dialect-specific containment operator (Postgres `@>`, etc.)
+            # is used so this stays portable to SQLite (the test suite's
+            # dialect) — casting to text and matching the quoted element
+            # against a JSON-serialized array (`["VIP", "COD"]`) is a
+            # substring match, same unindexed-ILIKE performance profile
+            # as the `sku` filter just above, deliberately not a new
+            # indexed/expensive search path (small per-order tag lists).
+            stmt = stmt.where(
+                func.cast(Order.shopify_tags, String).ilike(f'%"{tag}"%')
             )
         # Every caller of `search_query` eventually serializes through a
         # response that touches `customer`/`items`/`shipments` (list rows
