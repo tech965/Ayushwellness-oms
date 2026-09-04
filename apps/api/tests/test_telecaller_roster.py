@@ -58,6 +58,41 @@ async def test_brand_new_telecaller_with_zero_assignments_appears_in_roster(
         assert rows[0]["email"] == "brand-new-tc@example.com"
 
 
+async def test_roster_matches_a_role_name_created_with_different_casing(
+    db_session: AsyncSession,
+) -> None:
+    """Reproduces the reported production bug: `Role.name` is free-typed by
+    an Admin via Administration -> Roles (`RoleCreateRequest.name`) with no
+    normalization, and `TELECALLER` isn't part of the default seeded roles
+    -- it must be created by hand. A role named e.g. "Telecaller" (not the
+    exact-cased "TELECALLER" every backend query hardcodes) must still
+    surface its users here, the same way it already shows correctly on the
+    Users/Roles admin pages.
+    """
+    team_leader_role = await make_role(
+        db_session, name="TEAM_LEADER", permission_codes=["telecalling.manage"]
+    )
+    mixed_case_telecaller_role = await make_role(
+        db_session, name="Telecaller", permission_codes=["calls.manage"]
+    )
+    leader = await make_user(
+        db_session, email="roster-leader-casing@example.com", role=team_leader_role
+    )
+    telecaller = await make_user(
+        db_session,
+        email="mixed-case-tc@example.com",
+        name="Mixed Case Telecaller",
+        role=mixed_case_telecaller_role,
+        team_leader_id=leader.id,
+    )
+
+    async with bearer_client(app, get_db, db_session, leader.id) as client:
+        roster = await client.get("/api/v1/team/telecallers/roster")
+        assert roster.status_code == 200
+        rows = roster.json()["data"]
+        assert {row["id"] for row in rows} == {str(telecaller.id)}
+
+
 async def test_roster_excludes_non_telecaller_users(db_session: AsyncSession) -> None:
     team_leader_role = await make_role(
         db_session, name="TEAM_LEADER", permission_codes=["telecalling.manage"]

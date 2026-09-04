@@ -78,12 +78,25 @@ class UserRepository(BaseRepository[User]):
         every team (the Admin case); a caller scoping to one Team Leader's
         own roster passes their own id, matching every other `/team/*`
         scoping convention in this codebase.
+
+        Matches `Role.name` case-insensitively: `Role.name` (`RoleCreateRequest.
+        name`, app/schemas/rbac.py) is free-typed by an Admin via
+        Administration -> Roles with no normalization anywhere in
+        `RBACService.create_role`, and `TELECALLER`/`TEAM_LEADER` aren't
+        part of the default seeded roles (scripts/seed.py) -- they must be
+        created by hand. A role typed as e.g. "Telecaller" previously
+        matched nothing here (exact `==`), silently emptying this roster
+        while the role itself worked everywhere else (Users page, RBAC
+        permission checks, which are permission-code-based, not
+        role-name-based) -- confirmed production incident. An exact-cased
+        `role_name` argument still matches exactly as before; this only
+        ever adds matches, never removes one.
         """
         stmt = (
             select(User)
             .join(UserRole, UserRole.user_id == User.id)
             .join(Role, Role.id == UserRole.role_id)
-            .where(Role.name == role_name)
+            .where(Role.name.ilike(role_name))
             .order_by(User.name)
         )
         if active_only:
