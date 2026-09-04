@@ -1,135 +1,21 @@
 services:
-  - type: web
-    name: ayushwellness-oms-api
-    runtime: python
-    rootDir: apps/api
-    # This project uses plain pip + pyproject.toml (setuptools build
-    # backend) — there is no [tool.poetry] section and never has been.
-    # Render's Python buildpack defaults to running Poetry whenever it
-    # finds a pyproject.toml, which breaks here (Poetry mis-resolves the
-    # project's Python requirement against a non-Poetry PEP 621
-    # project). Explicit commands below make Render use pip instead, and
-    # apps/api/runtime.txt pins the interpreter version, matching what's
-    # already used in docker/api.Dockerfile (python:3.12-slim) and
-    # already proven to work (the same requirements-lock.txt is used for
-    # the Docker image build).
-    buildCommand: pip install --upgrade pip && pip install -r requirements-lock.txt
-    # Round 6 production incident: a migration (3d3a46f414e3, adding
-    # `users.team_leader_id` for the Team Leader/Telecaller feature) was
-    # merged and deployed, but nothing ever ran it against the production
-    # database — every request touching the `User` model, including
-    # login, then failed with a real (but CORS-header-less, see the
-    # error_handler.py fix) HTTP 500. `preDeployCommand` runs once,
-    # before this service's new code starts receiving traffic, so the
-    # schema is always caught up first. `alembic upgrade head` only ever
-    # moves forward and is safe to run on every deploy, including when
-    # there's nothing new to apply.
-    preDeployCommand: alembic upgrade head
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      # Values are never stored here (sync: false) — set each of these
-      # in the Render dashboard for this service.
-      - key: DATABASE_URL
-        sync: false
-      - key: REDIS_URL
-        sync: false
-      - key: JWT_SECRET
-        sync: false
-      - key: CORS_ORIGINS
-        sync: false
-      - key: SHOPIFY_STORE_DOMAIN
-        sync: false
-      - key: SHOPIFY_ACCESS_TOKEN
-        sync: false
-      - key: SHOPIFY_WEBHOOK_SECRET
-        sync: false
-      - key: SHIPROCKET_EMAIL
-        sync: false
-      - key: SHIPROCKET_PASSWORD
-        sync: false
-      - key: SHIPROCKET_PICKUP_LOCATION
-        sync: false
-      # Verifies POST /api/v1/webhooks/shiprocket/tracking (see
-      # app.integrations.shiprocket.webhooks) — the same value entered as
-      # the "Webhook Secret" in Shiprocket's dashboard (Settings > API >
-      # Webhook). Web service only: this endpoint is handled synchronously
-      # in the request, never by the worker.
-      - key: SHIPROCKET_WEBHOOK_SECRET
-        sync: false
-      # Cashfree Payments — checkout creation (POST /api/v1/payments/
-      # cashfree/orders/{id}/create) and webhook verification (POST
-      # /api/v1/webhooks/cashfree/payment) both run synchronously in the
-      # web service; the worker never calls Cashfree, so these are web-
-      # service-only. See docs/integrations/cashfree.md.
-      - key: CASHFREE_CLIENT_ID
-        sync: false
-      - key: CASHFREE_CLIENT_SECRET
-        sync: false
-      # Optional — only needed if this Cashfree account has a webhook
-      # signing key distinct from its client secret; leave unset to use
-      # CASHFREE_CLIENT_SECRET (Cashfree's documented default/common
-      # case — see app.integrations.cashfree.webhooks).
-      - key: CASHFREE_WEBHOOK_SECRET
-        sync: false
-      # https://api.cashfree.com/pg for production, defaults to the
-      # sandbox URL if unset — see app.core.config.
-      - key: CASHFREE_API_URL
-        sync: false
-      # Optional order_meta.return_url template (a "{order_id}"
-      # placeholder is substituted) — checkout works without it.
-      - key: CASHFREE_RETURN_URL
-        sync: false
-      # Widen this (dashboard value, comma-separated) to include the
-      # ayushwellness-oms-web service's real *.onrender.com origin once
-      # it exists below — Render only assigns that URL after the service
-      # is first created, so there is nothing correct to hardcode here
-      # ahead of time. See app.core.config.CORS_ORIGINS.
-
-  - type: web
-    name: ayushwellness-oms-web
-    runtime: node
-    rootDir: apps/web
-    # Next.js frontend. The Shopify App URL must point HERE, never at
-    # ayushwellness-oms-api above — Shopify loads the App URL inside an
-    # iframe in Shopify Admin, and a JSON API with no root page and
-    # X-Frame-Options: DENY can only ever produce "refused to connect"
-    # there (confirmed live: curl https://ayushwellness-oms.onrender.com/
-    # returns 404 application/json with that header). This service never
-    # receives webhook traffic — POST /api/v1/webhooks/shopify stays on
-    # the FastAPI service above, unchanged.
-    #
-    # `output: "standalone"` (apps/web/next.config.ts, active whenever
-    # `VERCEL` isn't set) produces a self-contained server at
-    # .next/standalone/server.js, but Next deliberately does not copy
-    # static assets or `public/` into it (documented standalone
-    # behavior) — docker/web.Dockerfile handles this with explicit
-    # `COPY` layers; the `cp -r` steps below do the equivalent here,
-    # since this is Render's native Node runtime, not that Docker image.
-    # Verified locally before writing this: a clean `npm run build`
-    # followed by these exact copy steps and `node .next/standalone/
-    # server.js` served /login (200) and / (307 -> /dashboard) correctly.
-    buildCommand: npm ci && npm run build && cp -r .next/static .next/standalone/.next/static && cp -r public .next/standalone/public
-    # The generated server.js reads `process.env.PORT` (defaulting to
-    # 3000) and binds `process.env.HOSTNAME || '0.0.0.0'` on its own —
-    # confirmed by reading the actual generated file, not assumed — so
-    # no --port/--hostname flags are needed; Render injects $PORT into
-    # every web service automatically, the same way the uvicorn
-    # startCommand above relies on it.
-    startCommand: node .next/standalone/server.js
-    envVars:
-      # NEXT_PUBLIC_* vars are inlined into the client bundle at BUILD
-      # time (Next.js semantics), not read at runtime — Render exposes
-      # configured env vars to buildCommand as well as the running
-      # process, which is what makes this actually reach the built JS.
-      # Not a secret (this is the same public API origin every browser
-      # already calls directly), so a literal value here is fine — unlike
-      # every `sync: false` entry elsewhere in this file, which really
-      # are secrets.
-      - key: NEXT_PUBLIC_API_URL
-        value: https://ayushwellness-oms.onrender.com/api/v1
-      - key: NODE_ENV
-        value: production
-
+  # The API (uvicorn/FastAPI) and web (Next.js) services that used to
+  # live here moved to Vercel — apps/api/vercel.json and Vercel's own
+  # zero-config Next.js build handle those now (separate Vercel
+  # projects, Root Directory set to apps/api and apps/web respectively).
+  # Only the Celery worker stays here: it's a long-lived process
+  # (`-B` embeds Celery beat, polling Redis continuously) and has no
+  # equivalent on Vercel's on-demand serverless model.
+  #
+  # Moving the API off Render drops two things that lived on it and
+  # need a new home:
+  #   - `alembic upgrade head` (previously this service's
+  #     preDeployCommand, see git history) — Vercel has no equivalent
+  #     hook; run migrations manually or from CI before/with each
+  #     deploy.
+  #   - CORS_ORIGINS / NEXT_PUBLIC_API_URL previously pointed at
+  #     *.onrender.com — repoint them at the new Vercel domains once
+  #     those projects exist.
   - type: worker
     name: ayushwellness-oms-worker
     runtime: python
@@ -172,8 +58,9 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements-lock.txt
     startCommand: celery -A app.workers.celery_app worker -B -Q celery,shiprocket --concurrency=3 --loglevel=info
     envVars:
-      # Same values as the web service above — set independently here
-      # too, since Render services don't share env vars by default.
+      # Overlaps with what the API needs (now set separately in its
+      # Vercel project) — set independently here too, since env vars
+      # aren't shared across services/platforms.
       - key: DATABASE_URL
         sync: false
       - key: REDIS_URL

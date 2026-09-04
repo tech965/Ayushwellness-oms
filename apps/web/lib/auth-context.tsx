@@ -25,7 +25,7 @@ interface AuthContextValue {
 
 const AuthContext = React.createContext<AuthContextValue | null>(null)
 
-/**
+/** 
  * Client-side route guard for the (dashboard) route group. Tokens live in
  * localStorage (see lib/api-client.ts), so there's nothing for Next.js
  * middleware to read — this is the auth boundary instead: no token (or an

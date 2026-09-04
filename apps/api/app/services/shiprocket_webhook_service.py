@@ -37,6 +37,7 @@ from app.models.mixins import SourceSystem
 from app.models.order import Order
 from app.models.shipment import Shipment
 from app.repositories.shipment import ShipmentRepository
+from app.services.inventory_service import InventoryService
 from app.services.rto_service import RTOService
 from app.services.shipment_service import ShipmentService
 
@@ -65,6 +66,7 @@ class ShiprocketWebhookService:
         self.shipments = ShipmentRepository(session)
         self.shipment_service = ShipmentService(session)
         self.rto_service = RTOService(session)
+        self.inventory_service = InventoryService(session)
 
     async def apply_tracking_webhook(self, payload: dict[str, Any]) -> WebhookMatchResult:
         ids = extract_webhook_shipment_identifiers(payload)
@@ -112,6 +114,7 @@ class ShiprocketWebhookService:
                 normalized,
                 shipment_service=self.shipment_service,
                 rto_service=self.rto_service,
+                inventory_service=self.inventory_service,
                 source="shiprocket_webhook",
             )
 

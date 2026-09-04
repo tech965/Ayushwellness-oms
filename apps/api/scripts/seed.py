@@ -49,6 +49,8 @@ PERMISSIONS: dict[str, str] = {
     "customers.update": "Create/update customers",
     "products.read": "View products",
     "products.update": "Create/update products",
+    "inventory.read": "View stock levels and inventory movement history",
+    "inventory.manage": "Manually adjust product stock levels",
     "ndr.read": "View NDR records",
     "ndr.update": "Update NDR records",
     "rto.read": "View RTO records",
@@ -77,6 +79,11 @@ PERMISSIONS: dict[str, str] = {
         "view team calling activity and performance"
     ),
     "calls.manage": "Telecaller: view own assigned orders, log calls, manage own follow-ups",
+    "chat.use": (
+        "Use the OMS AI Assistant (natural-language questions). Each answer "
+        "is still gated by the user's other module permissions "
+        "(analytics.read, orders.read, ...)."
+    ),
     # No "settings.manage"-gated read counterpart: `GET /settings` only
     # requires authentication (see `app/api/v1/endpoints/settings.py`) --
     # nothing in it is sensitive, and it's read in the background by every
@@ -104,6 +111,9 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "reconciliation.manage",
         "payments.read",
         "payments.create",
+        "inventory.read",
+        "inventory.manage",
+        "chat.use",
     ],
     "CUSTOMER_SUPPORT": [
         "customers.read",
@@ -115,9 +125,11 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "returns.read",
         "returns.update",
         "refunds.read",
+        "chat.use",
     ],
     "MARKETING": [
         "analytics.read",
+        "chat.use",
     ],
     "MANAGEMENT": [
         "analytics.read",
@@ -134,6 +146,7 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "sync_jobs.read",
         "webhooks.read",
         "reconciliation.read",
+        "chat.use",
     ],
     "TEAM_LEADER": ["telecalling.manage"],
     "TELECALLER": ["calls.manage"],
