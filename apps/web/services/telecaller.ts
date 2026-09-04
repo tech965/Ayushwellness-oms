@@ -93,7 +93,17 @@ export function useLogCall(orderId: string) {
       return response.data.data
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders", orderId] })
+      // Broad enough to match the "My Assigned Orders" list
+      // (["telecaller","orders",params]) as well as this one order's own
+      // detail (["telecaller","orders",orderId]) and call history
+      // (["telecaller","orders",orderId,"calls"]) -- all three share this
+      // prefix. Invalidating only ["telecaller","orders",orderId] (the
+      // previous behavior) never matched the list query: its own key's
+      // third element is a params *object*, not this order's id, so
+      // TanStack's partial-match check silently skipped it and the list
+      // kept showing stale status/attempt data until its 30s staleTime
+      // happened to expire.
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "follow-ups"] })
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "summary"] })
     },
@@ -111,7 +121,8 @@ export function useScheduleFollowUp(orderId: string) {
       return response.data.data
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders", orderId] })
+      // See `useLogCall`'s identical comment above.
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "follow-ups"] })
     },
   })
@@ -249,8 +260,11 @@ export function useLogCheckoutCall(checkoutId: string) {
       return response.data.data
     },
     onSuccess: () => {
+      // See `useLogCall`'s identical comment in this file — the list
+      // query's key is ["telecaller","checkouts",params], which
+      // ["telecaller","checkouts",checkoutId] never partial-matched.
       void queryClient.invalidateQueries({
-        queryKey: ["telecaller", "checkouts", checkoutId],
+        queryKey: ["telecaller", "checkouts"],
       })
       void queryClient.invalidateQueries({
         queryKey: ["telecaller", "checkout-follow-ups"],
@@ -272,7 +286,7 @@ export function useScheduleCheckoutFollowUp(checkoutId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["telecaller", "checkouts", checkoutId],
+        queryKey: ["telecaller", "checkouts"],
       })
       void queryClient.invalidateQueries({
         queryKey: ["telecaller", "checkout-follow-ups"],
