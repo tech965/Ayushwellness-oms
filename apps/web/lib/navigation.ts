@@ -27,6 +27,7 @@ import {
   ShoppingCart,
   Truck,
   Users,
+  Warehouse,
   Workflow,
 } from "lucide-react"
 
@@ -57,6 +58,7 @@ export const navGroups: NavGroup[] = [
       { label: "Payments", href: "/payments", icon: CreditCard },
       { label: "Customers", href: "/customers", icon: Users },
       { label: "Products", href: "/products", icon: Package },
+      { label: "Inventory", href: "/inventory", icon: Warehouse, permission: "inventory.read" },
     ],
   },
   {

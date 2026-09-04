@@ -23,6 +23,7 @@ from app.api.v1.endpoints import (
     customers,
     dashboard,
     integrations,
+    inventory,
     ndr,
     operations_command_center,
     orders,
@@ -62,6 +63,7 @@ api_router.include_router(permissions.router, prefix="/permissions", tags=["perm
 api_router.include_router(orders.router, prefix="/orders", tags=["orders"])
 api_router.include_router(customers.router, prefix="/customers", tags=["customers"])
 api_router.include_router(products.router, prefix="/products", tags=["products"])
+api_router.include_router(inventory.router, prefix="/inventory", tags=["inventory"])
 api_router.include_router(payments.router, prefix="/payments", tags=["payments"])
 api_router.include_router(
     cashfree_payments.router, prefix="/payments/cashfree", tags=["payments:cashfree"]

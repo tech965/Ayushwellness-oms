@@ -16,6 +16,7 @@ from app.models.chat import ChatQueryLog
 from app.models.courier import Courier
 from app.models.customer import Customer, CustomerAddress
 from app.models.integration import Integration, SyncError, SyncJob, WebhookEvent
+from app.models.inventory import InventoryMovement
 from app.models.ndr import NDR
 from app.models.order import Order, OrderEvent, OrderItem
 from app.models.payment import Payment, PaymentTransaction
@@ -48,6 +49,7 @@ __all__ = [
     "SyncError",
     "SyncJob",
     "WebhookEvent",
+    "InventoryMovement",
     "NDR",
     "Order",
     "OrderEvent",

@@ -18,18 +18,33 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.normalizer import TRACKING_NORMALIZER, extract_tracking_events
 from app.models.enums import RTOStatus, ShipmentStatus
 from app.models.shipment import Shipment
+from app.services.inventory_service import InventoryService
 from app.services.rto_service import RTOService
 from app.services.shipment_service import ShipmentService
 from app.services.sync_service import SyncService
+
+logger = get_logger(__name__)
 
 RTO_STATUS_FROM_SHIPMENT_STATUS: dict[ShipmentStatus, RTOStatus] = {
     ShipmentStatus.RTO_INITIATED: RTOStatus.INITIATED,
     ShipmentStatus.RTO_DELIVERED: RTOStatus.RECEIVED,
 }
+
+# A shipment reaching any of these means the courier has physically taken
+# the order out for delivery -- the "dispatched" signal that triggers
+# `InventoryService.apply_dispatch`. Idempotent per (order, variant), so
+# it's safe to keep firing as the shipment advances through later statuses.
+_DISPATCHED_STATUSES = (
+    ShipmentStatus.PICKED_UP,
+    ShipmentStatus.IN_TRANSIT,
+    ShipmentStatus.OUT_FOR_DELIVERY,
+    ShipmentStatus.DELIVERED,
+)
 
 _TERMINAL_STATUSES = (
     ShipmentStatus.DELIVERED,
@@ -45,18 +60,20 @@ async def apply_tracking_event(
     *,
     shipment_service: ShipmentService,
     rto_service: RTOService,
+    inventory_service: InventoryService,
     source: str = "shiprocket",
 ) -> bool:
     """One normalized tracking event (the shape `TRACKING_NORMALIZER.
     normalize_event`/a webhook-flavored equivalent both produce) -> the
-    same three OMS writes every tracking source needs: append the
+    same OMS writes every tracking source needs: append the
     `ShipmentEvent` (idempotent), advance `Shipment.current_status` when
-    the event maps to a known status, and derive an `RTO` row when that
-    status is `RTO_INITIATED`/`RTO_DELIVERED`. Shared by `refresh_tracking`
-    (pull) and `app.services.shiprocket_webhook_service` (push/webhook) so
-    the two ingestion paths can never silently diverge in behaviour.
-    Returns True only when a genuinely new `ShipmentEvent` was created —
-    a duplicate replay (same external_event_id, or same
+    the event maps to a known status, derive an `RTO` row when that
+    status is `RTO_INITIATED`/`RTO_DELIVERED`, and move OMS-tracked stock
+    (dispatch decrement / RTO restock) accordingly. Shared by
+    `refresh_tracking` (pull) and `app.services.shiprocket_webhook_service`
+    (push/webhook) so the ingestion paths can never silently diverge in
+    behaviour. Returns True only when a genuinely new `ShipmentEvent` was
+    created — a duplicate replay (same external_event_id, or same
     (status, event_timestamp) when no id is available) returns False.
     """
     if normalized["event_timestamp"] is None:
@@ -80,12 +97,23 @@ async def apply_tracking_event(
             shipment.id, actor=None, current_status=mapped_status
         )
 
+    if mapped_status in _DISPATCHED_STATUSES:
+        try:
+            await inventory_service.apply_dispatch(
+                order_id=shipment.order_id, shipment_id=shipment.id
+            )
+        except Exception:  # noqa: BLE001 - stock tracking must never block tracking ingestion
+            await session.rollback()
+            logger.exception(
+                "inventory_dispatch_failed", shipment_id=str(shipment.id), source=source
+            )
+
     rto_status = RTO_STATUS_FROM_SHIPMENT_STATUS.get(mapped_status)
     if rto_status is not None:
         # No dedicated RTO listing endpoint was confirmed for Shiprocket
         # (see docs/integrations/shiprocket.md) — RTO records are derived
         # from tracking events instead of a separate, unverified sync path.
-        await rto_service.upsert_synced_rto(
+        rto, _ = await rto_service.upsert_synced_rto(
             source_system="shiprocket",
             external_id=shipment.awb,
             shipment_id=shipment.id,
@@ -94,6 +122,16 @@ async def apply_tracking_event(
             status=rto_status,
             external_reason=normalized["description"],
         )
+        if rto_status == RTOStatus.RECEIVED:
+            try:
+                await inventory_service.apply_rto_restock(
+                    order_id=shipment.order_id, rto_id=rto.id
+                )
+            except Exception:  # noqa: BLE001 - stock tracking must never block tracking ingestion
+                await session.rollback()
+                logger.exception(
+                    "inventory_rto_restock_failed", shipment_id=str(shipment.id), source=source
+                )
 
     return created
 
@@ -104,6 +142,7 @@ async def refresh_tracking(
     sync_service = SyncService(session)
     shipment_service = ShipmentService(session)
     rto_service = RTOService(session)
+    inventory_service = InventoryService(session)
 
     stmt = select(Shipment).where(
         Shipment.awb.is_not(None), Shipment.current_status.not_in(_TERMINAL_STATUSES)
@@ -127,6 +166,7 @@ async def refresh_tracking(
                     normalized,
                     shipment_service=shipment_service,
                     rto_service=rto_service,
+                    inventory_service=inventory_service,
                 )
                 any_new_event = any_new_event or created
 

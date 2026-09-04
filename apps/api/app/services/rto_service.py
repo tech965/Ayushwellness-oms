@@ -6,11 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
 from app.models.auth import User
+from app.models.enums import RTOStatus
 from app.models.rto import RTO
 from app.repositories.rto import RTORepository
 from app.repositories.shipment import ShipmentRepository
 from app.schemas.common import PageParams, SortParams
 from app.services.audit_service import AuditService
+from app.services.inventory_service import InventoryService
 
 
 class RTOService:
@@ -60,6 +62,10 @@ class RTOService:
                     previous_value={"status": previous_status.value},
                     new_value={"status": clean["status"].value},
                 )
+                if clean["status"] == RTOStatus.RECEIVED:
+                    await InventoryService(self.session).apply_rto_restock(
+                        order_id=rto.order_id, rto_id=rto.id
+                    )
         await self.session.commit()
         return rto
 

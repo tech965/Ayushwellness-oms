@@ -49,6 +49,8 @@ PERMISSIONS: dict[str, str] = {
     "customers.update": "Create/update customers",
     "products.read": "View products",
     "products.update": "Create/update products",
+    "inventory.read": "View stock levels and inventory movement history",
+    "inventory.manage": "Manually adjust product stock levels",
     "ndr.read": "View NDR records",
     "ndr.update": "Update NDR records",
     "rto.read": "View RTO records",
@@ -109,6 +111,8 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "reconciliation.manage",
         "payments.read",
         "payments.create",
+        "inventory.read",
+        "inventory.manage",
         "chat.use",
     ],
     "CUSTOMER_SUPPORT": [
