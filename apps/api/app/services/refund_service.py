@@ -5,6 +5,7 @@ a return completes — see that module's docstring.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,10 +25,21 @@ class RefundService:
         *,
         page_params: PageParams,
         sort_params: SortParams,
+        q: str | None = None,
         status: str | None = None,
+        payment_type: str | None = None,
         order_id: uuid.UUID | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
     ) -> tuple[list[Refund], int]:
-        query = self.refunds.search_query(status=status, order_id=order_id)
+        query = self.refunds.search_query(
+            q=q,
+            status=status,
+            payment_type=payment_type,
+            order_id=order_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
         items, total = await self.refunds.list(
             page_params=page_params, sort_params=sort_params, query=query
         )

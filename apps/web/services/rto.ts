@@ -14,8 +14,12 @@ async function fetchRtos(params: ListParams): Promise<PaginatedResponse<RTO>> {
     params: {
       page: params.page,
       page_size: params.pageSize,
+      q: params.q || undefined,
       status: params.status,
+      payment_type: params.payment_type,
       courier_id: params.courier_id,
+      date_from: params.date_from,
+      date_to: params.date_to,
     },
   })
   return response.data

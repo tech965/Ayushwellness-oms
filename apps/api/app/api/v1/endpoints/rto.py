@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,28 +13,73 @@ from app.dependencies.auth import require_permission
 from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
+from app.models.rto import RTO
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.response import ApiResponse, PaginatedResponse
-from app.schemas.rto import RTOResponse, RTOUpdateRequest
+from app.schemas.rto import RTOListResponse, RTOResponse, RTOUpdateRequest
 from app.services.rto_service import RTOService
 
 router = APIRouter()
 
 
-@router.get("", response_model=PaginatedResponse[RTOResponse])
-async def list_rtos(
+def _rto_filters(
+    q: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    payment_type: str | None = Query(default=None),
     courier_id: uuid.UUID | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+) -> dict:
+    """Shared filter set for `list_rtos` — same shape/purpose as Orders'
+    `_order_filters` (app/api/v1/endpoints/orders.py).
+    """
+    return {
+        "q": q,
+        "status": status,
+        "payment_type": payment_type,
+        "courier_id": courier_id,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+
+
+def _to_list_response(rto: RTO) -> RTOListResponse:
+    """Denormalizes the RTO-table columns from the relationships
+    `RTORepository.search_query` already eager-loads — see the identical
+    convention in app/api/v1/endpoints/ndr.py.
+    """
+    order = rto.order
+    items = order.items if order else []
+    product: str | None = None
+    if items:
+        first = items[0].product_name
+        product = first if len(items) == 1 else f"{first} +{len(items) - 1} more"
+
+    return RTOListResponse(
+        **RTOResponse.model_validate(rto).model_dump(),
+        order_number=order.order_number if order else None,
+        customer_name=order.customer.full_name if order and order.customer else None,
+        customer_phone=order.customer.phone if order and order.customer else None,
+        product=product,
+        order_amount=order.total_amount if order else None,
+        payment_type=order.payment_type.value if order else None,
+        shipment_status=rto.shipment.current_status.value if rto.shipment else None,
+    )
+
+
+@router.get("", response_model=PaginatedResponse[RTOListResponse])
+async def list_rtos(
+    filters: dict = Depends(_rto_filters),
     page_params: PageParams = Depends(pagination_params),
     sort_params: SortParams = Depends(sort_params_dep),
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("rto.read")),
-) -> PaginatedResponse[RTOResponse]:
+) -> PaginatedResponse[RTOListResponse]:
     items, total = await RTOService(session).list_rtos(
-        page_params=page_params, sort_params=sort_params, status=status, courier_id=courier_id
+        page_params=page_params, sort_params=sort_params, **filters
     )
     return PaginatedResponse(
-        data=[RTOResponse.model_validate(r) for r in items],
+        data=[_to_list_response(r) for r in items],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
 

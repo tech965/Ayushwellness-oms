@@ -36,11 +36,23 @@ class ReturnService:
         *,
         page_params: PageParams,
         sort_params: SortParams,
+        q: str | None = None,
         status: str | None = None,
+        payment_type: str | None = None,
         customer_id: uuid.UUID | None = None,
         order_id: uuid.UUID | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
     ) -> tuple[list[Return], int]:
-        query = self.returns.search_query(status=status, customer_id=customer_id, order_id=order_id)
+        query = self.returns.search_query(
+            q=q,
+            status=status,
+            payment_type=payment_type,
+            customer_id=customer_id,
+            order_id=order_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
         items, total = await self.returns.list(
             page_params=page_params, sort_params=sort_params, query=query
         )

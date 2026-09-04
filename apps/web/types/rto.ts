@@ -17,11 +17,24 @@ export interface RTO {
   source_system: string | null
   created_at: string
   updated_at: string
+  // Denormalized order/customer/product/shipment columns — present only
+  // on rows from `GET /rto` (`RTOListResponse`).
+  order_number?: string | null
+  customer_name?: string | null
+  customer_phone?: string | null
+  product?: string | null
+  order_amount?: string | null
+  payment_type?: string | null
+  shipment_status?: string | null
 }
 
 export interface RTOListFilters {
+  q?: string
   status?: RTOStatus
+  payment_type?: string
   courier_id?: string
+  date_from?: string
+  date_to?: string
 }
 
 export const RTO_STATUS_OPTIONS: { label: string; value: RTOStatus }[] = [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,3 +40,20 @@ class ReturnResponse(BaseModel):
     source_system: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ReturnListResponse(ReturnResponse):
+    """`ReturnResponse` plus denormalized order/customer/product columns —
+    see `NDRListResponse`'s docstring (app/schemas/ndr.py) for the
+    identical convention this mirrors. `product` prefers the specific
+    returned `order_item` when set, falling back to the order's overall
+    item summary otherwise (see `_to_list_response` in
+    app/api/v1/endpoints/returns.py).
+    """
+
+    order_number: str | None = None
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    product: str | None = None
+    order_amount: Decimal | None = None
+    payment_type: str | None = None

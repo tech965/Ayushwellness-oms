@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,10 +26,21 @@ class RTOService:
         *,
         page_params: PageParams,
         sort_params: SortParams,
+        q: str | None = None,
         status: str | None = None,
+        payment_type: str | None = None,
         courier_id: uuid.UUID | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
     ) -> tuple[list[RTO], int]:
-        query = self.rtos.search_query(status=status, courier_id=courier_id)
+        query = self.rtos.search_query(
+            q=q,
+            status=status,
+            payment_type=payment_type,
+            courier_id=courier_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
         items, total = await self.rtos.list(
             page_params=page_params, sort_params=sort_params, query=query
         )

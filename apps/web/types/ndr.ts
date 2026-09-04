@@ -20,11 +20,25 @@ export interface NDR {
   source_system: string | null
   created_at: string
   updated_at: string
+  // Denormalized order/customer/product/shipment columns — present only
+  // on rows from `GET /ndr` (`NDRListResponse`); mirrors `Order`'s own
+  // `customer_name`/`customer_phone`/etc. convention (types/order.ts).
+  order_number?: string | null
+  customer_name?: string | null
+  customer_phone?: string | null
+  product?: string | null
+  order_amount?: string | null
+  payment_type?: string | null
+  shipment_status?: string | null
 }
 
 export interface NDRListFilters {
+  q?: string
   status?: NDRStatus
+  payment_type?: string
   courier_id?: string
+  date_from?: string
+  date_to?: string
 }
 
 export const NDR_STATUS_OPTIONS: { label: string; value: NDRStatus }[] = [

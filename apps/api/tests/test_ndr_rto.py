@@ -5,12 +5,14 @@ Phase 2's sync adapters will.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
+from app.models.customer import Customer
 from app.models.enums import NDRStatus, RTOStatus
 from app.models.ndr import NDR
-from app.models.order import Order
+from app.models.order import Order, OrderItem
 from app.models.rto import RTO
 from app.models.shipment import Shipment
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +27,59 @@ async def _create_shipment(db_session: AsyncSession, order_number: str) -> Shipm
     db_session.add(order)
     await db_session.flush()
     shipment = Shipment(order_id=order.id, awb=f"AWB-{order_number}", source_system="manual")
+    db_session.add(shipment)
+    await db_session.commit()
+    await db_session.refresh(shipment)
+    return shipment
+
+
+async def _create_enriched_shipment(
+    db_session: AsyncSession,
+    order_number: str,
+    *,
+    customer_name: str = "Ananya Rao",
+    customer_phone: str = "9998887776",
+    product_name: str = "Ashwagandha 60ct",
+    payment_type: str = "prepaid",
+    total_amount: str = "649.00",
+    shipment_status: str = "in_transit",
+) -> Shipment:
+    """Fuller fixture for the enriched-response/search/filter tests below
+    — a real Customer + OrderItem attached to the Order, matching what
+    `NDRRepository.search_query`'s eager-loaded relationships expect.
+    """
+    customer = Customer(full_name=customer_name, phone=customer_phone, source_system="manual")
+    db_session.add(customer)
+    await db_session.flush()
+
+    order = Order(
+        order_number=order_number,
+        order_datetime=datetime.now(UTC),
+        source_system="manual",
+        customer_id=customer.id,
+        payment_type=payment_type,
+        total_amount=Decimal(total_amount),
+    )
+    db_session.add(order)
+    await db_session.flush()
+
+    item = OrderItem(
+        order_id=order.id,
+        sku="ASH-60",
+        product_name=product_name,
+        quantity=1,
+        unit_price=Decimal(total_amount),
+        total_amount=Decimal(total_amount),
+        source_system="manual",
+    )
+    db_session.add(item)
+
+    shipment = Shipment(
+        order_id=order.id,
+        awb=f"AWB-{order_number}",
+        source_system="manual",
+        current_status=shipment_status,
+    )
     db_session.add(shipment)
     await db_session.commit()
     await db_session.refresh(shipment)
@@ -84,3 +139,343 @@ async def test_rto_read_and_update(db_session: AsyncSession, make_authenticated_
         update = await auth_client.patch(f"/api/v1/rto/{rto.id}", json={"status": "received"})
         assert update.status_code == 200
         assert update.json()["data"]["status"] == "received"
+
+
+# --- NDR: enriched response / search / filters / pagination ----------------
+
+
+async def test_ndr_list_returns_enriched_order_customer_and_product_data(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    shipment = await _create_enriched_shipment(db_session, "OMS-NDR-ENR-1")
+    ndr = NDR(
+        shipment_id=shipment.id,
+        order_id=shipment.order_id,
+        reason="Customer unavailable",
+        status=NDRStatus.OPEN,
+        attempt_number=2,
+        source_system="shiprocket",
+    )
+    db_session.add(ndr)
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["ndr.read"]
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/ndr")
+        assert response.status_code == 200
+        row = response.json()["data"][0]
+        assert row["order_number"] == "OMS-NDR-ENR-1"
+        assert row["customer_name"] == "Ananya Rao"
+        assert row["customer_phone"] == "9998887776"
+        assert row["product"] == "Ashwagandha 60ct"
+        assert row["order_amount"] == "649.00"
+        assert row["payment_type"] == "prepaid"
+        assert row["shipment_status"] == "in_transit"
+        assert row["attempt_number"] == 2
+
+
+async def test_ndr_search_matches_order_number_customer_and_product(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    match_shipment = await _create_enriched_shipment(
+        db_session, "OMS-NDR-SEARCH-1", customer_name="Priya Nair", product_name="Turmeric 30ct"
+    )
+    other_shipment = await _create_enriched_shipment(
+        db_session, "OMS-NDR-OTHER-1", customer_name="Rahul Iyer", product_name="Neem Capsules"
+    )
+    for shipment in (match_shipment, other_shipment):
+        db_session.add(
+            NDR(
+                shipment_id=shipment.id,
+                order_id=shipment.order_id,
+                status=NDRStatus.OPEN,
+                source_system="shiprocket",
+            )
+        )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["ndr.read"]
+    ) as auth_client:
+        for query in ("OMS-NDR-SEARCH-1", "Priya", "Turmeric"):
+            response = await auth_client.get("/api/v1/ndr", params={"q": query})
+            order_numbers = [row["order_number"] for row in response.json()["data"]]
+            assert order_numbers == ["OMS-NDR-SEARCH-1"], (query, order_numbers)
+
+
+async def test_ndr_filters_by_payment_type(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    cod_shipment = await _create_enriched_shipment(
+        db_session, "OMS-NDR-COD-1", payment_type="cod"
+    )
+    prepaid_shipment = await _create_enriched_shipment(
+        db_session, "OMS-NDR-PRE-1", payment_type="prepaid"
+    )
+    for shipment in (cod_shipment, prepaid_shipment):
+        db_session.add(
+            NDR(
+                shipment_id=shipment.id,
+                order_id=shipment.order_id,
+                status=NDRStatus.OPEN,
+                source_system="shiprocket",
+            )
+        )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["ndr.read"]
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/ndr", params={"payment_type": "cod"})
+        order_numbers = [row["order_number"] for row in response.json()["data"]]
+        assert order_numbers == ["OMS-NDR-COD-1"]
+
+
+async def test_ndr_filters_by_status(db_session: AsyncSession, make_authenticated_client) -> None:
+    open_shipment = await _create_enriched_shipment(db_session, "OMS-NDR-OPEN-1")
+    resolved_shipment = await _create_enriched_shipment(db_session, "OMS-NDR-RES-1")
+    db_session.add(
+        NDR(
+            shipment_id=open_shipment.id,
+            order_id=open_shipment.order_id,
+            status=NDRStatus.OPEN,
+            source_system="shiprocket",
+        )
+    )
+    db_session.add(
+        NDR(
+            shipment_id=resolved_shipment.id,
+            order_id=resolved_shipment.order_id,
+            status=NDRStatus.RESOLVED,
+            source_system="shiprocket",
+        )
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["ndr.read"]
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/ndr", params={"status": "resolved"})
+        order_numbers = [row["order_number"] for row in response.json()["data"]]
+        assert order_numbers == ["OMS-NDR-RES-1"]
+
+
+async def test_ndr_filters_by_date_range_on_created_at(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    shipment = await _create_enriched_shipment(db_session, "OMS-NDR-DATE-1")
+    ndr = NDR(
+        shipment_id=shipment.id,
+        order_id=shipment.order_id,
+        status=NDRStatus.OPEN,
+        source_system="shiprocket",
+    )
+    db_session.add(ndr)
+    await db_session.commit()
+    await db_session.refresh(ndr)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["ndr.read"]
+    ) as auth_client:
+        now = ndr.created_at
+        in_range = await auth_client.get(
+            "/api/v1/ndr",
+            params={
+                "date_from": (now - timedelta(days=1)).isoformat(),
+                "date_to": (now + timedelta(days=1)).isoformat(),
+            },
+        )
+        assert [row["id"] for row in in_range.json()["data"]] == [str(ndr.id)]
+
+        out_of_range = await auth_client.get(
+            "/api/v1/ndr",
+            params={
+                "date_from": (now + timedelta(days=1)).isoformat(),
+                "date_to": (now + timedelta(days=2)).isoformat(),
+            },
+        )
+        assert out_of_range.json()["data"] == []
+
+
+async def test_ndr_pagination_respects_filters(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    for i in range(3):
+        shipment = await _create_enriched_shipment(db_session, f"OMS-NDR-PAGE-{i}")
+        db_session.add(
+            NDR(
+                shipment_id=shipment.id,
+                order_id=shipment.order_id,
+                status=NDRStatus.OPEN,
+                source_system="shiprocket",
+            )
+        )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["ndr.read"]
+    ) as auth_client:
+        page1 = await auth_client.get("/api/v1/ndr", params={"page": 1, "page_size": 2})
+        assert page1.json()["meta"]["total_items"] == 3
+        assert len(page1.json()["data"]) == 2
+
+        page2 = await auth_client.get("/api/v1/ndr", params={"page": 2, "page_size": 2})
+        assert len(page2.json()["data"]) == 1
+
+
+# --- RTO: enriched response / search / filters ------------------------------
+
+
+async def test_rto_list_returns_enriched_order_customer_and_product_data(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    shipment = await _create_enriched_shipment(
+        db_session, "OMS-RTO-ENR-1", shipment_status="rto_initiated"
+    )
+    rto = RTO(
+        shipment_id=shipment.id,
+        order_id=shipment.order_id,
+        reason="Refused by customer",
+        status=RTOStatus.INITIATED,
+        source_system="shiprocket",
+    )
+    db_session.add(rto)
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["rto.read"]
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/rto")
+        assert response.status_code == 200
+        row = response.json()["data"][0]
+        assert row["order_number"] == "OMS-RTO-ENR-1"
+        assert row["customer_name"] == "Ananya Rao"
+        assert row["customer_phone"] == "9998887776"
+        assert row["product"] == "Ashwagandha 60ct"
+        assert row["order_amount"] == "649.00"
+        assert row["payment_type"] == "prepaid"
+        assert row["shipment_status"] == "rto_initiated"
+
+
+async def test_rto_search_matches_order_number_customer_and_product(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    match_shipment = await _create_enriched_shipment(
+        db_session, "OMS-RTO-SEARCH-1", customer_name="Priya Nair", product_name="Turmeric 30ct"
+    )
+    other_shipment = await _create_enriched_shipment(
+        db_session, "OMS-RTO-OTHER-1", customer_name="Rahul Iyer", product_name="Neem Capsules"
+    )
+    for shipment in (match_shipment, other_shipment):
+        db_session.add(
+            RTO(
+                shipment_id=shipment.id,
+                order_id=shipment.order_id,
+                status=RTOStatus.INITIATED,
+                source_system="shiprocket",
+            )
+        )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["rto.read"]
+    ) as auth_client:
+        for query in ("OMS-RTO-SEARCH-1", "Priya", "Turmeric"):
+            response = await auth_client.get("/api/v1/rto", params={"q": query})
+            order_numbers = [row["order_number"] for row in response.json()["data"]]
+            assert order_numbers == ["OMS-RTO-SEARCH-1"], (query, order_numbers)
+
+
+async def test_rto_filters_by_payment_type(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    cod_shipment = await _create_enriched_shipment(
+        db_session, "OMS-RTO-COD-1", payment_type="cod"
+    )
+    prepaid_shipment = await _create_enriched_shipment(
+        db_session, "OMS-RTO-PRE-1", payment_type="prepaid"
+    )
+    for shipment in (cod_shipment, prepaid_shipment):
+        db_session.add(
+            RTO(
+                shipment_id=shipment.id,
+                order_id=shipment.order_id,
+                status=RTOStatus.INITIATED,
+                source_system="shiprocket",
+            )
+        )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["rto.read"]
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/rto", params={"payment_type": "cod"})
+        order_numbers = [row["order_number"] for row in response.json()["data"]]
+        assert order_numbers == ["OMS-RTO-COD-1"]
+
+
+async def test_rto_filters_by_status(db_session: AsyncSession, make_authenticated_client) -> None:
+    initiated_shipment = await _create_enriched_shipment(db_session, "OMS-RTO-INIT-1")
+    received_shipment = await _create_enriched_shipment(db_session, "OMS-RTO-RECV-1")
+    db_session.add(
+        RTO(
+            shipment_id=initiated_shipment.id,
+            order_id=initiated_shipment.order_id,
+            status=RTOStatus.INITIATED,
+            source_system="shiprocket",
+        )
+    )
+    db_session.add(
+        RTO(
+            shipment_id=received_shipment.id,
+            order_id=received_shipment.order_id,
+            status=RTOStatus.RECEIVED,
+            source_system="shiprocket",
+        )
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["rto.read"]
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/rto", params={"status": "received"})
+        order_numbers = [row["order_number"] for row in response.json()["data"]]
+        assert order_numbers == ["OMS-RTO-RECV-1"]
+
+
+async def test_rto_filters_by_date_range_on_created_at(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    shipment = await _create_enriched_shipment(db_session, "OMS-RTO-DATE-1")
+    rto = RTO(
+        shipment_id=shipment.id,
+        order_id=shipment.order_id,
+        status=RTOStatus.INITIATED,
+        source_system="shiprocket",
+    )
+    db_session.add(rto)
+    await db_session.commit()
+    await db_session.refresh(rto)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["rto.read"]
+    ) as auth_client:
+        now = rto.created_at
+        in_range = await auth_client.get(
+            "/api/v1/rto",
+            params={
+                "date_from": (now - timedelta(days=1)).isoformat(),
+                "date_to": (now + timedelta(days=1)).isoformat(),
+            },
+        )
+        assert [row["id"] for row in in_range.json()["data"]] == [str(rto.id)]
+
+        out_of_range = await auth_client.get(
+            "/api/v1/rto",
+            params={
+                "date_from": (now + timedelta(days=1)).isoformat(),
+                "date_to": (now + timedelta(days=2)).isoformat(),
+            },
+        )
+        assert out_of_range.json()["data"] == []

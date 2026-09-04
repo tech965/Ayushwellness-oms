@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
-import type { Return, ReturnStatus } from "@/types/return"
+import type { Return, ReturnListFilters, ReturnStatus } from "@/types/return"
 
 async function fetchReturnsForOrder(orderId: string): Promise<Return[]> {
   const response = await apiClient.get<PaginatedResponse<Return>>("/returns", {
@@ -16,6 +16,40 @@ export function useReturnsForOrder(orderId: string) {
     queryKey: ["returns", "order", orderId],
     queryFn: () => fetchReturnsForOrder(orderId),
     enabled: Boolean(orderId),
+  })
+}
+
+interface ListParams extends ReturnListFilters {
+  page: number
+  pageSize: number
+}
+
+async function fetchReturns(params: ListParams): Promise<PaginatedResponse<Return>> {
+  const response = await apiClient.get<PaginatedResponse<Return>>("/returns", {
+    params: {
+      page: params.page,
+      page_size: params.pageSize,
+      q: params.q || undefined,
+      status: params.status,
+      payment_type: params.payment_type,
+      customer_id: params.customer_id,
+      order_id: params.order_id,
+      date_from: params.date_from,
+      date_to: params.date_to,
+    },
+  })
+  return response.data
+}
+
+/** Operational Returns list (the `/returns` page) — separate from
+ * `useReturnsForOrder` above, which stays as the order-detail page's own
+ * narrow "returns for this one order" query and is untouched by this.
+ */
+export function useReturns(params: ListParams) {
+  return useQuery({
+    queryKey: ["returns", "list", params],
+    queryFn: () => fetchReturns(params),
+    placeholderData: (previous) => previous,
   })
 }
 
