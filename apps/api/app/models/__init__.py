@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from app.models.audit_log import AuditLog
 from app.models.auth import RefreshToken, User
+from app.models.chat import ChatQueryLog
 from app.models.courier import Courier
 from app.models.customer import Customer, CustomerAddress
 from app.models.integration import Integration, SyncError, SyncJob, WebhookEvent
@@ -27,6 +28,7 @@ from app.models.telecalling import CallAttempt, OrderAssignment
 
 __all__ = [
     "AuditLog",
+    "ChatQueryLog",
     "RefreshToken",
     "User",
     "Courier",

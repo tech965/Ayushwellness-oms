@@ -67,6 +67,29 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = True
 
+    # --- OMS AI Assistant / chatbot (optional — the `/api/v1/chat`
+    # endpoint reports "not configured" and returns a friendly message
+    # when GROQ_API_KEY is absent; the API never fails to start without
+    # it). Groq exposes an OpenAI-compatible Chat Completions API with
+    # tool calling — the assistant talks to it server-side only and never
+    # exposes the key to the browser. Every number in an answer comes
+    # from a controlled tool that reads the OMS database (which already
+    # mirrors Shopify + Shiprocket); the model never queries data
+    # directly. ---
+    CHAT_ENABLED: bool = True
+    GROQ_API_KEY: str | None = None
+    GROQ_API_BASE: str = "https://api.groq.com/openai/v1"
+    # A Groq-hosted model that supports tool/function calling. Override
+    # via env without a code change if Groq deprecates/renames it.
+    CHAT_LLM_MODEL: str = "openai/gpt-oss-120b"
+    # Hard ceiling on LLM<->tool round trips for one question, so a
+    # confused model can never loop forever (and run up cost/latency).
+    CHAT_MAX_TOOL_ITERATIONS: int = 6
+    CHAT_LLM_TIMEOUT_SECONDS: float = 45.0
+    # How many prior turns (user+assistant messages) the frontend may
+    # replay into a follow-up request — capped server-side regardless.
+    CHAT_HISTORY_MAX_MESSAGES: int = 20
+
     # --- Shopify (optional — connected starting Phase 2.2 when credentials
     # are present; the API never fails to start without them) ---
     SHOPIFY_API_KEY: str | None = None

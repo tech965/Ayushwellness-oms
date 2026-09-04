@@ -1,0 +1,5 @@
+# Vercel's Python builder installs from requirements.txt (it doesn't
+# read pyproject.toml/requirements-lock.txt directly) — this just
+# points it at the same lockfile Render and docker/api.Dockerfile use,
+# so there is one source of truth for pinned versions.
+-r requirements-lock.txt

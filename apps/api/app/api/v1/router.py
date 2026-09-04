@@ -18,6 +18,7 @@ from app.api.v1.endpoints import (
     auth,
     automation,
     cashfree_payments,
+    chat,
     couriers,
     customers,
     dashboard,
@@ -71,6 +72,7 @@ api_router.include_router(returns.router, prefix="/returns", tags=["returns"])
 api_router.include_router(refunds.router, prefix="/refunds", tags=["refunds"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
+api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(sync.router, prefix="/sync", tags=["sync"])
 api_router.include_router(sync_jobs.router, prefix="/sync-jobs", tags=["sync-jobs"])
