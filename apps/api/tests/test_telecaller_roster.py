@@ -187,6 +187,57 @@ async def test_role_based_admin_sees_a_telecaller_with_no_team_leader_in_the_ros
         assert {row["id"] for row in rows} == {str(telecaller.id)}
 
 
+async def test_role_based_admin_can_bulk_assign_to_a_telecaller_with_no_team_leader(
+    db_session: AsyncSession,
+) -> None:
+    """Regression for the follow-on bug: even after the roster correctly
+    listed a `team_leader_id=None` TELECALLER for a role-based Admin
+    (`is_superuser=False`), actually assigning to them via `POST
+    /team/orders/assign` still 403'd with "That telecaller is not on your
+    team." -- `TelecallingService.assert_telecaller_in_team_scope`
+    (called by `assign_orders`) checked `telecaller.team_leader_id !=
+    actor.id` for anyone who wasn't a superuser, so an Admin's own id
+    never matched a telecaller reporting to no one. This OMS has exactly
+    one team/admin, so every telecaller can legitimately have
+    `team_leader_id=None` -- an Admin must still be able to assign to
+    them.
+    """
+    from tests.telecalling_test_utils import make_customer, make_order
+
+    admin_role = await make_role(db_session, name="ADMIN", permission_codes=["telecalling.manage"])
+    telecaller_role = await make_role(
+        db_session, name="TELECALLER", permission_codes=["calls.manage"]
+    )
+    admin = await make_user(
+        db_session,
+        email="role-based-admin-assign@example.com",
+        role=admin_role,
+        is_superuser=False,
+        team_leader_id=None,
+    )
+    telecaller = await make_user(
+        db_session,
+        email="no-team-leader-tc-assign@example.com",
+        name="Sourabh",
+        role=telecaller_role,
+        team_leader_id=None,
+    )
+    customer = await make_customer(db_session)
+    order = await make_order(db_session, order_number="ADMIN-ASSIGN-1", customer=customer)
+
+    async with bearer_client(app, get_db, db_session, admin.id) as client:
+        assign = await client.post(
+            "/api/v1/team/orders/assign",
+            json={
+                "order_ids": [str(order.id)],
+                "mode": "manual",
+                "telecaller_id": str(telecaller.id),
+            },
+        )
+        assert assign.status_code == 201, assign.json()
+        assert assign.json()["data"][0]["assigned_to"] == str(telecaller.id)
+
+
 async def test_roster_excludes_non_telecaller_users(db_session: AsyncSession) -> None:
     team_leader_role = await make_role(
         db_session, name="TEAM_LEADER", permission_codes=["telecalling.manage"]

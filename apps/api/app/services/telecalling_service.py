@@ -403,7 +403,15 @@ class TelecallingService:
         telecaller = await self.users.get_with_permissions(telecaller_id)
         if telecaller is None or "TELECALLER" not in telecaller.role_names:
             raise NotFoundError("Telecaller not found.")
-        if not actor.is_superuser and telecaller.team_leader_id != actor.id:
+        # An ADMIN (role-based, same as `resolve_team_scope`) has global
+        # assignment scope, same as a superuser -- a real production Admin
+        # account (`is_superuser=False`) was blocked from assigning to an
+        # active TELECALLER whose `team_leader_id` didn't happen to equal
+        # the Admin's own id (e.g. `None`, this OMS's only team/telecaller
+        # having no team leader set), even though the roster already
+        # correctly listed that telecaller as assignable.
+        is_global_scope = actor.is_superuser or "ADMIN" in actor.role_names
+        if not is_global_scope and telecaller.team_leader_id != actor.id:
             raise AuthorizationError("That telecaller is not on your team.")
         return telecaller
 
