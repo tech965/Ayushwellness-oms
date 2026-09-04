@@ -62,7 +62,11 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
                 ),
             )
             .where(Order.fulfillment_status == FulfillmentStatus.UNFULFILLED)
-            .options(selectinload(Order.customer), selectinload(Order.items))
+            .options(
+                selectinload(Order.customer),
+                selectinload(Order.items),
+                selectinload(active_assignment.telecaller),
+            )
         )
         if team_leader_id is not None:
             # Admin (team_leader_id=None) sees the whole pool; a Team
@@ -122,7 +126,11 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
                 ),
             )
             .where(Order.payment_type.in_([PaymentType.COD, PaymentType.PREPAID]))
-            .options(selectinload(Order.customer), selectinload(Order.items))
+            .options(
+                selectinload(Order.customer),
+                selectinload(Order.items),
+                selectinload(active_assignment.telecaller),
+            )
         )
         if category == LeadCategory.COD_UNFULFILLED:
             stmt = stmt.where(
@@ -249,6 +257,7 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
                 selectinload(OrderAssignment.order).selectinload(Order.customer),
                 selectinload(OrderAssignment.order).selectinload(Order.items),
                 selectinload(OrderAssignment.order).selectinload(Order.shipments),
+                selectinload(OrderAssignment.telecaller),
             )
         )
 
@@ -425,7 +434,10 @@ class CheckoutAssignmentRepository(BaseRepository[CheckoutAssignment]):
             select(CheckoutAssignment)
             .join(AbandonedCheckout, AbandonedCheckout.id == CheckoutAssignment.checkout_id)
             .where(CheckoutAssignment.assignment_status == AssignmentStatus.ACTIVE)
-            .options(selectinload(CheckoutAssignment.checkout).selectinload(AbandonedCheckout.customer))
+            .options(
+                selectinload(CheckoutAssignment.checkout).selectinload(AbandonedCheckout.customer),
+                selectinload(CheckoutAssignment.telecaller),
+            )
         )
 
     def search_query(
@@ -504,7 +516,9 @@ class CheckoutAssignmentRepository(BaseRepository[CheckoutAssignment]):
                     AbandonedCheckout.customer_email.is_not(None),
                 ),
             )
-            .options(selectinload(AbandonedCheckout.customer))
+            .options(
+                selectinload(AbandonedCheckout.customer), selectinload(active_assignment.telecaller)
+            )
         )
         if team_leader_id is not None:
             stmt = stmt.where(

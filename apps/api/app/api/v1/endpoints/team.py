@@ -171,7 +171,9 @@ async def list_unfulfilled_team_orders(
             date_from=date_from,
             date_to=date_to,
         )
-        data = [to_assigned_order_response(a.order, a) for a in items]
+        data = [
+            to_assigned_order_response(a.order, a, telecaller_name=a.telecaller.name) for a in items
+        ]
     else:
         # The default browsing surface: every unfulfilled order that's
         # either unassigned (available to grab) or already on the
@@ -183,7 +185,14 @@ async def list_unfulfilled_team_orders(
             date_from=date_from,
             date_to=date_to,
         )
-        data = [to_assigned_order_response(order, assignment) for order, assignment in pairs]
+        data = [
+            to_assigned_order_response(
+                order,
+                assignment,
+                telecaller_name=assignment.telecaller.name if assignment else None,
+            )
+            for order, assignment in pairs
+        ]
 
     return PaginatedResponse(
         data=data, meta=build_pagination_meta(total_items=total, page_params=page_params)
@@ -215,7 +224,14 @@ async def list_lead_pool(
         date_to=date_to,
     )
     return PaginatedResponse(
-        data=[to_assigned_order_response(order, assignment) for order, assignment in pairs],
+        data=[
+            to_assigned_order_response(
+                order,
+                assignment,
+                telecaller_name=assignment.telecaller.name if assignment else None,
+            )
+            for order, assignment in pairs
+        ],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
 
@@ -230,7 +246,11 @@ async def get_team_order(
     assignment = await service.get_scoped_assignment(
         order_id, scope=resolve_team_scope(current_user)
     )
-    return ApiResponse(data=to_assigned_order_response(assignment.order, assignment))
+    return ApiResponse(
+        data=to_assigned_order_response(
+            assignment.order, assignment, telecaller_name=assignment.telecaller.name
+        )
+    )
 
 
 @router.get("/orders/{order_id}/calls", response_model=ApiResponse[list[CallAttemptResponse]])
@@ -310,7 +330,12 @@ async def list_team_checkouts(
     )
     return PaginatedResponse(
         data=[
-            to_assigned_checkout_response(checkout, assignment) for checkout, assignment in pairs
+            to_assigned_checkout_response(
+                checkout,
+                assignment,
+                telecaller_name=assignment.telecaller.name if assignment else None,
+            )
+            for checkout, assignment in pairs
         ],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
@@ -326,7 +351,11 @@ async def get_team_checkout(
     assignment = await service.get_scoped_checkout_assignment(
         checkout_id, scope=resolve_team_scope(current_user)
     )
-    return ApiResponse(data=to_assigned_checkout_response(assignment.checkout, assignment))
+    return ApiResponse(
+        data=to_assigned_checkout_response(
+            assignment.checkout, assignment, telecaller_name=assignment.telecaller.name
+        )
+    )
 
 
 @router.get(
@@ -436,7 +465,9 @@ async def get_telecaller_orders(
         call_status=call_status,
     )
     return PaginatedResponse(
-        data=[to_assigned_order_response(a.order, a) for a in items],
+        data=[
+            to_assigned_order_response(a.order, a, telecaller_name=a.telecaller.name) for a in items
+        ],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
 
@@ -462,7 +493,10 @@ async def get_telecaller_checkouts(
         call_status=call_status,
     )
     return PaginatedResponse(
-        data=[to_assigned_checkout_response(a.checkout, a) for a in items],
+        data=[
+            to_assigned_checkout_response(a.checkout, a, telecaller_name=a.telecaller.name)
+            for a in items
+        ],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
 

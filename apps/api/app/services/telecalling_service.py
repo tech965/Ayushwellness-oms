@@ -685,13 +685,21 @@ class TelecallingService:
             notes=notes,
             next_follow_up_at=next_follow_up_at,
         )
-        await self.assignments.update(
-            assignment,
-            current_status=outcome,
-            attempt_count=assignment.attempt_count + 1,
-            last_attempt_at=now,
-            next_follow_up_at=next_follow_up_at,
-        )
+        assignment_updates: dict[str, object] = {
+            "current_status": outcome,
+            "attempt_count": assignment.attempt_count + 1,
+            "last_attempt_at": now,
+        }
+        # `next_follow_up_at=None` means "this call didn't set one" (e.g.
+        # every quick-log button — Mark Confirmed/Not Interested/Cancelled
+        # — sends only `outcome`), not "clear whatever follow-up is
+        # already scheduled". Only overwrite it when this call actually
+        # provided a new value -- otherwise a follow-up date set on an
+        # earlier call was silently wiped by any later call that didn't
+        # re-specify one (confirmed: this was happening every time).
+        if next_follow_up_at is not None:
+            assignment_updates["next_follow_up_at"] = next_follow_up_at
+        await self.assignments.update(assignment, **assignment_updates)
         await self.audit.record(
             user=actor,
             action="call.logged",
@@ -755,13 +763,16 @@ class TelecallingService:
             notes=notes,
             next_follow_up_at=next_follow_up_at,
         )
-        await self.checkout_assignments.update(
-            assignment,
-            current_status=outcome,
-            attempt_count=assignment.attempt_count + 1,
-            last_attempt_at=now,
-            next_follow_up_at=next_follow_up_at,
-        )
+        assignment_updates: dict[str, object] = {
+            "current_status": outcome,
+            "attempt_count": assignment.attempt_count + 1,
+            "last_attempt_at": now,
+        }
+        # See `log_call`'s identical comment: `None` means "this call
+        # didn't set one", not "clear the existing follow-up".
+        if next_follow_up_at is not None:
+            assignment_updates["next_follow_up_at"] = next_follow_up_at
+        await self.checkout_assignments.update(assignment, **assignment_updates)
         await self.audit.record(
             user=actor,
             action="checkout_call.logged",

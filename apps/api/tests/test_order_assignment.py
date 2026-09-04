@@ -189,3 +189,57 @@ async def test_reassign_without_existing_assignment_is_rejected(db_session: Asyn
             },
         )
         assert response.status_code == 404
+
+
+async def test_admin_list_shows_the_assigned_telecallers_name_not_unassigned(
+    db_session: AsyncSession,
+) -> None:
+    """Regression: `to_assigned_order_response` accepts a `telecaller_name`
+    kwarg, but every `/team/*` list endpoint previously omitted it, so
+    `assigned_to_name` was always `None` and the Admin/Team Leader list
+    always rendered "Unassigned" even for a real, active assignment. Covers
+    both `/team/orders/unfulfilled` (the default pool view, backed by
+    `list_unfulfilled_pool`) and `/team/leads` (backed by
+    `list_category_pool`) -- the two list endpoints with their own
+    separate aliased-`OrderAssignment` query.
+    """
+    team_leader_role = await make_role(
+        db_session, name="TEAM_LEADER", permission_codes=["telecalling.manage"]
+    )
+    telecaller_role = await make_role(
+        db_session, name="TELECALLER", permission_codes=["calls.manage"]
+    )
+    leader = await make_user(
+        db_session, email="admin-list-leader@example.com", role=team_leader_role
+    )
+    komal = await make_user(
+        db_session,
+        email="komal@example.com",
+        name="Komal",
+        role=telecaller_role,
+        team_leader_id=leader.id,
+    )
+    customer = await make_customer(db_session)
+    order = await make_order(db_session, order_number="ORD-KOMAL-1", customer=customer)
+
+    async with bearer_client(app, get_db, db_session, leader.id) as client:
+        assign = await client.post(
+            "/api/v1/team/orders/assign",
+            json={"order_ids": [str(order.id)], "mode": "manual", "telecaller_id": str(komal.id)},
+        )
+        assert assign.status_code == 201
+
+        unfulfilled = await client.get("/api/v1/team/orders/unfulfilled")
+        assert unfulfilled.status_code == 200
+        row = next(r for r in unfulfilled.json()["data"] if r["order_id"] == str(order.id))
+        assert row["assigned_to"] == str(komal.id)
+        assert row["assigned_to_name"] == "Komal"
+
+        leads = await client.get("/api/v1/team/leads")
+        assert leads.status_code == 200
+        lead_row = next(r for r in leads.json()["data"] if r["order_id"] == str(order.id))
+        assert lead_row["assigned_to_name"] == "Komal"
+
+        detail = await client.get(f"/api/v1/team/orders/{order.id}")
+        assert detail.status_code == 200
+        assert detail.json()["data"]["assigned_to_name"] == "Komal"

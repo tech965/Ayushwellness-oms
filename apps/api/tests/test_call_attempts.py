@@ -101,6 +101,70 @@ async def test_sequential_attempts_and_history(db_session: AsyncSession) -> None
         assert {entry["order_number"] for entry in my_calls_data} == {order.order_number}
 
 
+async def test_call_log_data_survives_reload_and_a_later_call_without_a_follow_up(
+    db_session: AsyncSession,
+) -> None:
+    """Regression: `TelecallingService.log_call` unconditionally set
+    `OrderAssignment.next_follow_up_at` to whatever it was passed --
+    including `None`, which every "quick log" action (Mark Confirmed/Not
+    Interested/Cancelled) sends since it only specifies `outcome`. A
+    telecaller who scheduled a follow-up on one call, then logged any
+    later call without re-specifying it, had that follow-up silently
+    wiped -- exactly the "entered information disappears" symptom. Also
+    proves outcome/notes/attempt data round-trips correctly on a fresh
+    GET (simulating navigating away and back / a page refresh), not just
+    immediately after the POST.
+    """
+    telecaller, order = await _setup_assigned_order(db_session)
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as client:
+        # Komal logs a call and schedules a follow-up.
+        first = await client.post(
+            f"/api/v1/telecaller/orders/{order.id}/calls",
+            json={
+                "outcome": "call_back_requested",
+                "notes": "Asked to call back tomorrow morning.",
+                "next_follow_up_at": "2099-01-01T10:00:00Z",
+            },
+        )
+        assert first.status_code == 201
+
+        # A fresh, independent read (simulating navigating away and back,
+        # or a page refresh) must show exactly what was just saved.
+        reload_after_first = await client.get(f"/api/v1/telecaller/orders/{order.id}")
+        detail = reload_after_first.json()["data"]
+        assert detail["call_status"] == "call_back_requested"
+        assert detail["attempt_count"] == 1
+        assert detail["next_follow_up_at"] == "2099-01-01T10:00:00Z"
+
+        history_after_first = await client.get(f"/api/v1/telecaller/orders/{order.id}/calls")
+        assert history_after_first.json()["data"][0]["notes"] == (
+            "Asked to call back tomorrow morning."
+        )
+
+        # Later, Komal uses a "quick log" action -- outcome only, no
+        # follow-up re-specified (matching the frontend's quickLog()).
+        second = await client.post(
+            f"/api/v1/telecaller/orders/{order.id}/calls",
+            json={"outcome": "confirmed"},
+        )
+        assert second.status_code == 201
+
+        # The previously-scheduled follow-up must still be there.
+        reload_after_second = await client.get(f"/api/v1/telecaller/orders/{order.id}")
+        detail_after_second = reload_after_second.json()["data"]
+        assert detail_after_second["call_status"] == "confirmed"
+        assert detail_after_second["attempt_count"] == 2
+        assert detail_after_second["next_follow_up_at"] == "2099-01-01T10:00:00Z"
+
+        # And the first call's notes are still there too -- append-only.
+        history_after_second = await client.get(f"/api/v1/telecaller/orders/{order.id}/calls")
+        notes_by_attempt = {
+            row["attempt_number"]: row["notes"] for row in history_after_second.json()["data"]
+        }
+        assert notes_by_attempt[1] == "Asked to call back tomorrow morning."
+
+
 async def test_not_called_is_rejected_as_a_loggable_outcome(db_session: AsyncSession) -> None:
     telecaller, order = await _setup_assigned_order(db_session)
     async with bearer_client(app, get_db, db_session, telecaller.id) as client:
