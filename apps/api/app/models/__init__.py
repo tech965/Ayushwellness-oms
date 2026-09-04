@@ -12,9 +12,11 @@ from app.models.abandoned_checkout import AbandonedCheckout
 from app.models.audit_log import AuditLog
 from app.models.auth import RefreshToken, User
 from app.models.cashfree_settlement import CashfreeSettlement
+from app.models.chat import ChatQueryLog
 from app.models.courier import Courier
 from app.models.customer import Customer, CustomerAddress
 from app.models.integration import Integration, SyncError, SyncJob, WebhookEvent
+from app.models.inventory import InventoryMovement
 from app.models.ndr import NDR
 from app.models.order import Order, OrderEvent, OrderItem
 from app.models.payment import Payment, PaymentTransaction
@@ -36,6 +38,7 @@ from app.models.telecalling import (
 __all__ = [
     "AbandonedCheckout",
     "AuditLog",
+    "ChatQueryLog",
     "RefreshToken",
     "User",
     "CashfreeSettlement",
@@ -46,6 +49,7 @@ __all__ = [
     "SyncError",
     "SyncJob",
     "WebhookEvent",
+    "InventoryMovement",
     "NDR",
     "Order",
     "OrderEvent",

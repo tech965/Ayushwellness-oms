@@ -74,12 +74,22 @@ class ProductService:
                 source_system=source_system,
                 external_id=variant_external_id,
             )
-            await self.variants.upsert_by_external_id(
+            db_variant, variant_created = await self.variants.upsert_by_external_id(
                 source_system=source_system,
                 external_id=variant_external_id,
                 product_id=product.id,
                 **variant,
             )
+            if variant_created:
+                # `available_quantity` is the OMS-authoritative stock count
+                # (app.services.inventory_service.InventoryService) --
+                # seeded from Shopify's count once, at first sync, and
+                # never again, so a later resync can't stomp on local
+                # dispatch/RTO adjustments. `inventory_quantity` above
+                # keeps mirroring Shopify on every sync as before.
+                await self.variants.update(
+                    db_variant, available_quantity=db_variant.inventory_quantity
+                )
 
         await self.session.commit()
         return product, created

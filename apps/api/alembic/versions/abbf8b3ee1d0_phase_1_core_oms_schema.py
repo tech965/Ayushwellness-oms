@@ -10,9 +10,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import app.db.base
-import sqlalchemy as sa
+import sqlalchemy as sa  # pyright: ignore[reportMissingImports]
 from alembic import op
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import postgresql  # pyright: ignore[reportMissingImports]
 
 # revision identifiers, used by Alembic.
 revision: str = "abbf8b3ee1d0"

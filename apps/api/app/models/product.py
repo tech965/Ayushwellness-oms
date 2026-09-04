@@ -62,6 +62,15 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
     inventory_quantity: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # OMS-authoritative stock count -- unlike `inventory_quantity` above
+    # (a passive Shopify mirror, overwritten on every product sync), this
+    # is seeded from Shopify once at first sync and afterwards only ever
+    # moved by `InventoryService` (dispatch decrement, RTO restock, manual
+    # adjustment) via `InventoryMovement`. Never rewritten by a resync --
+    # see `ProductService.upsert_synced_product`.
+    available_quantity: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     weight: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
     options: Mapped[dict | None] = mapped_column(JSONType, nullable=True)

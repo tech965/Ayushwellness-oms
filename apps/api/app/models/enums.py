@@ -125,6 +125,17 @@ class ProductStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class InventoryMovementType(StrEnum):
+    """What changed `ProductVariant.available_quantity` and why — see
+    `app.services.inventory_service.InventoryService`.
+    """
+
+    DISPATCH = "dispatch"
+    RTO_RESTOCK = "rto_restock"
+    MANUAL_ADJUSTMENT = "manual_adjustment"
+    INITIAL_STOCK = "initial_stock"
+
+
 class IntegrationType(StrEnum):
     ECOMMERCE = "ecommerce"
     COURIER = "courier"
