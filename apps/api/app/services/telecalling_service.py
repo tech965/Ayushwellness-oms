@@ -48,9 +48,21 @@ class ScopeFilter:
 
 def resolve_team_scope(actor: User) -> ScopeFilter:
     """Scope for `/team/*` endpoints — a Team Leader sees only their own
-    team; an admin (is_superuser) sees everything.
+    team; an admin (is_superuser, or holding the ADMIN role) sees
+    everything.
+
+    `is_superuser` alone isn't sufficient: a real production Admin account
+    was found with `is_superuser=False` (role-based ADMIN only), which
+    fell through to the Team-Leader branch below — `team_leader_id`
+    became that Admin's own id, so `/team/telecallers/roster` filtered to
+    `User.team_leader_id == <admin id>` and excluded every telecaller
+    reporting to no one/a different leader (confirmed: an active
+    TELECALLER with `team_leader_id=None` was silently excluded from an
+    Admin's own roster view). `actor.role_names` is already eager-loaded
+    by `UserRepository.get_with_permissions` (`user_roles.role...`), so
+    this doesn't add a new lazy-load risk.
     """
-    if actor.is_superuser:
+    if actor.is_superuser or "ADMIN" in actor.role_names:
         return ScopeFilter(assigned_to=None, team_leader_id=None)
     return ScopeFilter(assigned_to=None, team_leader_id=actor.id)
 
