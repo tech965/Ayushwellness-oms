@@ -75,6 +75,7 @@ class NDRRepository(BaseRepository[NDR]):
             selectinload(NDR.order).selectinload(Order.customer),
             selectinload(NDR.order).selectinload(Order.items),
             selectinload(NDR.shipment),
+            selectinload(NDR.courier),
         )
         return stmt
 

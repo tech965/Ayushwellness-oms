@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from app.models.courier import Courier
 from app.models.customer import Customer
 from app.models.enums import NDRStatus, RTOStatus
 from app.models.ndr import NDR
@@ -43,10 +44,16 @@ async def _create_enriched_shipment(
     payment_type: str = "prepaid",
     total_amount: str = "649.00",
     shipment_status: str = "in_transit",
+    courier_name: str | None = None,
 ) -> Shipment:
     """Fuller fixture for the enriched-response/search/filter tests below
     — a real Customer + OrderItem attached to the Order, matching what
     `NDRRepository.search_query`'s eager-loaded relationships expect.
+    `courier_name`, when given, also attaches a real `Courier` row to the
+    shipment (mirroring how a synced shipment's `courier_id` is set) so
+    NDR/RTO's own `courier_id` (copied from `shipment.courier_id` at
+    creation — see `NDRService.upsert_synced_ndr`) has something real to
+    resolve to `courier_name` in the list response.
     """
     customer = Customer(full_name=customer_name, phone=customer_phone, source_system="manual")
     db_session.add(customer)
@@ -74,11 +81,23 @@ async def _create_enriched_shipment(
     )
     db_session.add(item)
 
+    courier_id = None
+    if courier_name is not None:
+        courier = Courier(
+            name=courier_name,
+            code=f"{courier_name.upper().replace(' ', '-')}-{order_number}",
+            source_system="manual",
+        )
+        db_session.add(courier)
+        await db_session.flush()
+        courier_id = courier.id
+
     shipment = Shipment(
         order_id=order.id,
         awb=f"AWB-{order_number}",
         source_system="manual",
         current_status=shipment_status,
+        courier_id=courier_id,
     )
     db_session.add(shipment)
     await db_session.commit()
@@ -147,10 +166,13 @@ async def test_rto_read_and_update(db_session: AsyncSession, make_authenticated_
 async def test_ndr_list_returns_enriched_order_customer_and_product_data(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
-    shipment = await _create_enriched_shipment(db_session, "OMS-NDR-ENR-1")
+    shipment = await _create_enriched_shipment(
+        db_session, "OMS-NDR-ENR-1", courier_name="Delhivery"
+    )
     ndr = NDR(
         shipment_id=shipment.id,
         order_id=shipment.order_id,
+        courier_id=shipment.courier_id,
         reason="Customer unavailable",
         status=NDRStatus.OPEN,
         attempt_number=2,
@@ -173,6 +195,35 @@ async def test_ndr_list_returns_enriched_order_customer_and_product_data(
         assert row["payment_type"] == "prepaid"
         assert row["shipment_status"] == "in_transit"
         assert row["attempt_number"] == 2
+        assert row["awb"] == "AWB-OMS-NDR-ENR-1"
+        assert row["courier_name"] == "Delhivery"
+
+
+async def test_ndr_list_handles_missing_courier_without_error(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """An NDR whose shipment has no assigned courier yet (e.g. synced
+    before AWB assignment) must still serialize cleanly — `awb`/
+    `courier_name` are `None`, never a fabricated value or a 500.
+    """
+    shipment = await _create_enriched_shipment(db_session, "OMS-NDR-NOCOURIER-1")
+    ndr = NDR(
+        shipment_id=shipment.id,
+        order_id=shipment.order_id,
+        status=NDRStatus.OPEN,
+        source_system="shiprocket",
+    )
+    db_session.add(ndr)
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["ndr.read"]
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/ndr")
+        assert response.status_code == 200
+        row = response.json()["data"][0]
+        assert row["awb"] == "AWB-OMS-NDR-NOCOURIER-1"
+        assert row["courier_name"] is None
 
 
 async def test_ndr_search_matches_order_number_customer_and_product(
@@ -331,11 +382,12 @@ async def test_rto_list_returns_enriched_order_customer_and_product_data(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
     shipment = await _create_enriched_shipment(
-        db_session, "OMS-RTO-ENR-1", shipment_status="rto_initiated"
+        db_session, "OMS-RTO-ENR-1", shipment_status="rto_initiated", courier_name="Xpressbees"
     )
     rto = RTO(
         shipment_id=shipment.id,
         order_id=shipment.order_id,
+        courier_id=shipment.courier_id,
         reason="Refused by customer",
         status=RTOStatus.INITIATED,
         source_system="shiprocket",
@@ -356,6 +408,37 @@ async def test_rto_list_returns_enriched_order_customer_and_product_data(
         assert row["order_amount"] == "649.00"
         assert row["payment_type"] == "prepaid"
         assert row["shipment_status"] == "rto_initiated"
+        assert row["awb"] == "AWB-OMS-RTO-ENR-1"
+        assert row["courier_name"] == "Xpressbees"
+
+
+async def test_rto_list_handles_null_reason_without_fabricating(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """RTO rows derived from a tracking event (see `sync.py`'s
+    `apply_tracking_event`) can legitimately have no reason — the API
+    must return `null`, never invent placeholder text.
+    """
+    shipment = await _create_enriched_shipment(db_session, "OMS-RTO-NOREASON-1")
+    rto = RTO(
+        shipment_id=shipment.id,
+        order_id=shipment.order_id,
+        status=RTOStatus.INITIATED,
+        source_system="shiprocket",
+    )
+    db_session.add(rto)
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["rto.read"]
+    ) as auth_client:
+        response = await auth_client.get("/api/v1/rto")
+        assert response.status_code == 200
+        row = response.json()["data"][0]
+        assert row["reason"] is None
+        assert row["external_reason"] is None
+        assert row["awb"] == "AWB-OMS-RTO-NOREASON-1"
+        assert row["courier_name"] is None
 
 
 async def test_rto_search_matches_order_number_customer_and_product(

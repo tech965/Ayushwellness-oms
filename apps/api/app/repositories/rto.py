@@ -66,6 +66,7 @@ class RTORepository(BaseRepository[RTO]):
             selectinload(RTO.order).selectinload(Order.customer),
             selectinload(RTO.order).selectinload(Order.items),
             selectinload(RTO.shipment),
+            selectinload(RTO.courier),
         )
         return stmt
 

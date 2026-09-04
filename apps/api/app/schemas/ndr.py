@@ -54,3 +54,5 @@ class NDRListResponse(NDRResponse):
     order_amount: Decimal | None = None
     payment_type: str | None = None
     shipment_status: str | None = None
+    awb: str | None = None
+    courier_name: str | None = None

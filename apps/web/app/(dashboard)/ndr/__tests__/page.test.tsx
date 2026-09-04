@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { screen } from "@testing-library/react"
+import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -74,6 +74,8 @@ const NDR_ROW: NDR = {
   order_amount: "649.00",
   payment_type: "prepaid",
   shipment_status: "in_transit",
+  awb: "AWB1234567",
+  courier_name: "Delhivery",
 }
 
 function listData(rows: NDR[]) {
@@ -105,6 +107,79 @@ describe("NdrPage", () => {
     expect(screen.getByText("9998887776")).toBeInTheDocument()
     expect(screen.getByText("Ashwagandha 60ct")).toBeInTheDocument()
     expect(screen.getByText("Customer unavailable")).toBeInTheDocument()
+    expect(screen.getByText("AWB1234567")).toBeInTheDocument()
+    expect(screen.getByText("Delhivery")).toBeInTheDocument()
+  })
+
+  it("shows a dash for AWB/Courier when the shipment has no courier assigned yet, never a fabricated value", () => {
+    setAuth(true)
+    mockedUseNdrs.mockReturnValue(
+      queryResult({ data: listData([{ ...NDR_ROW, awb: null, courier_name: null }]) })
+    )
+    mockedUseUpdateNdr.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateNdr>)
+    mockedUseNdrReattempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useNdrReattempt>)
+
+    renderWithProviders(<NdrPage />)
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0)
+  })
+
+  it("updates NDR status via the status select without a full page reload", async () => {
+    setAuth(true)
+    mockedUseNdrs.mockReturnValue(queryResult({ data: listData([NDR_ROW]) }))
+    const mutate = vi.fn()
+    mockedUseUpdateNdr.mockReturnValue({
+      mutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateNdr>)
+    mockedUseNdrReattempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useNdrReattempt>)
+
+    renderWithProviders(<NdrPage />)
+    // Scope to this row so the filter bar's own Status/Payment Type
+    // comboboxes (and the pagination page-size combobox) are never picked
+    // by accident.
+    const row = screen.getByText("OMS-NDR-1").closest("tr")
+    if (!row) throw new Error("row not found")
+    await userEvent.click(within(row).getByRole("combobox"))
+    await userEvent.click(screen.getByRole("option", { name: "Resolved" }))
+
+    expect(mutate).toHaveBeenCalledWith(
+      { status: "resolved" },
+      expect.objectContaining({ onSuccess: expect.any(Function) })
+    )
+  })
+
+  it("submits an NDR reattempt request via the existing Shiprocket action", async () => {
+    setAuth(true)
+    mockedUseNdrs.mockReturnValue(queryResult({ data: listData([NDR_ROW]) }))
+    mockedUseUpdateNdr.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateNdr>)
+    const reattemptMutate = vi.fn()
+    mockedUseNdrReattempt.mockReturnValue({
+      mutate: reattemptMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useNdrReattempt>)
+
+    renderWithProviders(<NdrPage />)
+    await userEvent.click(screen.getByRole("button", { name: "Reattempt" }))
+    await userEvent.type(screen.getByLabelText("Address line 1"), "221B Baker Street")
+    await userEvent.type(screen.getByLabelText("Phone"), "9998887776")
+    await userEvent.click(screen.getByRole("button", { name: "Request reattempt" }))
+
+    expect(reattemptMutate).toHaveBeenCalledWith(
+      { address_1: "221B Baker Street", address_2: undefined, phone: "9998887776" },
+      expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) })
+    )
   })
 
   it("shows loading skeletons while fetching", () => {

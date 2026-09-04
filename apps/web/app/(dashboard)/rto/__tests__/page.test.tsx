@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { screen } from "@testing-library/react"
+import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -70,6 +70,8 @@ const RTO_ROW: RTO = {
   order_amount: "649.00",
   payment_type: "prepaid",
   shipment_status: "rto_initiated",
+  awb: "AWB1234567",
+  courier_name: "Xpressbees",
 }
 
 function listData(rows: RTO[]) {
@@ -97,6 +99,50 @@ describe("RtoPage", () => {
     expect(screen.getByText("9998887776")).toBeInTheDocument()
     expect(screen.getByText("Ashwagandha 60ct")).toBeInTheDocument()
     expect(screen.getByText("Refused by customer")).toBeInTheDocument()
+    expect(screen.getByText("AWB1234567")).toBeInTheDocument()
+    expect(screen.getByText("Xpressbees")).toBeInTheDocument()
+  })
+
+  it("shows a dash for reason/AWB/Courier when null, never a fabricated value (RTO derived from tracking events)", () => {
+    setAuth(true)
+    mockedUseRtos.mockReturnValue(
+      queryResult({
+        data: listData([
+          { ...RTO_ROW, reason: null, external_reason: null, awb: null, courier_name: null },
+        ]),
+      })
+    )
+    mockedUseUpdateRto.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateRto>)
+
+    renderWithProviders(<RtoPage />)
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0)
+  })
+
+  it("updates RTO status via the status select without a full page reload", async () => {
+    setAuth(true)
+    mockedUseRtos.mockReturnValue(queryResult({ data: listData([RTO_ROW]) }))
+    const mutate = vi.fn()
+    mockedUseUpdateRto.mockReturnValue({
+      mutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateRto>)
+
+    renderWithProviders(<RtoPage />)
+    // Scope to this row so the filter bar's own Status/Payment Type
+    // comboboxes (and the pagination page-size combobox) are never picked
+    // by accident.
+    const row = screen.getByText("OMS-RTO-1").closest("tr")
+    if (!row) throw new Error("row not found")
+    await userEvent.click(within(row).getByRole("combobox"))
+    await userEvent.click(screen.getByRole("option", { name: "Received" }))
+
+    expect(mutate).toHaveBeenCalledWith(
+      { status: "received" },
+      expect.objectContaining({ onSuccess: expect.any(Function) })
+    )
   })
 
   it("shows loading skeletons while fetching", () => {

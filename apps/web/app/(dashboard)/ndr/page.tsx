@@ -239,6 +239,12 @@ export default function NdrPage() {
       cell: (ndr) => ndr.payment_type?.toUpperCase() ?? "—",
     },
     {
+      id: "awb",
+      header: "AWB",
+      cell: (ndr) => <span className="font-mono text-xs">{ndr.awb ?? "—"}</span>,
+    },
+    { id: "courier", header: "Courier", cell: (ndr) => ndr.courier_name ?? "—" },
+    {
       id: "reason",
       header: "Reason",
       cell: (ndr) => ndr.reason ?? ndr.external_reason ?? "—",

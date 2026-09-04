@@ -50,8 +50,8 @@ def _ndr_filters(
 def _to_list_response(ndr: NDR) -> NDRListResponse:
     """Denormalizes the NDR-table columns from the relationships
     `NDRRepository.search_query` already eager-loads (`order`,
-    `order.customer`, `order.items`, `shipment`), so the list endpoint
-    never issues a query per row. Mirrors `_to_list_response` in
+    `order.customer`, `order.items`, `shipment`, `courier`), so the list
+    endpoint never issues a query per row. Mirrors `_to_list_response` in
     app/api/v1/endpoints/orders.py.
     """
     order = ndr.order
@@ -70,6 +70,8 @@ def _to_list_response(ndr: NDR) -> NDRListResponse:
         order_amount=order.total_amount if order else None,
         payment_type=order.payment_type.value if order else None,
         shipment_status=ndr.shipment.current_status.value if ndr.shipment else None,
+        awb=ndr.shipment.awb if ndr.shipment else None,
+        courier_name=ndr.courier.name if ndr.courier else None,
     )
 
 

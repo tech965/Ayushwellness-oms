@@ -64,6 +64,8 @@ def _to_list_response(rto: RTO) -> RTOListResponse:
         order_amount=order.total_amount if order else None,
         payment_type=order.payment_type.value if order else None,
         shipment_status=rto.shipment.current_status.value if rto.shipment else None,
+        awb=rto.shipment.awb if rto.shipment else None,
+        courier_name=rto.courier.name if rto.courier else None,
     )
 
 

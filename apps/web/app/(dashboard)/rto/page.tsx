@@ -155,6 +155,12 @@ export default function RtoPage() {
       cell: (rto) => rto.payment_type?.toUpperCase() ?? "—",
     },
     {
+      id: "awb",
+      header: "AWB",
+      cell: (rto) => <span className="font-mono text-xs">{rto.awb ?? "—"}</span>,
+    },
+    { id: "courier", header: "Courier", cell: (rto) => rto.courier_name ?? "—" },
+    {
       id: "reason",
       header: "Reason",
       cell: (rto) => rto.reason ?? rto.external_reason ?? "—",

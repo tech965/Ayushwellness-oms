@@ -30,6 +30,8 @@ export interface NDR {
   order_amount?: string | null
   payment_type?: string | null
   shipment_status?: string | null
+  awb?: string | null
+  courier_name?: string | null
 }
 
 export interface NDRListFilters {
