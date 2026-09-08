@@ -50,14 +50,28 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
         order_id, movement_type) is the actual safety net, and why a
         `session.begin_nested()` SAVEPOINT around the write is required
         to handle losing that race safely.
+
+        Ordered + `.limit(1)` rather than `scalar_one_or_none()`: on a
+        database where the unique constraint above has not been applied
+        yet (or a pre-existing row predates it), more than one row can
+        exist for the same key -- `scalar_one_or_none()` raises
+        `MultipleResultsFound` in that case, turning a read into an
+        unhandled 500. Deterministically returning the earliest row
+        (oldest `created_at`, tie-broken by `id`) matches the canonical
+        row the `c9f4a2e6b813` migration's cleanup keeps.
         """
-        stmt = select(InventoryMovement).where(
-            InventoryMovement.order_id == order_id,
-            InventoryMovement.product_variant_id == product_variant_id,
-            InventoryMovement.movement_type == movement_type,
+        stmt = (
+            select(InventoryMovement)
+            .where(
+                InventoryMovement.order_id == order_id,
+                InventoryMovement.product_variant_id == product_variant_id,
+                InventoryMovement.movement_type == movement_type,
+            )
+            .order_by(InventoryMovement.created_at.asc(), InventoryMovement.id.asc())
+            .limit(1)
         )
         result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     async def exists_for_order(
         self,
