@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils"
 import {
   fulfillmentNavGroups,
   navGroups,
+  shipmentStaffNavGroups,
   teamLeaderNavGroups,
   telecallerNavGroups,
 } from "@/lib/navigation"
@@ -29,7 +30,9 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
       ? teamLeaderNavGroups
       : hasRole("FULFILLMENT")
         ? fulfillmentNavGroups
-        : navGroups
+        : hasRole("SHIPMENT_STAFF")
+          ? shipmentStaffNavGroups
+          : navGroups
 
   // RBAC nav gating: "Users" and "Roles" only render for a viewer who
   // actually has `users.manage`/`roles.manage`. An item with no

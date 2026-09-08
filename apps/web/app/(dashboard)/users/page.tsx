@@ -21,6 +21,13 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
 import { formatDate } from "@/lib/format"
@@ -85,15 +92,61 @@ function useRoleSelection(initialIds: string[] = []) {
   return { selectedIds, setSelectedIds, toggle }
 }
 
-function CreateUserDialog({ roles }: { roles: Role[] }) {
+/** Shown only while the Telecaller role is checked -- which Shipment
+ * Staff user processes shipments for orders this Telecaller confirms
+ * (`User.shipment_staff_id`, mirrors `team_leader_id`).
+ */
+function ShipmentStaffSelect({
+  options,
+  value,
+  onChange,
+}: {
+  options: User[]
+  value: string
+  onChange: (id: string) => void
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label>Assigned Shipment Staff (optional)</Label>
+      <Select value={value || "__none__"} onValueChange={(v) => onChange(v === "__none__" ? "" : v)}>
+        <SelectTrigger>
+          <SelectValue placeholder="No Shipment Staff assigned" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__none__">No Shipment Staff assigned</SelectItem>
+          {options.map((o) => (
+            <SelectItem key={o.id} value={o.id}>
+              {o.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {options.length === 0 && (
+        <p className="text-muted-foreground text-xs">
+          No Shipment Staff users exist yet — create one with the SHIPMENT_STAFF role first.
+        </p>
+      )}
+    </div>
+  )
+}
+
+function CreateUserDialog({
+  roles,
+  shipmentStaffOptions,
+}: {
+  roles: Role[]
+  shipmentStaffOptions: User[]
+}) {
   const { hasPermission } = useAuth()
   const [open, setOpen] = React.useState(false)
   const [name, setName] = React.useState("")
   const [email, setEmail] = React.useState("")
   const [phone, setPhone] = React.useState("")
   const [password, setPassword] = React.useState("")
+  const [shipmentStaffId, setShipmentStaffId] = React.useState("")
   const { selectedIds, setSelectedIds, toggle } = useRoleSelection()
   const createUser = useCreateUser()
+  const telecallerRoleId = roles.find((r) => r.name === "TELECALLER")?.id
 
   if (!hasPermission("users.manage")) return null
 
@@ -103,6 +156,7 @@ function CreateUserDialog({ roles }: { roles: Role[] }) {
     setPhone("")
     setPassword("")
     setSelectedIds(new Set())
+    setShipmentStaffId("")
   }
 
   function submit() {
@@ -113,6 +167,7 @@ function CreateUserDialog({ roles }: { roles: Role[] }) {
         phone: phone || null,
         password,
         role_ids: Array.from(selectedIds),
+        shipment_staff_id: shipmentStaffId || null,
       },
       {
         onSuccess: () => {
@@ -182,6 +237,13 @@ function CreateUserDialog({ roles }: { roles: Role[] }) {
             <Label>Roles</Label>
             <RoleCheckboxList roles={roles} selectedIds={selectedIds} onToggle={toggle} />
           </div>
+          {telecallerRoleId && selectedIds.has(telecallerRoleId) && (
+            <ShipmentStaffSelect
+              options={shipmentStaffOptions}
+              value={shipmentStaffId}
+              onChange={setShipmentStaffId}
+            />
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>
@@ -196,17 +258,29 @@ function CreateUserDialog({ roles }: { roles: Role[] }) {
   )
 }
 
-function EditUserDialog({ user, roles }: { user: User; roles: Role[] }) {
+function EditUserDialog({
+  user,
+  roles,
+  shipmentStaffOptions,
+}: {
+  user: User
+  roles: Role[]
+  shipmentStaffOptions: User[]
+}) {
   const { hasPermission } = useAuth()
   const [open, setOpen] = React.useState(false)
   const [name, setName] = React.useState(user.name)
   const [phone, setPhone] = React.useState(user.phone ?? "")
+  const [shipmentStaffId, setShipmentStaffId] = React.useState(user.shipment_staff_id ?? "")
   const initialIds = React.useMemo(
     () => roles.filter((r) => user.roles.includes(r.name)).map((r) => r.id),
     [roles, user.roles]
   )
   const { selectedIds, setSelectedIds, toggle } = useRoleSelection(initialIds)
   const updateUser = useUpdateUser(user.id)
+  const telecallerRoleId = roles.find((r) => r.name === "TELECALLER")?.id
+  // A Shipment Staff user can't be assigned to themselves.
+  const availableShipmentStaff = shipmentStaffOptions.filter((o) => o.id !== user.id)
 
   if (!hasPermission("users.manage")) return null
 
@@ -214,6 +288,7 @@ function EditUserDialog({ user, roles }: { user: User; roles: Role[] }) {
     setName(user.name)
     setPhone(user.phone ?? "")
     setSelectedIds(new Set(initialIds))
+    setShipmentStaffId(user.shipment_staff_id ?? "")
     setOpen(true)
   }
 
@@ -223,6 +298,8 @@ function EditUserDialog({ user, roles }: { user: User; roles: Role[] }) {
         name,
         phone: phone || null,
         role_ids: Array.from(selectedIds),
+        shipment_staff_id: shipmentStaffId || null,
+        clear_shipment_staff: !shipmentStaffId,
       },
       {
         onSuccess: () => {
@@ -265,6 +342,13 @@ function EditUserDialog({ user, roles }: { user: User; roles: Role[] }) {
             <Label>Roles</Label>
             <RoleCheckboxList roles={roles} selectedIds={selectedIds} onToggle={toggle} />
           </div>
+          {telecallerRoleId && selectedIds.has(telecallerRoleId) && (
+            <ShipmentStaffSelect
+              options={availableShipmentStaff}
+              value={shipmentStaffId}
+              onChange={setShipmentStaffId}
+            />
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>
@@ -343,6 +427,10 @@ function UsersPageContent() {
   const usersQuery = useUsers({ page: 1, pageSize: USERS_FETCH_PAGE_SIZE })
   const rolesQuery = useRoles()
   const roles = rolesQuery.data ?? []
+  const shipmentStaffOptions = React.useMemo(
+    () => (usersQuery.data?.data ?? []).filter((u) => u.roles.includes("SHIPMENT_STAFF")),
+    [usersQuery.data]
+  )
 
   const filtered = React.useMemo(() => {
     const all = usersQuery.data?.data ?? []
@@ -409,7 +497,7 @@ function UsersPageContent() {
       header: "",
       cell: (user) => (
         <div className="flex items-center gap-2">
-          <EditUserDialog user={user} roles={roles} />
+          <EditUserDialog user={user} roles={roles} shipmentStaffOptions={shipmentStaffOptions} />
           <UserStatusAction user={user} />
         </div>
       ),
@@ -425,7 +513,9 @@ function UsersPageContent() {
             ? `${usersQuery.data.meta.total_items} user(s).`
             : "Manage staff accounts and their assigned roles."
         }
-        actions={<CreateUserDialog roles={roles} />}
+        actions={
+          <CreateUserDialog roles={roles} shipmentStaffOptions={shipmentStaffOptions} />
+        }
       />
       <div className="flex flex-col gap-4">
         <Input

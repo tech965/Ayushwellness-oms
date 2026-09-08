@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 
 from app.core.timezone import to_ist
 from app.models.order import Order
@@ -11,35 +11,82 @@ from app.models.shipment import Shipment, ShipmentEvent
 from app.repositories.base import AppendOnlyRepository, BaseRepository
 
 
+def _confirmed_by_scope(telecaller_ids: list[uuid.UUID] | None):
+    """`EXISTS`-based scope filter shared by every dashboard aggregate
+    below — "this Shipment's Order was confirmed by one of these
+    Telecallers." `None` means unscoped (Admin/Fulfillment, unchanged
+    behavior); an empty list correctly matches nothing (a Shipment Staff
+    user with no Telecallers assigned yet sees zero rows, never
+    everything) since `Order.confirmed_by_telecaller_id.in_([])` is
+    always false.
+    """
+    if telecaller_ids is None:
+        return None
+    return exists(
+        select(1).where(
+            and_(
+                Order.id == Shipment.order_id,
+                Order.confirmed_by_telecaller_id.in_(telecaller_ids),
+            )
+        )
+    )
+
+
 class ShipmentRepository(BaseRepository[Shipment]):
     model = Shipment
 
-    async def status_counts(self) -> dict[str, int]:
+    async def status_counts(
+        self, *, telecaller_ids: list[uuid.UUID] | None = None
+    ) -> dict[str, int]:
         """Whole-table breakdown by `current_status` — backs the shipment
         dashboard's summary cards and the analytics status breakdown.
+        `telecaller_ids` scopes it to a Shipment Staff user's permitted
+        Telecallers (see `_confirmed_by_scope`); omitted entirely for
+        Admin/Fulfillment, preserving the exact prior unscoped query.
         """
-        stmt = select(Shipment.current_status, func.count()).group_by(Shipment.current_status)
+        stmt = select(Shipment.current_status, func.count())
+        scope = _confirmed_by_scope(telecaller_ids)
+        if scope is not None:
+            stmt = stmt.where(scope)
+        stmt = stmt.group_by(Shipment.current_status)
         rows = (await self.session.execute(stmt)).all()
         return {status.value: count for status, count in rows}
 
-    async def payment_type_counts(self) -> dict[str, int]:
+    async def payment_type_counts(
+        self, *, telecaller_ids: list[uuid.UUID] | None = None
+    ) -> dict[str, int]:
         stmt = (
             select(Order.payment_type, func.count())
             .select_from(Shipment)
             .join(Order, Order.id == Shipment.order_id)
-            .group_by(Order.payment_type)
         )
+        if telecaller_ids is not None:
+            stmt = stmt.where(Order.confirmed_by_telecaller_id.in_(telecaller_ids))
+        stmt = stmt.group_by(Order.payment_type)
         rows = (await self.session.execute(stmt)).all()
         return {ptype.value: count for ptype, count in rows}
 
-    async def count_created_in_range(self, *, date_from: datetime, date_to: datetime) -> int:
+    async def count_created_in_range(
+        self,
+        *,
+        date_from: datetime,
+        date_to: datetime,
+        telecaller_ids: list[uuid.UUID] | None = None,
+    ) -> int:
         stmt = select(func.count()).where(
             Shipment.created_at >= date_from, Shipment.created_at <= date_to
         )
+        scope = _confirmed_by_scope(telecaller_ids)
+        if scope is not None:
+            stmt = stmt.where(scope)
         return int(await self.session.scalar(stmt) or 0)
 
     async def daily_created_and_delivered(
-        self, *, date_from: datetime, date_to: datetime
+        self,
+        *,
+        date_from: datetime,
+        date_to: datetime,
+        telecaller_ids: list[uuid.UUID] | None = None,
     ) -> list[dict[str, object]]:
         """Day-bucketed (IST) shipment creation + delivery counts — both
         from real, already-existing timestamps (`Shipment.created_at`,
@@ -56,6 +103,10 @@ class ShipmentRepository(BaseRepository[Shipment]):
             Shipment.actual_delivery_date >= date_from,
             Shipment.actual_delivery_date <= date_to,
         )
+        scope = _confirmed_by_scope(telecaller_ids)
+        if scope is not None:
+            created_stmt = created_stmt.where(scope)
+            delivered_stmt = delivered_stmt.where(scope)
         created_rows = (await self.session.execute(created_stmt)).scalars().all()
         delivered_rows = (await self.session.execute(delivered_stmt)).scalars().all()
 
@@ -89,6 +140,7 @@ class ShipmentRepository(BaseRepository[Shipment]):
         order_id: uuid.UUID | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        telecaller_ids: list[uuid.UUID] | None = None,
     ):
         stmt = self._base_query()
         if q:
@@ -105,6 +157,9 @@ class ShipmentRepository(BaseRepository[Shipment]):
             stmt = stmt.where(Shipment.expected_delivery_date >= date_from)
         if date_to:
             stmt = stmt.where(Shipment.expected_delivery_date <= date_to)
+        scope = _confirmed_by_scope(telecaller_ids)
+        if scope is not None:
+            stmt = stmt.where(scope)
         return stmt
 
 

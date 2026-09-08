@@ -2,7 +2,7 @@
 
 Creates, in a single transaction:
   - Roles: ADMIN, OPERATIONS, CUSTOMER_SUPPORT, MARKETING, MANAGEMENT,
-    TEAM_LEADER, TELECALLER, FULFILLMENT
+    TEAM_LEADER, TELECALLER, FULFILLMENT, SHIPMENT_STAFF
   - Every `module.action` permission the API actually enforces
   - RolePermission assignments matching the access grid in
     docs/security/rbac.md
@@ -84,6 +84,13 @@ PERMISSIONS: dict[str, str] = {
         "view team calling activity and performance"
     ),
     "calls.manage": "Telecaller: view own assigned orders, log calls, manage own follow-ups",
+    "shipment_staff.manage": (
+        "Shipment Staff: view/process shipments for orders confirmed by the Telecallers "
+        "assigned to them (User.shipment_staff_id) — read confirmed orders/shipments/NDR/RTO "
+        "in that scope, create shipments, assign AWB, request pickup, refresh tracking, "
+        "retry Shopify sync. Never grants unscoped orders.read/shipments.read/ndr.*/rto.* — "
+        "those would let a Shipment Staff user bypass their scope via the general endpoints."
+    ),
     "chat.use": (
         "Use the OMS AI Assistant (natural-language questions). Each answer "
         "is still gated by the user's other module permissions "
@@ -182,6 +189,17 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "rto.update",
         "couriers.read",
     ],
+    # Scoped shipment-processing staff: sees/processes only shipments for
+    # orders confirmed by the Telecallers assigned to them (Admin sets
+    # User.shipment_staff_id when editing a Telecaller — mirrors
+    # team_leader_id). Deliberately a SINGLE permission gating a
+    # dedicated, self-scoping router (/shipment-staff/*), the same
+    # pattern TELECALLER's calls.manage/orders.confirm use for
+    # /telecaller/* — never the general orders.read/shipments.read/
+    # ndr.*/rto.* grants FULFILLMENT has, which are unscoped and would
+    # let a Shipment Staff user see every order in the company through
+    # the general endpoints regardless of any scoping in this router.
+    "SHIPMENT_STAFF": ["shipment_staff.manage"],
 }
 
 COURIERS = [

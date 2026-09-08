@@ -36,6 +36,7 @@ from app.api.v1.endpoints import (
     roles,
     rto,
     shipment_events,
+    shipment_staff,
     shipments,
     supply_intelligence,
     sync,
@@ -102,6 +103,9 @@ api_router.include_router(audit_logs.router, prefix="/audit-logs", tags=["audit-
 api_router.include_router(settings_endpoints.router, prefix="/settings", tags=["settings"])
 api_router.include_router(team.router, prefix="/team", tags=["team"])
 api_router.include_router(telecaller.router, prefix="/telecaller", tags=["telecaller"])
+api_router.include_router(
+    shipment_staff.router, prefix="/shipment-staff", tags=["shipment-staff"]
+)
 
 api_router.include_router(
     shopify_webhooks.router, prefix="/webhooks/shopify", tags=["webhooks:shopify"]

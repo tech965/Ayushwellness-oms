@@ -106,6 +106,20 @@ class UserRepository(BaseRepository[User]):
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
+    async def list_ids_by_shipment_staff(self, shipment_staff_id: uuid.UUID) -> list[uuid.UUID]:
+        """Every Telecaller (active or not — a Shipment Staff user must
+        still see orders confirmed while a Telecaller was active, even
+        after that Telecaller is later deactivated) whose
+        `shipment_staff_id` points at this Shipment Staff user — the
+        actual security scope `ShipmentStaffService.resolve_scope`
+        resolves and passes to every scoped repository query. An empty
+        result (a Shipment Staff user nobody has been assigned to yet) is
+        valid and means "sees nothing," never "sees everything."
+        """
+        stmt = select(User.id).where(User.shipment_staff_id == shipment_staff_id)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
 
 class RefreshTokenRepository(BaseRepository[RefreshToken]):
     model = RefreshToken

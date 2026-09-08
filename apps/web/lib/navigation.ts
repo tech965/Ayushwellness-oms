@@ -166,6 +166,31 @@ export const fulfillmentNavGroups: NavGroup[] = [
   },
 ]
 
+/** Minimal nav for SHIPMENT_STAFF — a dedicated, SCOPED shipment-
+ * processing role (only orders confirmed by their own assigned
+ * Telecallers, see `User.shipment_staff_id`). Deliberately its own nav
+ * group, not a reuse of `fulfillmentNavGroups` — FULFILLMENT is
+ * org-wide and must stay that way; conflating the two navs would risk
+ * implying the same scope. No `permission` gate on NDR/RTO here (unlike
+ * `fulfillmentNavGroups`, which gates on `ndr.read`/`rto.read` —
+ * SHIPMENT_STAFF never holds those, only `shipment_staff.manage`, which
+ * covers its own scoped `/shipment-staff/ndr`/`/shipment-staff/rto`
+ * endpoints) — this whole nav group only ever renders for a user who
+ * already holds the SHIPMENT_STAFF role.
+ */
+export const shipmentStaffNavGroups: NavGroup[] = [
+  {
+    label: "Shipment Staff",
+    items: [
+      { label: "My Shipment Dashboard", href: "/shipment-staff/dashboard", icon: Gauge },
+      { label: "Confirmed Orders", href: "/shipment-staff/orders", icon: ListChecks },
+      { label: "Shipments", href: "/shipment-staff/shipments", icon: Truck },
+      { label: "NDR", href: "/shipment-staff/ndr", icon: PackageX },
+      { label: "RTO", href: "/shipment-staff/rto", icon: RotateCcw },
+    ],
+  },
+]
+
 /** Minimal nav for TEAM_LEADER. */
 export const teamLeaderNavGroups: NavGroup[] = [
   {

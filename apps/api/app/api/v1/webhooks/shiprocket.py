@@ -117,32 +117,39 @@ async def receive_shiprocket_tracking_webhook(
         external_event_id=None,
         external_resource_id=str(resource_id) if resource_id else None,
     )
+    # Captured now, not read off `event` again after the `rollback()` below
+    # -- a rollback expires every attribute on an already-loaded ORM object,
+    # so reading `event.id` afterward silently triggers an implicit refresh
+    # query, which async SQLAlchemy cannot run outside its own greenlet
+    # context (`MissingGreenlet`). That masked the real processing error
+    # with an unrelated crash and left the `WebhookEvent` stuck PROCESSING.
+    event_id = event.id
     if not created:
-        logger.info("shiprocket_webhook_duplicate_ignored", webhook_event_id=str(event.id))
+        logger.info("shiprocket_webhook_duplicate_ignored", webhook_event_id=str(event_id))
         return {"success": True}
 
-    await webhook_service.mark_processing(event.id)
+    await webhook_service.mark_processing(event_id)
     try:
         result = await ShiprocketWebhookService(session).apply_tracking_webhook(payload)
     except Exception as exc:  # noqa: BLE001 - persisted before Shiprocket is told to retry
         await session.rollback()
-        await webhook_service.mark_failed(event.id, error_message=str(exc))
+        await webhook_service.mark_failed(event_id, error_message=str(exc))
         logger.error(
             "shiprocket_webhook_processing_failed",
-            webhook_event_id=str(event.id),
+            webhook_event_id=str(event_id),
             error=str(exc),
         )
         raise HTTPException(status_code=500, detail="Internal error processing webhook.") from exc
 
     if result.matched:
-        await webhook_service.mark_processed(event.id)
+        await webhook_service.mark_processed(event_id)
     else:
         await webhook_service.mark_ignored(
-            event.id, reason=f"no_matching_shipment:{result.match_strategy}"
+            event_id, reason=f"no_matching_shipment:{result.match_strategy}"
         )
         logger.warning(
             "shiprocket_webhook_unmatched",
-            webhook_event_id=str(event.id),
+            webhook_event_id=str(event_id),
             match_strategy=result.match_strategy,
         )
 

@@ -3,6 +3,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import {
+  AlertCircle,
   AlertTriangle,
   CheckCircle2,
   ClipboardList,
@@ -19,6 +20,7 @@ import {
 import { PageHeader } from "@/components/shared/page-header"
 import { StatTile } from "@/components/shared/stat-tile"
 import { ShipmentDailyTrendChart } from "@/components/shipments/shipment-daily-trend-chart"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Table,
@@ -28,7 +30,43 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { getApiErrorMessage } from "@/lib/api-client"
 import { useShipmentAnalytics, useShipmentSummary } from "@/services/shipment-queue"
+import { useShipmentStaffPerformance } from "@/services/shipment-staff"
+import type { ShipmentAnalytics, ShipmentSummary } from "@/types/shipment"
+
+interface QueryLike<T> {
+  data: T | undefined
+  isLoading: boolean
+  isError: boolean
+  error: unknown
+}
+
+interface FulfillmentDashboardProps {
+  /** Swap in a SCOPED pair of hooks (e.g. `useMyShipmentSummary`/
+   * `useMyShipmentAnalytics`) to reuse this exact dashboard body for the
+   * Shipment Staff experience — every existing caller (`/fulfillment/
+   * dashboard`, the legacy `/shipment-dashboard` alias) omits these and
+   * gets the original org-wide hooks, completely unaffected.
+   */
+  useSummary?: () => QueryLike<ShipmentSummary>
+  useAnalytics?: () => QueryLike<ShipmentAnalytics>
+  title?: string
+  queueHref?: string
+  /** The telecaller-wise table normally drills into the Admin-only
+   * `/team/telecallers/{id}` page -- not reachable by a Shipment Staff
+   * user, so their dashboard passes `false` here instead of linking
+   * somewhere that would just 403/redirect.
+   */
+  telecallerRowsClickable?: boolean
+  /** The Admin-only "Shipment Staff Performance" table (Part 7) — every
+   * Shipment Staff user's assigned-Telecaller count and aggregated
+   * confirm/ship/deliver/NDR/RTO figures across their own scope. Off by
+   * default on a Shipment Staff user's own dashboard (that's other
+   * people's performance, not their own scope).
+   */
+  showShipmentStaffPerformance?: boolean
+}
 
 const STATUS_LABELS: Record<string, string> = {
   pending: "Pending",
@@ -48,27 +86,53 @@ const STATUS_LABELS: Record<string, string> = {
  * Every figure is a real backend aggregate — see `ShipmentService.get_summary`
  * / `get_analytics`.
  */
-export function FulfillmentDashboard() {
+export function FulfillmentDashboard(props: FulfillmentDashboardProps = {}) {
   return (
     <React.Suspense>
-      <FulfillmentDashboardContent />
+      <FulfillmentDashboardContent {...props} />
     </React.Suspense>
   )
 }
 
-function FulfillmentDashboardContent() {
+function FulfillmentDashboardContent({
+  useSummary = useShipmentSummary,
+  useAnalytics = useShipmentAnalytics,
+  title = "Fulfillment Dashboard",
+  queueHref = "/fulfillment/orders",
+  telecallerRowsClickable = true,
+  showShipmentStaffPerformance = true,
+}: FulfillmentDashboardProps) {
   const router = useRouter()
-  const summaryQuery = useShipmentSummary()
-  const analyticsQuery = useShipmentAnalytics()
+  const summaryQuery = useSummary()
+  const analyticsQuery = useAnalytics()
   const summary = summaryQuery.data
   const analytics = analyticsQuery.data
+  const staffPerformanceQuery = useShipmentStaffPerformance(showShipmentStaffPerformance)
+
+  // A failed request must never read as "zero shipments" -- the stat
+  // tiles/cards below already fall back to "--"/empty copy when data is
+  // undefined, which is indistinguishable from a genuinely empty org unless
+  // this banner calls out that the fetch itself failed.
+  const loadError = summaryQuery.isError
+    ? summaryQuery.error
+    : analyticsQuery.isError
+      ? analyticsQuery.error
+      : undefined
 
   return (
     <>
       <PageHeader
-        title="Fulfillment Dashboard"
+        title={title}
         description="Confirmed orders, shipment pipeline, and delivery performance."
       />
+
+      {loadError !== undefined && (
+        <Alert variant="destructive" className="mb-6">
+          <AlertCircle className="size-4" />
+          <AlertTitle>Could not load the fulfillment dashboard</AlertTitle>
+          <AlertDescription>{getApiErrorMessage(loadError)}</AlertDescription>
+        </Alert>
+      )}
 
       <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
         <StatTile
@@ -76,7 +140,7 @@ function FulfillmentDashboardContent() {
           value={summary?.confirmed_awaiting_shipment ?? "—"}
           icon={ClipboardList}
           accent="amber"
-          href="/fulfillment/orders"
+          href={queueHref}
         />
         <StatTile
           label="Total Shipments"
@@ -194,8 +258,14 @@ function FulfillmentDashboardContent() {
                   {analytics.telecaller_stats.map((row) => (
                     <TableRow
                       key={row.telecaller_id}
-                      className="hover:bg-accent/60 cursor-pointer"
-                      onClick={() => router.push(`/team/telecallers/${row.telecaller_id}`)}
+                      className={
+                        telecallerRowsClickable ? "hover:bg-accent/60 cursor-pointer" : undefined
+                      }
+                      onClick={
+                        telecallerRowsClickable
+                          ? () => router.push(`/team/telecallers/${row.telecaller_id}`)
+                          : undefined
+                      }
                     >
                       <TableCell className="font-medium">{row.telecaller_name}</TableCell>
                       <TableCell className="text-right tabular-nums">{row.confirmed}</TableCell>
@@ -211,6 +281,54 @@ function FulfillmentDashboardContent() {
           )}
         </CardContent>
       </Card>
+
+      {showShipmentStaffPerformance && (
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle>Shipment Staff Performance</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {staffPerformanceQuery.isLoading ? (
+              <div className="bg-muted h-24 w-full animate-pulse rounded-md" />
+            ) : !staffPerformanceQuery.data || staffPerformanceQuery.data.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                No Shipment Staff users yet — create one under Administration → Users.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Shipment Staff</TableHead>
+                      <TableHead className="text-right">Telecallers</TableHead>
+                      <TableHead className="text-right">Confirmed</TableHead>
+                      <TableHead className="text-right">Shipped</TableHead>
+                      <TableHead className="text-right">Delivered</TableHead>
+                      <TableHead className="text-right">NDR</TableHead>
+                      <TableHead className="text-right">RTO</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {staffPerformanceQuery.data.map((row) => (
+                      <TableRow key={row.shipment_staff_id}>
+                        <TableCell className="font-medium">{row.shipment_staff_name}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.telecaller_count}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">{row.confirmed}</TableCell>
+                        <TableCell className="text-right tabular-nums">{row.shipped}</TableCell>
+                        <TableCell className="text-right tabular-nums">{row.delivered}</TableCell>
+                        <TableCell className="text-right tabular-nums">{row.ndr}</TableCell>
+                        <TableCell className="text-right tabular-nums">{row.rto}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </>
   )
 }

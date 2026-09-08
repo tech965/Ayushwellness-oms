@@ -17,6 +17,10 @@ class UserCreateRequest(BaseModel):
     # management" endpoint (a Telecaller belongs to exactly one team
     # leader; a "team" is just "the users with this team_leader_id").
     team_leader_id: uuid.UUID | None = None
+    # Set only for Telecaller accounts — which Shipment Staff user
+    # processes shipments for orders this Telecaller confirms. Mirrors
+    # `team_leader_id` exactly (see `app.models.auth.User.shipment_staff_id`).
+    shipment_staff_id: uuid.UUID | None = None
 
 
 class UserUpdateRequest(BaseModel):
@@ -29,6 +33,9 @@ class UserUpdateRequest(BaseModel):
     # clear the team leader" — `team_leader_id: None` alone is ambiguous
     # between those two under a partial-update PATCH.
     clear_team_leader: bool = False
+    shipment_staff_id: uuid.UUID | None = None
+    # Same "omitted vs explicit clear" ambiguity as `clear_team_leader`.
+    clear_shipment_staff: bool = False
 
 
 class UserResponse(BaseModel):
@@ -41,6 +48,7 @@ class UserResponse(BaseModel):
     is_active: bool
     is_superuser: bool
     team_leader_id: uuid.UUID | None = None
+    shipment_staff_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
     roles: list[str] = []

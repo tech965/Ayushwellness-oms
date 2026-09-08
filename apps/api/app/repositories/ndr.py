@@ -24,6 +24,7 @@ class NDRRepository(BaseRepository[NDR]):
         courier_id: uuid.UUID | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        telecaller_ids: list[uuid.UUID] | None = None,
     ):
         stmt = self._base_query()
         if q:
@@ -66,6 +67,19 @@ class NDRRepository(BaseRepository[NDR]):
             stmt = stmt.where(NDR.created_at >= date_from)
         if date_to:
             stmt = stmt.where(NDR.created_at <= date_to)
+        if telecaller_ids is not None:
+            # Shipment Staff scope -- see `ShipmentRepository._confirmed_by_scope`
+            # for the identical pattern/rationale on the shipment side.
+            stmt = stmt.where(
+                exists(
+                    select(1).where(
+                        and_(
+                            Order.id == NDR.order_id,
+                            Order.confirmed_by_telecaller_id.in_(telecaller_ids),
+                        )
+                    )
+                )
+            )
         # Every caller of `search_query` serializes through `NDRListResponse`,
         # which needs order/customer/product/shipment data — eager-loaded
         # once here (matching `OrderRepository.search_query`'s own

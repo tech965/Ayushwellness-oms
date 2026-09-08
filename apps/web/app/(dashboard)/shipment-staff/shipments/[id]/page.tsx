@@ -1,0 +1,231 @@
+"use client"
+
+import type { ReactNode } from "react"
+import { useParams } from "next/navigation"
+import { toast } from "sonner"
+
+import { PageHeader } from "@/components/shared/page-header"
+import { QueryStates } from "@/components/shared/query-states"
+import { StatusBadge } from "@/components/shared/status-badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader } from "@/components/ui/card"
+import { getApiErrorMessage } from "@/lib/api-client"
+import { formatDateTime } from "@/lib/format"
+import {
+  useMyAssignAwb,
+  useMyRefreshTracking,
+  useMyRequestPickup,
+  useMyRetryShopifySync,
+  useMyShipment,
+  useMyShipmentTimeline,
+} from "@/services/shipment-staff"
+
+/** Scoped counterpart of `/shipments/[id]` -- same processing actions
+ * (reuses the identical Shiprocket/Shopify operations through the
+ * `/shipment-staff/*` endpoints), restricted to a shipment whose order
+ * was confirmed by one of this Shipment Staff user's own Telecallers.
+ * Never Cancel Shipment here -- that's an Admin/Fulfillment-only action
+ * (`shipments.update` on the general router), deliberately not exposed
+ * through this scoped one.
+ */
+export default function ShipmentStaffShipmentDetailPage() {
+  const params = useParams<{ id: string }>()
+  const shipmentId = params.id
+
+  const shipmentQuery = useMyShipment(shipmentId)
+  const timelineQuery = useMyShipmentTimeline(shipmentId)
+
+  const assignAwb = useMyAssignAwb(shipmentId)
+  const requestPickup = useMyRequestPickup(shipmentId)
+  const refreshTracking = useMyRefreshTracking(shipmentId)
+  const retryShopifySync = useMyRetryShopifySync(shipmentId)
+
+  const anyActionPending =
+    assignAwb.isPending ||
+    requestPickup.isPending ||
+    refreshTracking.isPending ||
+    retryShopifySync.isPending
+
+  const mutationOpts = (successMessage: string) => ({
+    onSuccess: () => toast.success(successMessage),
+    onError: (error: unknown) => toast.error(getApiErrorMessage(error)),
+  })
+
+  return (
+    <>
+      <PageHeader
+        title={shipmentQuery.data?.awb ? `Shipment ${shipmentQuery.data.awb}` : "Shipment"}
+        description={`ID: ${shipmentId}`}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={anyActionPending || Boolean(shipmentQuery.data?.awb)}
+              onClick={() => assignAwb.mutate(undefined, mutationOpts("AWB assigned."))}
+            >
+              Assign AWB
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={anyActionPending}
+              onClick={() => requestPickup.mutate(undefined, mutationOpts("Pickup requested."))}
+            >
+              Request Pickup
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={anyActionPending || !shipmentQuery.data?.awb}
+              onClick={() =>
+                refreshTracking.mutate(undefined, mutationOpts("Tracking refreshed."))
+              }
+            >
+              Refresh Tracking
+            </Button>
+            {shipmentQuery.data?.shopify_sync_status === "failed" && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={anyActionPending}
+                onClick={() =>
+                  retryShopifySync.mutate(undefined, {
+                    onSuccess: (shipment) => {
+                      if (shipment?.shopify_sync_status === "synced") {
+                        toast.success("Shopify sync succeeded.")
+                      } else {
+                        toast.warning("Shopify sync still failing — see the error below.")
+                      }
+                    },
+                    onError: (error) => toast.error(getApiErrorMessage(error)),
+                  })
+                }
+              >
+                Retry Shopify Sync
+              </Button>
+            )}
+          </div>
+        }
+      />
+      <QueryStates
+        isLoading={shipmentQuery.isLoading}
+        isError={shipmentQuery.isError}
+        error={shipmentQuery.error}
+        data={shipmentQuery.data}
+        onRetry={() => void shipmentQuery.refetch()}
+      >
+        {(shipment) => (
+          <div className="flex flex-col gap-4">
+            <Card>
+              <CardHeader className="flex flex-row items-center gap-2">
+                <StatusBadge domain="shipment" status={shipment.current_status} />
+                <StatusBadge domain="shipment_delay" status={shipment.delay_status} />
+                {shipment.ndr_status && <StatusBadge domain="ndr" status={shipment.ndr_status} />}
+                {shipment.rto_status && <StatusBadge domain="rto" status={shipment.rto_status} />}
+                <StatusBadge domain="shopify_sync" status={shipment.shopify_sync_status} />
+              </CardHeader>
+              {shipment.shopify_sync_status === "failed" && shipment.shopify_sync_error && (
+                <CardContent className="border-border border-b pt-0 pb-4">
+                  <p className="text-destructive text-sm">
+                    Shopify sync failed: {shipment.shopify_sync_error}
+                  </p>
+                </CardContent>
+              )}
+              <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <Stat label="AWB" value={shipment.awb ?? "—"} />
+                <Stat
+                  label="Shopify fulfillment"
+                  value={shipment.shopify_fulfillment_id ?? "—"}
+                />
+                <Stat
+                  label="Source"
+                  value={
+                    shipment.source_system === "shiprocket"
+                      ? "Shiprocket"
+                      : (shipment.source_system ?? "Manual")
+                  }
+                />
+                <Stat label="Current location" value={shipment.current_location ?? "—"} />
+                <Stat
+                  label="Expected delivery"
+                  value={
+                    shipment.expected_delivery_date
+                      ? formatDateTime(shipment.expected_delivery_date)
+                      : "—"
+                  }
+                />
+                <Stat
+                  label="Actual delivery"
+                  value={
+                    shipment.actual_delivery_date
+                      ? formatDateTime(shipment.actual_delivery_date)
+                      : "—"
+                  }
+                />
+                <Stat
+                  label="Pickup date"
+                  value={shipment.pickup_date ? formatDateTime(shipment.pickup_date) : "—"}
+                />
+                <Stat
+                  label="Last update"
+                  value={
+                    shipment.last_tracking_update_at
+                      ? formatDateTime(shipment.last_tracking_update_at)
+                      : "—"
+                  }
+                />
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <h2 className="text-sm font-semibold">Tracking timeline</h2>
+              </CardHeader>
+              <CardContent>
+                <QueryStates
+                  isLoading={timelineQuery.isLoading}
+                  isError={timelineQuery.isError}
+                  error={timelineQuery.error}
+                  data={timelineQuery.data}
+                  onRetry={() => void timelineQuery.refetch()}
+                  isEmpty={(events) => events.length === 0}
+                  emptyTitle="No tracking events yet"
+                  emptyDescription="Assign an AWB and refresh tracking to pull events from Shiprocket."
+                >
+                  {(events) => (
+                    <ol className="flex flex-col gap-3">
+                      {events.map((event) => (
+                        <li key={event.id} className="border-border flex gap-3 border-l-2 pl-3">
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium">
+                              {event.description ?? event.status}
+                            </span>
+                            <span className="text-muted-foreground text-xs">
+                              {formatDateTime(event.event_timestamp)}
+                              {event.location ? ` · ${event.location}` : ""}
+                              {event.courier_name ? ` · ${event.courier_name}` : ""}
+                            </span>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </QueryStates>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+      </QueryStates>
+    </>
+  )
+}
+
+function Stat({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div>
+      <p className="text-muted-foreground text-xs">{label}</p>
+      <p className="text-sm font-medium">{value}</p>
+    </div>
+  )
+}

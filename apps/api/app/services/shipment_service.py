@@ -49,6 +49,7 @@ class ShipmentService:
         order_id: uuid.UUID | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        telecaller_ids: list[uuid.UUID] | None = None,
     ) -> tuple[list[Shipment], int]:
         query = self.shipments.search_query(
             q=q,
@@ -57,6 +58,7 @@ class ShipmentService:
             order_id=order_id,
             date_from=date_from,
             date_to=date_to,
+            telecaller_ids=telecaller_ids,
         )
         items, total = await self.shipments.list(
             page_params=page_params, sort_params=sort_params, query=query
@@ -75,12 +77,16 @@ class ShipmentService:
         shipment_status: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        scope_telecaller_ids: list[uuid.UUID] | None = None,
     ) -> tuple[list[tuple[Order, Shipment | None]], int]:
         """Confirmed orders awaiting shipment processing — a distinct,
         narrower view from `list_shipments` above (which is every
         already-processed shipment); see
         `OrderRepository.shipment_queue_query`'s docstring for the exact
-        membership rule.
+        membership rule. `scope_telecaller_ids` is the mandatory Shipment
+        Staff security scope — deliberately named differently from
+        `telecaller_id` (an optional admin/fulfillment filter-dropdown
+        choice) so a caller can never confuse the two.
         """
         query = self.orders.shipment_queue_query(
             q=q,
@@ -91,23 +97,31 @@ class ShipmentService:
             shipment_status=shipment_status,
             date_from=date_from,
             date_to=date_to,
+            telecaller_ids=scope_telecaller_ids,
         )
         return await self.orders.list_shipment_queue(query, page_params=page_params)
 
-    async def get_summary(self) -> dict[str, object]:
+    async def get_summary(
+        self, *, scope_telecaller_ids: list[uuid.UUID] | None = None
+    ) -> dict[str, object]:
         """Shipment dashboard cards — every figure a real aggregate query
         (`ShipmentRepository.status_counts`/`payment_type_counts`, plus
         the queue's own count query), no figure calculated client-side.
+        `scope_telecaller_ids=None` (Admin/Fulfillment) preserves the
+        exact prior org-wide behavior; a Shipment Staff caller passes
+        their permitted Telecaller ids.
         """
-        status_counts = await self.shipments.status_counts()
-        payment_counts = await self.shipments.payment_type_counts()
-        queue_query = self.orders.shipment_queue_query()
+        status_counts = await self.shipments.status_counts(telecaller_ids=scope_telecaller_ids)
+        payment_counts = await self.shipments.payment_type_counts(
+            telecaller_ids=scope_telecaller_ids
+        )
+        queue_query = self.orders.shipment_queue_query(telecaller_ids=scope_telecaller_ids)
         confirmed_awaiting = await self.session.scalar(
             select(func.count()).select_from(queue_query.subquery())
         )
         today_start, today_end = ist_day_bounds()
         todays_shipments = await self.shipments.count_created_in_range(
-            date_from=today_start, date_to=today_end
+            date_from=today_start, date_to=today_end, telecaller_ids=scope_telecaller_ids
         )
         total_shipments = sum(status_counts.values())
         rto = status_counts.get(ShipmentStatus.RTO_INITIATED.value, 0) + status_counts.get(
@@ -130,22 +144,30 @@ class ShipmentService:
         }
 
     async def get_analytics(
-        self, *, date_from: datetime | None = None, date_to: datetime | None = None
+        self,
+        *,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        scope_telecaller_ids: list[uuid.UUID] | None = None,
     ) -> dict[str, object]:
         """Breakdown/trend/telecaller-wise analytics — see
         `OrderRepository.telecaller_confirmation_counts`'s docstring for
         why the telecaller-wise figures are live snapshot counts, and
         `ShipmentRepository.daily_created_and_delivered`'s for why the
         daily trend uses only real, already-existing timestamps.
+        `scope_telecaller_ids=None` preserves the exact prior org-wide
+        (Admin/Fulfillment) behavior.
         """
         resolved_to = date_to or datetime.now(UTC)
         resolved_from = date_from or (resolved_to - timedelta(days=DEFAULT_ANALYTICS_WINDOW_DAYS))
 
-        status_counts = await self.shipments.status_counts()
+        status_counts = await self.shipments.status_counts(telecaller_ids=scope_telecaller_ids)
         daily_trend = await self.shipments.daily_created_and_delivered(
-            date_from=resolved_from, date_to=resolved_to
+            date_from=resolved_from, date_to=resolved_to, telecaller_ids=scope_telecaller_ids
         )
-        confirmation_counts = await self.orders.telecaller_confirmation_counts()
+        confirmation_counts = await self.orders.telecaller_confirmation_counts(
+            telecaller_ids=scope_telecaller_ids
+        )
 
         telecaller_stats = []
         for telecaller_id, counts in confirmation_counts.items():
@@ -163,7 +185,9 @@ class ShipmentService:
             )
         telecaller_stats.sort(key=lambda t: t["confirmed"], reverse=True)  # type: ignore[arg-type,return-value]
 
-        ever_confirmed, shipped_or_later = await self.orders.confirmation_to_shipment_stats()
+        ever_confirmed, shipped_or_later = await self.orders.confirmation_to_shipment_stats(
+            telecaller_ids=scope_telecaller_ids
+        )
         conversion_rate = (
             round((shipped_or_later / ever_confirmed) * 100, 1) if ever_confirmed else 0.0
         )

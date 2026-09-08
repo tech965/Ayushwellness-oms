@@ -92,6 +92,22 @@ describe("SidebarNav role-based navigation", () => {
     expect(screen.queryByText("Telecallers")).not.toBeInTheDocument()
     expect(screen.queryByText("Settings")).not.toBeInTheDocument()
   })
+
+  it("renders only the minimal Shipment Staff nav — no admin links", () => {
+    mockedUseAuth.mockReturnValue(authWithRoles(["SHIPMENT_STAFF"], ["shipment_staff.manage"]))
+    renderWithProviders(<SidebarNav />)
+    expect(screen.getByText("My Shipment Dashboard")).toBeInTheDocument()
+    expect(screen.getByText("Confirmed Orders")).toBeInTheDocument()
+    expect(screen.getByText("Shipments")).toBeInTheDocument()
+    expect(screen.getByText("NDR")).toBeInTheDocument()
+    expect(screen.getByText("RTO")).toBeInTheDocument()
+    expect(screen.queryByText("Orders")).not.toBeInTheDocument()
+    expect(screen.queryByText("Users")).not.toBeInTheDocument()
+    expect(screen.queryByText("Integrations")).not.toBeInTheDocument()
+    expect(screen.queryByText("Telecallers")).not.toBeInTheDocument()
+    expect(screen.queryByText("Fulfillment Dashboard")).not.toBeInTheDocument()
+    expect(screen.queryByText("Settings")).not.toBeInTheDocument()
+  })
 })
 
 describe("SidebarNav Administration gating", () => {

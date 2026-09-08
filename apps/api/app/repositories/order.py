@@ -178,6 +178,7 @@ class OrderRepository(BaseRepository[Order]):
         shipment_status: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        telecaller_ids: list[uuid.UUID] | None = None,
     ):
         """Confirmed orders "awaiting shipment processing" — `Order.status
         == CONFIRMED`, `Order.fulfillment_status != FULFILLED` (Shopify's
@@ -196,6 +197,14 @@ class OrderRepository(BaseRepository[Order]):
         Does not touch/duplicate `search_query` (the general Orders list)
         or `ShipmentRepository.search_query` (the general Shipments
         list) — this is a third, narrower view.
+
+        `telecaller_ids`, unlike `telecaller_id`, is a mandatory SECURITY
+        SCOPE, not an optional UI filter — `ShipmentStaffService` passes
+        the caller's own permitted Telecaller set here so a Shipment
+        Staff user's queue is restricted at the query level (never just
+        hidden in the UI). `telecaller_id` (a single admin/fulfillment
+        filter-dropdown choice) can be combined with it freely; both
+        apply with AND semantics.
         """
         active_shipment = aliased(Shipment)
         stmt = (
@@ -241,6 +250,8 @@ class OrderRepository(BaseRepository[Order]):
             stmt = stmt.where(Order.payment_type == payment_type)
         if telecaller_id:
             stmt = stmt.where(Order.confirmed_by_telecaller_id == telecaller_id)
+        if telecaller_ids is not None:
+            stmt = stmt.where(Order.confirmed_by_telecaller_id.in_(telecaller_ids))
         if courier_id:
             stmt = stmt.where(active_shipment.courier_id == courier_id)
         if shipment_status:
@@ -271,7 +282,9 @@ class OrderRepository(BaseRepository[Order]):
         rows = (await self.session.execute(stmt)).all()
         return [(row[0], row[1]) for row in rows], total or 0
 
-    async def confirmation_to_shipment_stats(self) -> tuple[int, int]:
+    async def confirmation_to_shipment_stats(
+        self, *, telecaller_ids: list[uuid.UUID] | None = None
+    ) -> tuple[int, int]:
         """`(ever_confirmed, shipped_or_later)`, scoped to orders that
         were ever actually *eligible* for this OMS's own shipment
         pipeline — `fulfillment_status != FULFILLED` (excludes orders
@@ -314,11 +327,16 @@ class OrderRepository(BaseRepository[Order]):
             Order.status.in_(ever_confirmed_statuses),
             Order.fulfillment_status != FulfillmentStatus.FULFILLED,
         )
+        if telecaller_ids is not None:
+            stmt = stmt.where(Order.confirmed_by_telecaller_id.in_(telecaller_ids))
         ever_confirmed, shipped_or_later = (await self.session.execute(stmt)).one()
         return int(ever_confirmed or 0), int(shipped_or_later or 0)
 
     async def telecaller_confirmation_counts(
-        self, *, telecaller_id: uuid.UUID | None = None
+        self,
+        *,
+        telecaller_id: uuid.UUID | None = None,
+        telecaller_ids: list[uuid.UUID] | None = None,
     ) -> dict[uuid.UUID, dict[str, int]]:
         """Per-telecaller counts of orders they personally confirmed
         (`Order.confirmed_by_telecaller_id`), broken down by whether a
@@ -374,6 +392,8 @@ class OrderRepository(BaseRepository[Order]):
         ).where(Order.confirmed_by_telecaller_id.is_not(None))
         if telecaller_id is not None:
             stmt = stmt.where(Order.confirmed_by_telecaller_id == telecaller_id)
+        if telecaller_ids is not None:
+            stmt = stmt.where(Order.confirmed_by_telecaller_id.in_(telecaller_ids))
         stmt = stmt.group_by(Order.confirmed_by_telecaller_id)
         rows = (await self.session.execute(stmt)).all()
         return {

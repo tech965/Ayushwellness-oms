@@ -41,11 +41,14 @@ class UserService:
         password: str,
         role_ids: list[uuid.UUID],
         team_leader_id: uuid.UUID | None = None,
+        shipment_staff_id: uuid.UUID | None = None,
     ) -> User:
         if await self.users.get_by_email(email) is not None:
             raise ConflictError("A user with this email already exists.")
         if team_leader_id is not None:
             await self._validate_team_leader(team_leader_id)
+        if shipment_staff_id is not None:
+            await self._validate_shipment_staff(shipment_staff_id)
 
         user = await self.users.create(
             name=name,
@@ -53,6 +56,7 @@ class UserService:
             phone=phone,
             password_hash=hash_password(password),
             team_leader_id=team_leader_id,
+            shipment_staff_id=shipment_staff_id,
         )
         await self._sync_roles(user, role_ids)
         await self.session.commit()
@@ -68,6 +72,8 @@ class UserService:
         role_ids: list[uuid.UUID] | None = None,
         team_leader_id: uuid.UUID | None = None,
         clear_team_leader: bool = False,
+        shipment_staff_id: uuid.UUID | None = None,
+        clear_shipment_staff: bool = False,
     ) -> User:
         user = await self.get_user(user_id)
         fields: dict[str, str | bool | uuid.UUID | None] = {
@@ -80,6 +86,11 @@ class UserService:
         elif team_leader_id is not None:
             await self._validate_team_leader(team_leader_id)
             fields["team_leader_id"] = team_leader_id
+        if clear_shipment_staff:
+            fields["shipment_staff_id"] = None
+        elif shipment_staff_id is not None:
+            await self._validate_shipment_staff(shipment_staff_id)
+            fields["shipment_staff_id"] = shipment_staff_id
         if fields:
             await self.users.update(user, **fields)
         if role_ids is not None:
@@ -91,6 +102,11 @@ class UserService:
         team_leader = await self.users.get_with_permissions(team_leader_id)
         if team_leader is None or "TEAM_LEADER" not in team_leader.role_names:
             raise NotFoundError("team_leader_id does not reference a Team Leader.")
+
+    async def _validate_shipment_staff(self, shipment_staff_id: uuid.UUID) -> None:
+        shipment_staff = await self.users.get_with_permissions(shipment_staff_id)
+        if shipment_staff is None or "SHIPMENT_STAFF" not in shipment_staff.role_names:
+            raise NotFoundError("shipment_staff_id does not reference a Shipment Staff user.")
 
     async def deactivate_user(self, user_id: uuid.UUID) -> User:
         return await self.update_user(user_id, is_active=False)

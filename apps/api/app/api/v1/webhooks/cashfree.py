@@ -156,13 +156,20 @@ async def receive_cashfree_payment_webhook(
         external_event_id=str(cf_payment_id) if cf_payment_id is not None else None,
         external_resource_id=cashfree_order_id,
     )
+    # Captured now, not read off `event` again after the `rollback()` below
+    # -- a rollback expires every attribute on an already-loaded ORM object,
+    # so reading `event.id` afterward silently triggers an implicit refresh
+    # query, which async SQLAlchemy cannot run outside its own greenlet
+    # context (`MissingGreenlet`). That masked the real processing error
+    # with an unrelated crash and left the `WebhookEvent` stuck PROCESSING.
+    event_id = event.id
     if not created:
-        logger.info("cashfree_webhook_duplicate_ignored", webhook_event_id=str(event.id))
+        logger.info("cashfree_webhook_duplicate_ignored", webhook_event_id=str(event_id))
         return {"success": True}
 
     if event_type not in RECOGNIZED_WEBHOOK_TYPES:
         await webhook_service.mark_ignored(
-            event.id, reason=f"unrecognized_event_type:{event_type}"
+            event_id, reason=f"unrecognized_event_type:{event_type}"
         )
         logger.warning("cashfree_webhook_unrecognized_type", event_type=event_type)
         return {"success": True}
@@ -172,7 +179,7 @@ async def receive_cashfree_payment_webhook(
     # a recognized type with no order_id before this point.
     assert cashfree_order_id is not None
 
-    await webhook_service.mark_processing(event.id)
+    await webhook_service.mark_processing(event_id)
 
     precise_payment_data = extract_payment_data(precise_payload)
     amount = extract_decimal_amount(precise_payment_data, "payment_amount")
@@ -203,19 +210,19 @@ async def receive_cashfree_payment_webhook(
         )
     except Exception as exc:  # noqa: BLE001 - persisted before Cashfree is told to retry
         await session.rollback()
-        await webhook_service.mark_failed(event.id, error_message=str(exc))
+        await webhook_service.mark_failed(event_id, error_message=str(exc))
         logger.error(
-            "cashfree_webhook_processing_failed", webhook_event_id=str(event.id), error=str(exc)
+            "cashfree_webhook_processing_failed", webhook_event_id=str(event_id), error=str(exc)
         )
         raise HTTPException(status_code=500, detail="Internal error processing webhook.") from exc
 
     if result.applied:
-        await webhook_service.mark_processed(event.id)
+        await webhook_service.mark_processed(event_id)
     else:
-        await webhook_service.mark_ignored(event.id, reason=result.reason or "not_applied")
+        await webhook_service.mark_ignored(event_id, reason=result.reason or "not_applied")
         logger.warning(
             "cashfree_webhook_not_applied",
-            webhook_event_id=str(event.id),
+            webhook_event_id=str(event_id),
             reason=result.reason,
         )
 

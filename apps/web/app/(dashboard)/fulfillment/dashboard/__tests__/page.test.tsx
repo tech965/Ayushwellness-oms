@@ -88,4 +88,26 @@ describe("FulfillmentDashboardPage", () => {
 
     expect(screen.getByText("No telecaller-confirmed orders yet.")).toBeInTheDocument()
   })
+
+  it("surfaces a backend failure instead of rendering it as an empty dashboard", () => {
+    mockedUseShipmentSummary.mockReturnValue({
+      isLoading: false,
+      isError: true,
+      error: {
+        isAxiosError: true,
+        response: { data: { error: { message: "Internal server error" } } },
+      },
+      data: undefined,
+    } as unknown as ReturnType<typeof useShipmentSummary>)
+    mockedUseShipmentAnalytics.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      data: undefined,
+    } as unknown as ReturnType<typeof useShipmentAnalytics>)
+
+    renderWithProviders(<FulfillmentDashboardPage />)
+
+    expect(screen.getByText("Could not load the fulfillment dashboard")).toBeInTheDocument()
+    expect(screen.getByText("Internal server error")).toBeInTheDocument()
+  })
 })

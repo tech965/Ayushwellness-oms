@@ -50,6 +50,14 @@ export function RoleRedirect() {
         home: "/fulfillment/dashboard",
         allowed: ["/fulfillment", "/orders", "/shipments", "/ndr", "/rto"],
       }
+    // Unlike FULFILLMENT, every Shipment Staff page (including shipment
+    // processing/tracking) lives entirely under its own `/shipment-staff`
+    // prefix — dedicated pages calling the scoped `/shipment-staff/*`
+    // API, never the general `/orders`/`/shipments` pages (which need
+    // permissions this role deliberately never holds). No extra allowed
+    // prefixes needed.
+    if (hasRole("SHIPMENT_STAFF"))
+      return { home: "/shipment-staff/dashboard", allowed: ["/shipment-staff"] }
     return null
   }, [hasRole])
 

@@ -24,6 +24,7 @@ class RTORepository(BaseRepository[RTO]):
         courier_id: uuid.UUID | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        telecaller_ids: list[uuid.UUID] | None = None,
     ):
         stmt = self._base_query()
         if q:
@@ -62,6 +63,17 @@ class RTORepository(BaseRepository[RTO]):
             stmt = stmt.where(RTO.created_at >= date_from)
         if date_to:
             stmt = stmt.where(RTO.created_at <= date_to)
+        if telecaller_ids is not None:
+            stmt = stmt.where(
+                exists(
+                    select(1).where(
+                        and_(
+                            Order.id == RTO.order_id,
+                            Order.confirmed_by_telecaller_id.in_(telecaller_ids),
+                        )
+                    )
+                )
+            )
         stmt = stmt.options(
             selectinload(RTO.order).selectinload(Order.customer),
             selectinload(RTO.order).selectinload(Order.items),

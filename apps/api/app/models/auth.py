@@ -42,11 +42,29 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     team_leader_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # Shipment Staff scoping: mirrors `team_leader_id` exactly, one level
+    # over in the shipment-processing hierarchy. Set on a Telecaller row
+    # -- "which Shipment Staff user handles this Telecaller's confirmed
+    # orders." A Shipment Staff user's own visible scope is "every
+    # Telecaller whose shipment_staff_id points at me" (see
+    # `ShipmentStaffService.resolve_scope`), the same
+    # "the group IS the set of rows pointing at this id" idea
+    # `team_leader_id` already uses -- no separate join table needed.
+    # NULL for every user this doesn't apply to (Shipment Staff
+    # themselves included).
+    shipment_staff_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     user_roles: Mapped[list[UserRole]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-    team_leader: Mapped[User | None] = relationship(remote_side="User.id")
+    team_leader: Mapped[User | None] = relationship(
+        remote_side="User.id", foreign_keys=[team_leader_id]
+    )
+    shipment_staff: Mapped[User | None] = relationship(
+        remote_side="User.id", foreign_keys=[shipment_staff_id]
+    )
 
     @property
     def permission_codes(self) -> set[str]:
