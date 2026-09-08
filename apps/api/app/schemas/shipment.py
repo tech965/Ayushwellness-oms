@@ -130,6 +130,23 @@ class TelecallerShipmentStats(BaseModel):
     rto: int = 0
 
 
+class BulkShipOrdersRequest(BaseModel):
+    order_ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
+
+
+class BulkShipOrderResult(BaseModel):
+    order_id: uuid.UUID
+    success: bool
+    message: str | None
+    shipment_id: uuid.UUID | None = None
+
+
+class BulkShipOrdersResponse(BaseModel):
+    shipped_count: int
+    failed_count: int
+    results: list[BulkShipOrderResult]
+
+
 class ShipmentAnalyticsResponse(BaseModel):
     status_breakdown: list[ShipmentStatusBreakdownItem]
     # % of orders that ever reached CONFIRMED (or any status after it —

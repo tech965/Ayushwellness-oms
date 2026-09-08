@@ -9,6 +9,7 @@ import {
   MoreVertical,
   PackageCheck,
   PhoneCall,
+  Undo2,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -62,6 +63,7 @@ import {
   useLogCall,
   useMyOrders,
   useScheduleFollowUp,
+  useUnconfirmOrder,
 } from "@/services/telecaller"
 import {
   CALL_OUTCOME_OPTIONS,
@@ -111,6 +113,9 @@ function TelecallerOrdersContent() {
 
   const [confirmTarget, setConfirmTarget] = React.useState<AssignedOrder | null>(null)
   const confirmOrder = useConfirmOrder(confirmTarget?.order_id ?? "")
+
+  const [unconfirmTarget, setUnconfirmTarget] = React.useState<AssignedOrder | null>(null)
+  const unconfirmOrder = useUnconfirmOrder(unconfirmTarget?.order_id ?? "")
 
   function toggleOne(id: string) {
     setSelectedIds((prev) => {
@@ -187,6 +192,20 @@ function TelecallerOrdersContent() {
       onError: (error) => {
         toast.error(getApiErrorMessage(error))
         setConfirmTarget(null)
+      },
+    })
+  }
+
+  function handleUnconfirmOrder() {
+    if (!unconfirmTarget) return
+    unconfirmOrder.mutate(undefined, {
+      onSuccess: () => {
+        toast.success("Order reverted to pending.")
+        setUnconfirmTarget(null)
+      },
+      onError: (error) => {
+        toast.error(getApiErrorMessage(error))
+        setUnconfirmTarget(null)
       },
     })
   }
@@ -285,6 +304,15 @@ function TelecallerOrdersContent() {
                   <DropdownMenuItem onSelect={() => setConfirmTarget(o)}>
                     <PackageCheck />
                     Confirm Order
+                  </DropdownMenuItem>
+                </>
+              )}
+              {o.status === "confirmed" && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={() => setUnconfirmTarget(o)}>
+                    <Undo2 />
+                    Revert to Pending
                   </DropdownMenuItem>
                 </>
               )}
@@ -530,6 +558,30 @@ function TelecallerOrdersContent() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <Button onClick={handleConfirmOrder} disabled={confirmOrder.isPending}>
               {confirmOrder.isPending ? "Confirming..." : "Confirm Order"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={unconfirmTarget !== null}
+        onOpenChange={(open) => !open && setUnconfirmTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Revert order {unconfirmTarget ? unconfirmTarget.order_number : ""} to Pending?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Undoes the confirmation — the order leaves the shipment queue and goes back to
+              Pending. Only possible if fulfillment hasn&apos;t created a shipment for it yet. This
+              does not change the call status.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button onClick={handleUnconfirmOrder} disabled={unconfirmOrder.isPending}>
+              {unconfirmOrder.isPending ? "Reverting..." : "Revert Order"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

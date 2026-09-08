@@ -174,6 +174,25 @@ export function useConfirmOrder(orderId: string) {
   })
 }
 
+/** CONFIRMED -> PENDING only -- the exact inverse of `useConfirmOrder`,
+ * for undoing a mistaken confirmation. The backend blocks this (409) once
+ * a shipment already exists for the order.
+ */
+export function useUnconfirmOrder(orderId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const response = await apiClient.post<ApiResponse<OrderDetail>>(
+        `/telecaller/orders/${orderId}/unconfirm`
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+    },
+  })
+}
+
 /** Confirms every selected order independently -- the response always
  * reports a per-order result, never an all-or-nothing failure.
  */

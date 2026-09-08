@@ -2,7 +2,18 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
+import { Truck } from "lucide-react"
+import { toast } from "sonner"
 
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import type { DateRangeValue } from "@/components/shared/date-range-picker"
 import { FilterBar } from "@/components/shared/filter-bar"
@@ -18,9 +29,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import { useShipmentQueue } from "@/services/shipment-queue"
+import {
+  useBulkShipOrders,
+  useShipmentQueue,
+  useShipOrderFromQueue,
+} from "@/services/shipment-queue"
 import { useTeamTelecallers } from "@/services/team"
 import { PAYMENT_TYPE_OPTIONS } from "@/types/order"
 import {
@@ -57,6 +73,56 @@ function FulfillmentQueueContent() {
   const router = useRouter()
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
   const telecallersQuery = useTeamTelecallers()
+
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+  const [bulkShipOpen, setBulkShipOpen] = React.useState(false)
+  const shipOrder = useShipOrderFromQueue()
+  const bulkShip = useBulkShipOrders()
+
+  function toggleOne(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleAllOnPage(ids: string[]) {
+    setSelectedIds((prev) => {
+      const allSelected = ids.every((id) => prev.has(id))
+      const next = new Set(prev)
+      for (const id of ids) {
+        if (allSelected) next.delete(id)
+        else next.add(id)
+      }
+      return next
+    })
+  }
+
+  function handleShipOrder(orderId: string) {
+    shipOrder.mutate(orderId, {
+      onSuccess: () => toast.success("Shipment created via Shiprocket."),
+      onError: (error) => toast.error(getApiErrorMessage(error)),
+    })
+  }
+
+  function handleBulkShip() {
+    bulkShip.mutate(Array.from(selectedIds), {
+      onSuccess: (result) => {
+        if (result.failed_count === 0) {
+          toast.success(`${result.shipped_count} shipments created via Shiprocket.`)
+        } else {
+          toast.warning(
+            `${result.shipped_count} shipped, ${result.failed_count} could not be shipped.`
+          )
+        }
+        setBulkShipOpen(false)
+        setSelectedIds(new Set())
+      },
+      onError: (error) => toast.error(getApiErrorMessage(error)),
+    })
+  }
 
   const dateRange: DateRangeValue = {
     from: filters.date_from ? new Date(filters.date_from) : undefined,
@@ -128,18 +194,33 @@ function FulfillmentQueueContent() {
     {
       id: "actions",
       header: "",
-      cell: (r) => (
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={(e) => {
-            e.stopPropagation()
-            router.push(`/orders/${r.order_id}`)
-          }}
-        >
-          Process Shipment
-        </Button>
-      ),
+      cell: (r) =>
+        r.shipment_id ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={(e) => {
+              e.stopPropagation()
+              router.push(`/shipments/${r.shipment_id}`)
+            }}
+          >
+            Process Shipment
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={shipOrder.isPending && shipOrder.variables === r.order_id}
+            onClick={(e) => {
+              e.stopPropagation()
+              handleShipOrder(r.order_id)
+            }}
+          >
+            {shipOrder.isPending && shipOrder.variables === r.order_id
+              ? "Shipping..."
+              : "Ship via Shiprocket"}
+          </Button>
+        ),
     },
   ]
 
@@ -151,6 +232,14 @@ function FulfillmentQueueContent() {
           query.data
             ? `${query.data.meta.total_items} confirmed orders awaiting shipment processing.`
             : "Confirmed orders waiting for shipment processing."
+        }
+        actions={
+          selectedIds.size > 0 ? (
+            <Button size="sm" onClick={() => setBulkShipOpen(true)}>
+              <Truck />
+              Bulk Ship via Shiprocket ({selectedIds.size})
+            </Button>
+          ) : undefined
         }
       />
       <div className="flex flex-col gap-4">
@@ -222,6 +311,15 @@ function FulfillmentQueueContent() {
           </Button>
         )}
 
+        {selectedIds.size > 0 && (
+          <div className="bg-muted/50 border-border flex items-center justify-between rounded-lg border px-4 py-2 text-sm">
+            <span className="font-medium">{selectedIds.size} orders selected</span>
+            <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
+              Clear selection
+            </Button>
+          </div>
+        )}
+
         <QueryStates
           isLoading={query.isLoading}
           isError={query.isError}
@@ -239,6 +337,11 @@ function FulfillmentQueueContent() {
                 data={data.data}
                 rowKey={(r) => r.order_id}
                 onRowClick={(r) => router.push(`/orders/${r.order_id}`)}
+                selection={{
+                  selectedIds,
+                  onToggle: toggleOne,
+                  onToggleAll: toggleAllOnPage,
+                }}
               />
               <PaginationBar
                 meta={data.meta}
@@ -250,6 +353,28 @@ function FulfillmentQueueContent() {
           )}
         </QueryStates>
       </div>
+
+      <AlertDialog open={bulkShipOpen} onOpenChange={setBulkShipOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Ship {selectedIds.size} selected orders via Shiprocket?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Creates a Shiprocket shipment for each order (checking stock availability first).
+              Orders with insufficient stock, or that already have a shipment, are reported as
+              failed without blocking the rest. You still assign AWB and request pickup per
+              shipment afterward.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button onClick={handleBulkShip} disabled={bulkShip.isPending}>
+              {bulkShip.isPending ? "Shipping..." : "Ship Orders"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }

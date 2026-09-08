@@ -182,6 +182,25 @@ async def confirm_order(
     return ApiResponse(data=OrderDetailResponse.model_validate(order), message="Order confirmed.")
 
 
+@router.post("/orders/{order_id}/unconfirm", response_model=ApiResponse[OrderDetailResponse])
+async def unconfirm_order(
+    order_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("orders.confirm")),
+) -> ApiResponse[OrderDetailResponse]:
+    """The inverse of `confirm_order` — CONFIRMED -> PENDING only, for
+    undoing a mistaken confirmation. Same `orders.confirm` permission +
+    `assigned_to == current_user.id` check as confirming. Returns 409 once
+    a shipment already exists for the order (`OrderService.unconfirm_order`).
+    """
+    order = await TelecallingService(session).unconfirm_assigned_order(
+        order_id, actor=current_user
+    )
+    return ApiResponse(
+        data=OrderDetailResponse.model_validate(order), message="Order reverted to pending."
+    )
+
+
 @router.post("/orders/confirm", response_model=ApiResponse[BulkConfirmOrdersResponse])
 async def bulk_confirm_orders(
     payload: BulkConfirmOrdersRequest,

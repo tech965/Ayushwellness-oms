@@ -128,6 +128,51 @@ class ShiprocketOperationsService:
         await self.session.commit()
         return shipment
 
+    async def bulk_create_shipments_for_orders(
+        self, order_ids: list[uuid.UUID], *, actor: User | None
+    ) -> list[dict[str, object]]:
+        """Creates a Shiprocket shipment for each selected order
+        independently — one order's failure (not found, insufficient
+        stock, Shiprocket not configured) never blocks or rolls back the
+        rest; per-order results are returned instead of raising. Same
+        per-order-safe pattern as
+        `TelecallingService.bulk_confirm_assigned_orders`. Used by the
+        Fulfillment Queue's bulk "Ship via Shiprocket" action.
+        """
+        results: list[dict[str, object]] = []
+        for order_id in order_ids:
+            try:
+                shipment = await self.create_shipment_for_order(order_id, actor=actor)
+            except (NotFoundError, ConflictError, IntegrationError) as exc:
+                results.append(
+                    {
+                        "order_id": order_id,
+                        "success": False,
+                        "message": exc.message,
+                        "shipment_id": None,
+                    }
+                )
+            except Exception:
+                await self.session.rollback()
+                results.append(
+                    {
+                        "order_id": order_id,
+                        "success": False,
+                        "message": "Could not create a shipment for this order.",
+                        "shipment_id": None,
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "order_id": order_id,
+                        "success": True,
+                        "message": None,
+                        "shipment_id": shipment.id,
+                    }
+                )
+        return results
+
     async def assign_awb(
         self, shipment_id: uuid.UUID, *, actor: User | None, courier_id: str | None
     ) -> Shipment:

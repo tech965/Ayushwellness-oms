@@ -1,8 +1,10 @@
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
+  BulkShipOrdersResponse,
+  Shipment,
   ShipmentAnalytics,
   ShipmentQueueFilters,
   ShipmentQueueRow,
@@ -77,5 +79,50 @@ export function useShipmentAnalytics(params: ShipmentAnalyticsParams = {}) {
   return useQuery({
     queryKey: ["shipments", "analytics", params],
     queryFn: () => fetchShipmentAnalytics(params),
+  })
+}
+
+/** Row-level "Ship via Shiprocket" from the Fulfillment Queue -- the order
+ * id is passed at call time (`mutate(orderId)`) rather than baked into the
+ * hook, since one table renders many rows and a hook can't be created
+ * inside a per-row cell callback. Distinct from `useShipOrderViaShiprocket`
+ * in `services/orders.ts` (the order-detail page's single bound-id hook) --
+ * same underlying endpoint, different call shape for a different caller.
+ */
+export function useShipOrderFromQueue() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (orderId: string) => {
+      const response = await apiClient.post<ApiResponse<Shipment>>(`/orders/${orderId}/ship`, {})
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments", "summary"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments", "analytics"] })
+    },
+  })
+}
+
+/** Ships every selected confirmed order independently -- the response
+ * always reports a per-order result (insufficient stock, unknown order,
+ * etc. never blocks the rest), same convention as `useBulkConfirmOrders`.
+ */
+export function useBulkShipOrders() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (orderIds: string[]) => {
+      const response = await apiClient.post<ApiResponse<BulkShipOrdersResponse>>(
+        "/orders/bulk-ship",
+        { order_ids: orderIds }
+      )
+      if (!response.data.data) throw new Error("Bulk ship did not return a result.")
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments", "summary"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments", "analytics"] })
+    },
   })
 }

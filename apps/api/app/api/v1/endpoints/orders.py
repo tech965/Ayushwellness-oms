@@ -35,7 +35,12 @@ from app.schemas.order import (
     OrderStatusTransitionRequest,
 )
 from app.schemas.response import ApiResponse, PaginatedResponse
-from app.schemas.shipment import ShipmentResponse
+from app.schemas.shipment import (
+    BulkShipOrderResult,
+    BulkShipOrdersRequest,
+    BulkShipOrdersResponse,
+    ShipmentResponse,
+)
 from app.schemas.shiprocket import ShiprocketShipRequest
 from app.services.order_service import OrderService
 from app.services.shiprocket_service import ShiprocketOperationsService
@@ -220,6 +225,35 @@ async def add_order_event(
         order_id, actor=current_user, **payload.model_dump()
     )
     return ApiResponse(data=OrderEventResponse.model_validate(event), message="Event recorded.")
+
+
+@router.post("/bulk-ship", response_model=ApiResponse[BulkShipOrdersResponse])
+async def bulk_ship_orders_via_shiprocket(
+    payload: BulkShipOrdersRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("shipments.update")),
+) -> ApiResponse[BulkShipOrdersResponse]:
+    """Creates a Shiprocket shipment for each selected order independently
+    — the Fulfillment Queue's bulk "Ship via Shiprocket" action. One
+    order's failure (insufficient stock, unknown id, Shiprocket not
+    configured) never blocks the rest; the response reports a per-order
+    result, same shape as `POST /telecaller/orders/confirm`. `bulk-ship` is
+    a literal path segment — no existing `POST /{order_id}...` route has a
+    matching shape, so there's no route-ordering ambiguity to worry about.
+    """
+    results = await ShiprocketOperationsService(session).bulk_create_shipments_for_orders(
+        payload.order_ids, actor=current_user
+    )
+    result_items = [BulkShipOrderResult(**r) for r in results]
+    shipped_count = sum(1 for r in result_items if r.success)
+    return ApiResponse(
+        data=BulkShipOrdersResponse(
+            shipped_count=shipped_count,
+            failed_count=len(result_items) - shipped_count,
+            results=result_items,
+        ),
+        message=f"{shipped_count} of {len(result_items)} shipments created.",
+    )
 
 
 @router.post("/{order_id}/ship", response_model=ApiResponse[ShipmentResponse], status_code=201)

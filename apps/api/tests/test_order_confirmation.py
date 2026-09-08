@@ -275,3 +275,104 @@ async def test_attribution_survives_reassignment(db_session: AsyncSession) -> No
         assert order_detail.status_code == 200
         # ...but who actually confirmed the order must not change.
         assert order_detail.json()["data"]["confirmed_by_telecaller_id"] == str(telecaller.id)
+
+
+async def test_unconfirm_reverts_status_and_clears_attribution(db_session: AsyncSession) -> None:
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session, order_number="UNCONF-001", customer=customer, status=OrderStatus.PENDING
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        confirm = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+        assert confirm.status_code == 200
+
+        response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["status"] == "pending"
+        assert data["confirmed_by_telecaller_id"] is None
+        assert data["confirmed_at"] is None
+
+
+async def test_unconfirm_does_not_touch_call_status(db_session: AsyncSession) -> None:
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session, order_number="UNCONF-002", customer=customer, status=OrderStatus.PENDING
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+        await tc_client.post(
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "confirmed"}
+        )
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+
+        order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
+        # Reverting the order confirmation must never touch the logged
+        # call outcome -- the two axes stay independent both ways.
+        assert order_view.json()["data"]["call_status"] == "confirmed"
+        assert order_view.json()["data"]["status"] == "pending"
+
+
+async def test_unconfirm_rejects_order_not_assigned_to_caller(db_session: AsyncSession) -> None:
+    leader, telecaller, other_telecaller, customer = await _setup(db_session)
+    order = await make_order(
+        db_session, order_number="UNCONF-003", customer=customer, status=OrderStatus.PENDING
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
+    async with bearer_client(app, get_db, db_session, other_telecaller.id) as other_client:
+        response = await other_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 403
+
+
+async def test_unconfirm_pending_order_returns_409_not_500(db_session: AsyncSession) -> None:
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session, order_number="UNCONF-004", customer=customer, status=OrderStatus.PENDING
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        # Never confirmed -- nothing to revert.
+        response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 409
+
+
+async def test_unconfirm_blocked_once_a_shipment_exists(db_session: AsyncSession) -> None:
+    from app.models.enums import ShipmentStatus
+    from app.models.shipment import Shipment
+
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session, order_number="UNCONF-005", customer=customer, status=OrderStatus.PENDING
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
+        db_session.add(
+            Shipment(
+                order_id=order.id, current_status=ShipmentStatus.PENDING, source_system="manual"
+            )
+        )
+        await db_session.commit()
+
+        response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 409
+
+        # The order must still be confirmed -- the block must not have
+        # partially applied.
+        order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
+        assert order_view.json()["data"]["status"] == "confirmed"

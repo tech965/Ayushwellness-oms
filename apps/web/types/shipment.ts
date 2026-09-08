@@ -142,3 +142,16 @@ export interface ShipmentAnalytics {
   daily_trend: DailyShipmentTrendPoint[]
   telecaller_stats: TelecallerShipmentStats[]
 }
+
+export interface BulkShipOrderResult {
+  order_id: string
+  success: boolean
+  message: string | null
+  shipment_id: string | null
+}
+
+export interface BulkShipOrdersResponse {
+  shipped_count: number
+  failed_count: number
+  results: BulkShipOrderResult[]
+}

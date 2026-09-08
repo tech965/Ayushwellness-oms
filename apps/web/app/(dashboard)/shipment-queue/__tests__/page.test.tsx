@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import ShipmentQueuePage from "@/app/(dashboard)/shipment-queue/page"
-import { useShipmentQueue } from "@/services/shipment-queue"
+import { useBulkShipOrders, useShipmentQueue, useShipOrderFromQueue } from "@/services/shipment-queue"
 import { useTeamTelecallers } from "@/services/team"
 
 const mockPush = vi.fn()
@@ -15,8 +15,14 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }))
 
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+}))
+
 vi.mock("@/services/shipment-queue", () => ({
   useShipmentQueue: vi.fn(),
+  useShipOrderFromQueue: vi.fn(),
+  useBulkShipOrders: vi.fn(),
 }))
 
 vi.mock("@/services/team", () => ({
@@ -25,6 +31,8 @@ vi.mock("@/services/team", () => ({
 
 const mockedUseShipmentQueue = vi.mocked(useShipmentQueue)
 const mockedUseTeamTelecallers = vi.mocked(useTeamTelecallers)
+const mockedUseShipOrderFromQueue = vi.mocked(useShipOrderFromQueue)
+const mockedUseBulkShipOrders = vi.mocked(useBulkShipOrders)
 
 const ROW = {
   order_id: "order-1",
@@ -43,9 +51,22 @@ const ROW = {
   courier_name: null,
 }
 
-describe("ShipmentQueuePage", () => {
-  it("renders confirmed orders awaiting shipment with a Process Shipment action", async () => {
+function mockShipHooks() {
+  mockedUseShipOrderFromQueue.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+    variables: undefined,
+  } as unknown as ReturnType<typeof useShipOrderFromQueue>)
+  mockedUseBulkShipOrders.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useBulkShipOrders>)
+}
+
+describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
+  it("renders confirmed orders awaiting shipment with a Ship via Shiprocket action", async () => {
     const user = userEvent.setup()
+    const shipMutate = vi.fn()
     mockedUseShipmentQueue.mockReturnValue({
       isLoading: false,
       isError: false,
@@ -59,6 +80,12 @@ describe("ShipmentQueuePage", () => {
     mockedUseTeamTelecallers.mockReturnValue({
       data: [{ telecaller_id: "tc-1", telecaller_name: "Sourabh" }],
     } as unknown as ReturnType<typeof useTeamTelecallers>)
+    mockShipHooks()
+    mockedUseShipOrderFromQueue.mockReturnValue({
+      mutate: shipMutate,
+      isPending: false,
+      variables: undefined,
+    } as unknown as ReturnType<typeof useShipOrderFromQueue>)
 
     renderWithProviders(<ShipmentQueuePage />)
 
@@ -66,8 +93,8 @@ describe("ShipmentQueuePage", () => {
     expect(screen.getByText("OMS-0001")).toBeInTheDocument()
     expect(screen.getByText("Not created")).toBeInTheDocument()
 
-    await user.click(screen.getByRole("button", { name: /Process Shipment/i }))
-    expect(mockPush).toHaveBeenCalledWith("/orders/order-1")
+    await user.click(screen.getByRole("button", { name: /Ship via Shiprocket/i }))
+    expect(shipMutate).toHaveBeenCalledWith("order-1", expect.anything())
   })
 
   it("shows an empty state when there are no confirmed orders awaiting shipment", () => {
@@ -81,6 +108,7 @@ describe("ShipmentQueuePage", () => {
     mockedUseTeamTelecallers.mockReturnValue({
       data: [],
     } as unknown as ReturnType<typeof useTeamTelecallers>)
+    mockShipHooks()
 
     renderWithProviders(<ShipmentQueuePage />)
 

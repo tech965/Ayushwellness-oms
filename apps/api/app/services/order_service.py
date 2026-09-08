@@ -23,6 +23,7 @@ from app.repositories.customer import CustomerRepository
 from app.repositories.order import OrderEventRepository, OrderItemRepository, OrderRepository
 from app.repositories.payment import PaymentRepository
 from app.repositories.product import ProductVariantRepository
+from app.repositories.shipment import ShipmentRepository
 from app.schemas.common import PageParams, SortParams
 from app.schemas.order import OrderItemCreateRequest
 from app.services.audit_service import AuditService
@@ -30,7 +31,12 @@ from app.services.export_service import ExportService
 
 ORDER_STATUS_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.PENDING: {OrderStatus.CONFIRMED, OrderStatus.CANCELLED},
-    OrderStatus.CONFIRMED: {OrderStatus.PROCESSING, OrderStatus.CANCELLED},
+    # CONFIRMED -> PENDING is the telecaller "undo a mistaken confirmation"
+    # path (`unconfirm_order` below) — the only reverse transition in this
+    # table. `unconfirm_order` adds its own business-rule guard on top
+    # (blocked once a Shipment exists); this table only says the
+    # transition is structurally possible.
+    OrderStatus.CONFIRMED: {OrderStatus.PROCESSING, OrderStatus.CANCELLED, OrderStatus.PENDING},
     OrderStatus.PROCESSING: {OrderStatus.PACKED, OrderStatus.CANCELLED},
     OrderStatus.PACKED: {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
     OrderStatus.SHIPPED: {OrderStatus.DELIVERED},
@@ -48,6 +54,7 @@ class OrderService:
         self.payments = PaymentRepository(session)
         self.customers = CustomerRepository(session)
         self.variants = ProductVariantRepository(session)
+        self.shipments = ShipmentRepository(session)
         self.audit = AuditService(session)
 
     async def list_orders(
@@ -254,6 +261,40 @@ class OrderService:
         await self.orders.update(
             order, confirmed_by_telecaller_id=actor.id, confirmed_at=datetime.now(UTC)
         )
+        await self.session.commit()
+        return await self.get_order(order_id)
+
+    async def unconfirm_order(self, order_id: uuid.UUID, *, actor: User) -> Order:
+        """Reverts a mistaken telecaller confirmation — CONFIRMED ->
+        PENDING only, the exact inverse of `confirm_order`. The only
+        caller is `TelecallingService.unconfirm_assigned_order`, which
+        does its own ownership check first, same separation `confirm_order`
+        already has from its caller.
+
+        Blocked (`ConflictError`, 409) once any `Shipment` row exists for
+        this order, even one still `PENDING` — fulfillment may already be
+        working the order at that point, so the only safe undo window is
+        before a shipment is ever created; `transition_status` itself
+        blocks reverting anything that isn't currently CONFIRMED (not in
+        `ORDER_STATUS_TRANSITIONS[order.status]`).
+
+        Clears `confirmed_by_telecaller_id`/`confirmed_at` back to `None`
+        so the order stops showing as telecaller-confirmed anywhere (the
+        Fulfillment Queue, the confirmation analytics) — the permanent
+        record of "confirmed, then reverted" still lives in the
+        append-only `OrderEvent` timeline `transition_status` writes.
+        """
+        if await self.shipments.list_for_order(order_id):
+            raise ConflictError(
+                "Cannot revert to pending — a shipment already exists for this order."
+            )
+        order = await self.transition_status(
+            order_id,
+            new_status=OrderStatus.PENDING,
+            actor=actor,
+            description="Reverted to pending (unconfirmed).",
+        )
+        await self.orders.update(order, confirmed_by_telecaller_id=None, confirmed_at=None)
         await self.session.commit()
         return await self.get_order(order_id)
 

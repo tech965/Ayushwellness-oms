@@ -9,6 +9,7 @@ import {
   Pencil,
   PhoneCall,
   Trash2,
+  Undo2,
   XCircle,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -55,6 +56,7 @@ import {
   useLogCall,
   useMyOrder,
   useScheduleFollowUp,
+  useUnconfirmOrder,
 } from "@/services/telecaller"
 import {
   CALL_OUTCOME_OPTIONS,
@@ -95,8 +97,10 @@ export default function TelecallerOrderDetailPage() {
   const editCallAttempt = useEditCallAttempt(orderId)
   const deleteCallAttempt = useDeleteCallAttempt(orderId)
   const confirmOrder = useConfirmOrder(orderId)
+  const unconfirmOrder = useUnconfirmOrder(orderId)
 
   const [confirmOrderOpen, setConfirmOrderOpen] = React.useState(false)
+  const [unconfirmOrderOpen, setUnconfirmOrderOpen] = React.useState(false)
 
   function handleConfirmOrder() {
     confirmOrder.mutate(undefined, {
@@ -107,6 +111,19 @@ export default function TelecallerOrderDetailPage() {
       onError: (error) => {
         toast.error(getApiErrorMessage(error))
         setConfirmOrderOpen(false)
+      },
+    })
+  }
+
+  function handleUnconfirmOrder() {
+    unconfirmOrder.mutate(undefined, {
+      onSuccess: () => {
+        toast.success("Order reverted to pending.")
+        setUnconfirmOrderOpen(false)
+      },
+      onError: (error) => {
+        toast.error(getApiErrorMessage(error))
+        setUnconfirmOrderOpen(false)
       },
     })
   }
@@ -281,6 +298,22 @@ export default function TelecallerOrderDetailPage() {
                     <p className="text-muted-foreground mt-1.5 text-xs">
                       Separate from call outcome — this marks the order ready for the
                       shipment team and does not log a call.
+                    </p>
+                  </CardContent>
+                )}
+                {order.status === "confirmed" && (
+                  <CardContent className="border-border border-t pt-4">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setUnconfirmOrderOpen(true)}
+                    >
+                      <Undo2 className="size-4" />
+                      Revert to Pending
+                    </Button>
+                    <p className="text-muted-foreground mt-1.5 text-xs">
+                      Confirmed and ready for shipment. Only revertible if fulfillment hasn&apos;t
+                      created a shipment for it yet.
                     </p>
                   </CardContent>
                 )}
@@ -618,6 +651,25 @@ export default function TelecallerOrderDetailPage() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <Button onClick={handleConfirmOrder} disabled={confirmOrder.isPending}>
               {confirmOrder.isPending ? "Confirming..." : "Confirm Order"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={unconfirmOrderOpen} onOpenChange={setUnconfirmOrderOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revert this order to pending?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Undoes the confirmation — the order leaves the shipment queue and goes back to
+              Pending. Only possible if fulfillment hasn&apos;t created a shipment for it yet. This
+              does not change the call status.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button onClick={handleUnconfirmOrder} disabled={unconfirmOrder.isPending}>
+              {unconfirmOrder.isPending ? "Reverting..." : "Revert Order"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

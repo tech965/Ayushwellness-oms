@@ -12,6 +12,7 @@ import {
   useLogCall,
   useMyOrder,
   useScheduleFollowUp,
+  useUnconfirmOrder,
 } from "@/services/telecaller"
 
 vi.mock("next/navigation", () => ({
@@ -28,6 +29,7 @@ vi.mock("@/services/telecaller", () => ({
   useEditCallAttempt: vi.fn(),
   useDeleteCallAttempt: vi.fn(),
   useConfirmOrder: vi.fn(),
+  useUnconfirmOrder: vi.fn(),
 }))
 
 const mockedUseMyOrder = vi.mocked(useMyOrder)
@@ -37,6 +39,7 @@ const mockedUseScheduleFollowUp = vi.mocked(useScheduleFollowUp)
 const mockedUseEditCallAttempt = vi.mocked(useEditCallAttempt)
 const mockedUseDeleteCallAttempt = vi.mocked(useDeleteCallAttempt)
 const mockedUseConfirmOrder = vi.mocked(useConfirmOrder)
+const mockedUseUnconfirmOrder = vi.mocked(useUnconfirmOrder)
 
 const ORDER = {
   order_id: "order-1",
@@ -100,6 +103,10 @@ function mockCommonHooks() {
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useConfirmOrder>)
+  mockedUseUnconfirmOrder.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useUnconfirmOrder>)
 }
 
 describe("TelecallerOrderDetailPage", () => {
@@ -272,5 +279,48 @@ describe("TelecallerOrderDetailPage", () => {
     renderWithProviders(<TelecallerOrderDetailPage />)
 
     expect(screen.queryByText("Confirm Order for Shipment")).not.toBeInTheDocument()
+  })
+
+  it("shows a Revert to Pending action for a confirmed order and calls unconfirm", async () => {
+    const user = userEvent.setup()
+    const unconfirmMutate = vi.fn((_vars, opts) => opts.onSuccess())
+
+    mockCommonHooks()
+    mockedUseMyOrder.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: { ...ORDER, status: "confirmed" },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useMyOrder>)
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseUnconfirmOrder.mockReturnValue({
+      mutate: unconfirmMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUnconfirmOrder>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("Revert to Pending")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /^Revert to Pending$/i }))
+    expect(screen.getByText("Revert this order to pending?")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /^Revert Order$/i }))
+    expect(unconfirmMutate).toHaveBeenCalledWith(undefined, expect.anything())
+  })
+
+  it("hides Revert to Pending for a pending order", () => {
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.queryByText("Revert to Pending")).not.toBeInTheDocument()
   })
 })

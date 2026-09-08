@@ -1035,6 +1035,19 @@ class TelecallingService:
                 results.append({"order_id": order_id, "success": True, "message": None})
         return results
 
+    async def unconfirm_assigned_order(self, order_id: uuid.UUID, *, actor: User) -> Order:
+        """The exact inverse of `confirm_assigned_order` — reverts a
+        mistaken confirmation back to PENDING. Same ownership check
+        (`assigned_to == actor.id` unless superuser); the actual revert +
+        attribution cleanup is `OrderService.unconfirm_order`'s job.
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+        return await self.order_service.unconfirm_order(order_id, actor=actor)
+
     # ------------------------------------------------------------------
     # Checkout calling / follow-up mutations — `log_call`/
     # `schedule_follow_up`'s exact counterparts.
