@@ -2,7 +2,14 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { CalendarClock, CheckCircle2, History, MoreVertical, PhoneCall } from "lucide-react"
+import {
+  CalendarClock,
+  CheckCircle2,
+  History,
+  MoreVertical,
+  PackageCheck,
+  PhoneCall,
+} from "lucide-react"
 import { toast } from "sonner"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
@@ -33,6 +40,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
@@ -50,6 +58,7 @@ import { useUrlFilters } from "@/lib/use-url-filters"
 import {
   useBulkConfirmOrders,
   useCallHistory,
+  useConfirmOrder,
   useLogCall,
   useMyOrders,
   useScheduleFollowUp,
@@ -99,6 +108,9 @@ function TelecallerOrdersContent() {
 
   const [historyTarget, setHistoryTarget] = React.useState<AssignedOrder | null>(null)
   const historyQuery = useCallHistory(historyTarget?.order_id ?? "")
+
+  const [confirmTarget, setConfirmTarget] = React.useState<AssignedOrder | null>(null)
+  const confirmOrder = useConfirmOrder(confirmTarget?.order_id ?? "")
 
   function toggleOne(id: string) {
     setSelectedIds((prev) => {
@@ -165,6 +177,20 @@ function TelecallerOrdersContent() {
     })
   }
 
+  function handleConfirmOrder() {
+    if (!confirmTarget) return
+    confirmOrder.mutate(undefined, {
+      onSuccess: () => {
+        toast.success("Order confirmed — ready for shipment.")
+        setConfirmTarget(null)
+      },
+      onError: (error) => {
+        toast.error(getApiErrorMessage(error))
+        setConfirmTarget(null)
+      },
+    })
+  }
+
   const columns: DataTableColumn<AssignedOrder>[] = [
     {
       id: "order_number",
@@ -197,6 +223,11 @@ function TelecallerOrdersContent() {
       cell: (o) => (
         <StatusBadge domain="telecalling" status={o.call_status ?? "not_called"} />
       ),
+    },
+    {
+      id: "status",
+      header: "Order Status",
+      cell: (o) => <StatusBadge domain="order" status={o.status} />,
     },
     {
       id: "attempt_count",
@@ -248,6 +279,15 @@ function TelecallerOrdersContent() {
               <DropdownMenuItem onSelect={() => router.push(`/telecaller/orders/${o.order_id}`)}>
                 View Order
               </DropdownMenuItem>
+              {o.status === "pending" && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={() => setConfirmTarget(o)}>
+                    <PackageCheck />
+                    Confirm Order
+                  </DropdownMenuItem>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -467,6 +507,29 @@ function TelecallerOrdersContent() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <Button onClick={handleBulkConfirm} disabled={bulkConfirm.isPending}>
               {bulkConfirm.isPending ? "Confirming..." : "Confirm Orders"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={confirmTarget !== null}
+        onOpenChange={(open) => !open && setConfirmTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Confirm order {confirmTarget ? confirmTarget.order_number : ""}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This marks the order ready for shipment. It does not create a shipment and does
+              not change the call status.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button onClick={handleConfirmOrder} disabled={confirmOrder.isPending}>
+              {confirmOrder.isPending ? "Confirming..." : "Confirm Order"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

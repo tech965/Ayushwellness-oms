@@ -5,6 +5,7 @@ import { useParams } from "next/navigation"
 import {
   CalendarClock,
   CheckCircle2,
+  PackageCheck,
   Pencil,
   PhoneCall,
   Trash2,
@@ -48,6 +49,7 @@ import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDateTime, formatMoney } from "@/lib/format"
 import {
   useCallHistory,
+  useConfirmOrder,
   useDeleteCallAttempt,
   useEditCallAttempt,
   useLogCall,
@@ -92,6 +94,22 @@ export default function TelecallerOrderDetailPage() {
   const scheduleFollowUp = useScheduleFollowUp(orderId)
   const editCallAttempt = useEditCallAttempt(orderId)
   const deleteCallAttempt = useDeleteCallAttempt(orderId)
+  const confirmOrder = useConfirmOrder(orderId)
+
+  const [confirmOrderOpen, setConfirmOrderOpen] = React.useState(false)
+
+  function handleConfirmOrder() {
+    confirmOrder.mutate(undefined, {
+      onSuccess: () => {
+        toast.success("Order confirmed — ready for shipment.")
+        setConfirmOrderOpen(false)
+      },
+      onError: (error) => {
+        toast.error(getApiErrorMessage(error))
+        setConfirmOrderOpen(false)
+      },
+    })
+  }
 
   const [logCallOpen, setLogCallOpen] = React.useState(false)
   const [followUpOpen, setFollowUpOpen] = React.useState(false)
@@ -249,7 +267,23 @@ export default function TelecallerOrderDetailPage() {
                       />
                     }
                   />
+                  <SummaryStat
+                    label="Order Status"
+                    value={<StatusBadge domain="order" status={order.status} />}
+                  />
                 </CardContent>
+                {order.status === "pending" && (
+                  <CardContent className="border-border border-t pt-4">
+                    <Button size="sm" onClick={() => setConfirmOrderOpen(true)}>
+                      <PackageCheck className="size-4" />
+                      Confirm Order for Shipment
+                    </Button>
+                    <p className="text-muted-foreground mt-1.5 text-xs">
+                      Separate from call outcome — this marks the order ready for the
+                      shipment team and does not log a call.
+                    </p>
+                  </CardContent>
+                )}
               </Card>
 
               <Card>
@@ -566,6 +600,24 @@ export default function TelecallerOrderDetailPage() {
               disabled={deleteCallAttempt.isPending}
             >
               {deleteCallAttempt.isPending ? "Deleting..." : "Delete"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={confirmOrderOpen} onOpenChange={setConfirmOrderOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm this order?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This marks the order ready for shipment. It does not create a shipment and does
+              not change the call status.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button onClick={handleConfirmOrder} disabled={confirmOrder.isPending}>
+              {confirmOrder.isPending ? "Confirming..." : "Confirm Order"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

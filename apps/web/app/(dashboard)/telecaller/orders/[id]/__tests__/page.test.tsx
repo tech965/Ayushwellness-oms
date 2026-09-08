@@ -6,6 +6,7 @@ import { renderWithProviders } from "@/test-utils/render-with-providers"
 import TelecallerOrderDetailPage from "@/app/(dashboard)/telecaller/orders/[id]/page"
 import {
   useCallHistory,
+  useConfirmOrder,
   useDeleteCallAttempt,
   useEditCallAttempt,
   useLogCall,
@@ -26,6 +27,7 @@ vi.mock("@/services/telecaller", () => ({
   useScheduleFollowUp: vi.fn(),
   useEditCallAttempt: vi.fn(),
   useDeleteCallAttempt: vi.fn(),
+  useConfirmOrder: vi.fn(),
 }))
 
 const mockedUseMyOrder = vi.mocked(useMyOrder)
@@ -34,6 +36,7 @@ const mockedUseLogCall = vi.mocked(useLogCall)
 const mockedUseScheduleFollowUp = vi.mocked(useScheduleFollowUp)
 const mockedUseEditCallAttempt = vi.mocked(useEditCallAttempt)
 const mockedUseDeleteCallAttempt = vi.mocked(useDeleteCallAttempt)
+const mockedUseConfirmOrder = vi.mocked(useConfirmOrder)
 
 const ORDER = {
   order_id: "order-1",
@@ -44,7 +47,10 @@ const ORDER = {
   total_amount: "499.00",
   payment_type: "prepaid",
   payment_status: "paid",
+  status: "pending",
   fulfillment_status: "unfulfilled",
+  confirmed_at: null,
+  confirmed_by_telecaller_id: null,
   order_datetime: "2026-08-01T00:00:00Z",
   shipping_address: null,
   assignment_id: "assign-1",
@@ -90,6 +96,10 @@ function mockCommonHooks() {
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useScheduleFollowUp>)
+  mockedUseConfirmOrder.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useConfirmOrder>)
 }
 
 describe("TelecallerOrderDetailPage", () => {
@@ -213,5 +223,54 @@ describe("TelecallerOrderDetailPage", () => {
 
     await user.click(screen.getByRole("button", { name: /^Delete$/i }))
     expect(deleteMutate).toHaveBeenCalledWith("call-1", expect.anything())
+  })
+
+  it("shows a Confirm Order action for a pending order, separate from call outcome", async () => {
+    const user = userEvent.setup()
+    const confirmMutate = vi.fn((_vars, opts) => opts.onSuccess())
+    const logCallMutate = vi.fn()
+
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: logCallMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseConfirmOrder.mockReturnValue({
+      mutate: confirmMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useConfirmOrder>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("Confirm Order for Shipment")).toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /^Confirm Order for Shipment$/i }))
+    expect(screen.getByText("Confirm this order?")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /^Confirm Order$/i }))
+    expect(confirmMutate).toHaveBeenCalledWith(undefined, expect.anything())
+
+    // Marking a call outcome must never call the order-confirm mutation.
+    await user.click(screen.getByRole("button", { name: /Mark Confirmed/i }))
+    expect(logCallMutate).toHaveBeenCalledWith({ outcome: "confirmed" }, expect.anything())
+    expect(confirmMutate).toHaveBeenCalledTimes(1)
+  })
+
+  it("hides Confirm Order once the order is already confirmed", () => {
+    mockCommonHooks()
+    mockedUseMyOrder.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: { ...ORDER, status: "confirmed" },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useMyOrder>)
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.queryByText("Confirm Order for Shipment")).not.toBeInTheDocument()
   })
 })
