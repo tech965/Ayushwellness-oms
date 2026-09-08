@@ -74,22 +74,20 @@ class ProductService:
                 source_system=source_system,
                 external_id=variant_external_id,
             )
-            db_variant, variant_created = await self.variants.upsert_by_external_id(
+            # `available_quantity` (the OMS-authoritative stock count, see
+            # `app.services.inventory_service.InventoryService`) is
+            # deliberately never in `variant` here -- the Shopify
+            # normalizer only ever produces `inventory_quantity` (the
+            # passive Shopify mirror, kept above). A newly created variant
+            # therefore starts at its column default (0 boxes) and, from
+            # then on, only ever moves via `InventoryService` (Shiprocket
+            # dispatch/RTO, or a manual adjustment) -- never from Shopify.
+            await self.variants.upsert_by_external_id(
                 source_system=source_system,
                 external_id=variant_external_id,
                 product_id=product.id,
                 **variant,
             )
-            if variant_created:
-                # `available_quantity` is the OMS-authoritative stock count
-                # (app.services.inventory_service.InventoryService) --
-                # seeded from Shopify's count once, at first sync, and
-                # never again, so a later resync can't stomp on local
-                # dispatch/RTO adjustments. `inventory_quantity` above
-                # keeps mirroring Shopify on every sync as before.
-                await self.variants.update(
-                    db_variant, available_quantity=db_variant.inventory_quantity
-                )
 
         await self.session.commit()
         return product, created

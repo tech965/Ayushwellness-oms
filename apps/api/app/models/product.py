@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, JSONType, TimestampMixin, UUIDPrimaryKeyMixin
@@ -47,6 +47,7 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
         UniqueConstraint(
             "source_system", "external_id", name="uq_product_variants_source_external_id"
         ),
+        CheckConstraint("packets_per_box > 0", name="ck_product_variants_packets_per_box_positive"),
     )
 
     product_id: Mapped[uuid.UUID] = mapped_column(
@@ -62,14 +63,29 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
     inventory_quantity: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
-    # OMS-authoritative stock count -- unlike `inventory_quantity` above
-    # (a passive Shopify mirror, overwritten on every product sync), this
-    # is seeded from Shopify once at first sync and afterwards only ever
-    # moved by `InventoryService` (dispatch decrement, RTO restock, manual
-    # adjustment) via `InventoryMovement`. Never rewritten by a resync --
-    # see `ProductService.upsert_synced_product`.
+    # OMS-authoritative stock count, in BOXES (exposed as `available_boxes`
+    # at the API/UI layer -- kept as `available_quantity` at the DB/model
+    # layer to avoid an unnecessary rename migration). Unlike
+    # `inventory_quantity` above (a passive Shopify mirror, overwritten on
+    # every product sync), this is seeded from Shopify once at first sync
+    # and afterwards only ever moved by `InventoryService` (dispatch
+    # decrement, RTO restock, manual adjustment) via `InventoryMovement`.
+    # Never rewritten by a resync -- see `ProductService.upsert_synced_product`.
+    # Shopify's `inventory_quantity` is NEVER used in any box/stock
+    # calculation -- see `InventoryService` module docstring.
     available_quantity: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
+    )
+    # How many packets make up one box for THIS variant -- deliberately
+    # per-variant, never a global constant (different products/variants
+    # pack differently). Defaults to 1 for every pre-existing row so a
+    # variant with no real pack-size configured yet behaves exactly as
+    # before (1 packet == 1 box) rather than silently reinterpreting its
+    # existing `available_quantity`. Changing this value only changes the
+    # packets<->boxes conversion/display -- it never itself moves
+    # `available_quantity` (see `InventoryService.update_packets_per_box`).
+    packets_per_box: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
     )
     weight: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)

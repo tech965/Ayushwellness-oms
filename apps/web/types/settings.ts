@@ -53,6 +53,13 @@ export interface AppearanceSettings {
   table_density: "compact" | "comfortable"
 }
 
+export interface InventorySettings {
+  /** Boxes at or below this are LOW_STOCK (0 is always OUT_OF_STOCK
+   * regardless of this value) -- see `StockStatus` in types/inventory.ts.
+   */
+  low_stock_threshold: number
+}
+
 export interface AppSettingsData {
   general: GeneralSettings
   orders: OrderSettings
@@ -61,6 +68,7 @@ export interface AppSettingsData {
   dashboard: DashboardSettings
   security: SecuritySettings
   appearance: AppearanceSettings
+  inventory: InventorySettings
 }
 
 export interface AppSettingsResponse {

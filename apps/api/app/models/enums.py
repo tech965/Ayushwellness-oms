@@ -136,6 +136,17 @@ class InventoryMovementType(StrEnum):
     INITIAL_STOCK = "initial_stock"
 
 
+class StockStatus(StrEnum):
+    """Computed from `available_quantity` (boxes) vs. the configured
+    `AppSettings.values.inventory.low_stock_threshold` -- never persisted,
+    same convention as `LeadPriority` (see that enum's docstring).
+    """
+
+    IN_STOCK = "in_stock"
+    LOW_STOCK = "low_stock"
+    OUT_OF_STOCK = "out_of_stock"
+
+
 class IntegrationType(StrEnum):
     ECOMMERCE = "ecommerce"
     COURIER = "courier"

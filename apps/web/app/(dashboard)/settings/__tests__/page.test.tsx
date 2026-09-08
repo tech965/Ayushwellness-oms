@@ -61,6 +61,7 @@ const SETTINGS_DATA: AppSettingsResponse = {
     },
     security: { session_timeout_minutes: 60 },
     appearance: { table_density: "comfortable" },
+    inventory: { low_stock_threshold: 5 },
   },
   updated_at: null,
   updated_by_email: null,

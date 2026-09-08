@@ -1,57 +1,132 @@
-"""OMS-authoritative stock tracking.
+"""OMS-authoritative stock tracking, in BOXES.
 
-`ProductVariant.available_quantity` starts out seeded from Shopify (see
-`ProductService.upsert_synced_product`) and from then on is only ever
-moved from here: down on dispatch, up on RTO restock, or by a staff
-manual adjustment. Every move writes exactly one `InventoryMovement` row
--- the ledger is the audit trail and, for the two automatic movement
-types, also the idempotency guard (see `apply_dispatch`/
-`apply_rto_restock`).
+Inventory is owned and controlled entirely by the OMS. The only external
+signal that ever moves `ProductVariant.available_quantity` (boxes) is
+Shiprocket shipment/RTO status, via `apply_dispatch`/`apply_rto_restock`
+below (called from `app.integrations.shiprocket.sync.apply_tracking_event`
+and `app.services.rto_service.RTOService.update_rto`). Shopify's own
+`inventory_quantity` is a passive reference field only -- it is NEVER
+read by any calculation in this module, never seeds/initializes OMS
+stock (a newly-created `ProductVariant` starts at its column default, 0
+boxes -- see `ProductService.upsert_synced_product`), and this module
+never writes back to Shopify. From creation on, `available_quantity` is
+only ever moved from here: down on dispatch, up on RTO restock, or by a
+staff manual adjustment. Every move writes exactly one `InventoryMovement`
+row -- the ledger is the audit trail and, for the two automatic movement
+types, also the idempotency guard (see `apply_dispatch`/`apply_rto_restock`).
+
+`OrderItem.quantity` is in PACKETS. Each variant configures its own
+`packets_per_box` (never a hardcoded constant); a dispatch/restock
+converts packets -> boxes via ceiling division (`_ceil_div`) -- a
+partially-consumed box still consumes one whole box-equivalent of
+physical stock.
+
+Idempotency: `OrderItem` has no per-shipment/per-RTO quantity split (it
+only ever records the order line's full quantity), so a dispatch/restock
+is necessarily an order-scoped event applied once per (order, variant,
+movement type) -- this is the correct behaviour for this data model, not
+a simplification, since there is no way to know which of an order's
+items went into which of the order's shipments if it ever has more than
+one (the schema does not forbid that -- see `Shipment.order_id`/
+`RTO.order_id`, plain non-unique foreign keys). The `exists_for_order`
+check alone is only safe against sequential re-fires (a shipment
+advancing through several statuses, a pull-sync re-scan); it is NOT
+sufficient against two concurrent transactions racing the same check.
+`inventory_movements` therefore also carries a DB-level
+`UniqueConstraint("product_variant_id", "order_id", "movement_type")`
+(see `app.models.inventory.InventoryMovement`) as the actual safety net
+-- `apply_dispatch`/`apply_rto_restock` wrap their write in a SAVEPOINT
+(`session.begin_nested()`) and treat the resulting `IntegrityError` as
+"another transaction already recorded this movement," never as a
+failure. Manual adjustments/initial-stock rows always have `order_id
+IS NULL`, and NULL never collides with itself in a SQL unique
+constraint, so this never restricts them.
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.models.auth import User
-from app.models.enums import InventoryMovementType
+from app.models.enums import InventoryMovementType, StockStatus
 from app.models.inventory import InventoryMovement
-from app.models.product import ProductVariant
-from app.repositories.inventory import InventoryMovementRepository, InventoryStockRepository
+from app.models.product import Product, ProductVariant
+from app.models.settings import AppSettings
+from app.repositories.inventory import (
+    InventoryMovementRepository,
+    InventoryProductRepository,
+    InventoryStockRepository,
+)
 from app.repositories.order import OrderItemRepository
 from app.repositories.product import ProductVariantRepository
 from app.schemas.common import PageParams, SortParams
+from app.schemas.settings import AppSettingsData
 from app.services.audit_service import AuditService
 
 logger = get_logger(__name__)
 
 
+def _ceil_div(numerator: int, denominator: int) -> int:
+    """Exact integer ceiling division -- 130 packets / 60 per box = 3
+    boxes (not 2.166..., and not truncated to 2).
+    """
+    return -(-numerator // denominator)
+
+
 class InventoryService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self.products = InventoryProductRepository(session)
         self.stock = InventoryStockRepository(session)
         self.variants = ProductVariantRepository(session)
         self.movements = InventoryMovementRepository(session)
         self.order_items = OrderItemRepository(session)
         self.audit = AuditService(session)
 
-    async def list_stock(
-        self,
-        *,
-        page_params: PageParams,
-        sort_params: SortParams,
-        q: str | None = None,
-        low_stock_only: bool = False,
-    ) -> tuple[list[ProductVariant], int]:
-        query = self.stock.search_query(q=q, low_stock_only=low_stock_only)
-        items, total = await self.stock.list(
-            page_params=page_params, sort_params=sort_params, query=query
+    # --- reads ----------------------------------------------------------
+
+    async def get_low_stock_threshold(self) -> int:
+        row = (
+            await self.session.execute(select(AppSettings).limit(1))
+        ).scalar_one_or_none()
+        values = row.values if row is not None else {}
+        return AppSettingsData.model_validate(values or {}).inventory.low_stock_threshold
+
+    @staticmethod
+    def compute_stock_status(available_boxes: int, threshold: int) -> StockStatus:
+        if available_boxes <= 0:
+            return StockStatus.OUT_OF_STOCK
+        if available_boxes <= threshold:
+            return StockStatus.LOW_STOCK
+        return StockStatus.IN_STOCK
+
+    async def list_products(
+        self, *, page_params: PageParams, sort_params: SortParams, q: str | None = None
+    ) -> tuple[list[Product], int]:
+        query = self.products.search_query(q=q)
+        items, total = await self.products.list(
+            page_params=page_params,
+            sort_params=sort_params,
+            query=query,
+            default_sort_column="title",
         )
         return list(items), total
+
+    async def list_variants_for_product(
+        self, product_id: uuid.UUID
+    ) -> tuple[Product, list[ProductVariant]]:
+        product = await self.session.get(Product, product_id)
+        if product is None:
+            raise NotFoundError("Product not found.")
+        variants = await self.variants.list_for_product(product_id)
+        return product, variants
 
     async def get_variant_stock(self, variant_id: uuid.UUID) -> ProductVariant:
         variant = await self.stock.get_by_id_with_product(variant_id)
@@ -65,11 +140,19 @@ class InventoryService:
         page_params: PageParams,
         sort_params: SortParams,
         product_variant_id: uuid.UUID | None = None,
+        product_id: uuid.UUID | None = None,
         order_id: uuid.UUID | None = None,
         movement_type: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
     ) -> tuple[list[InventoryMovement], int]:
         query = self.movements.search_query(
-            product_variant_id=product_variant_id, order_id=order_id, movement_type=movement_type
+            product_variant_id=product_variant_id,
+            product_id=product_id,
+            order_id=order_id,
+            movement_type=movement_type,
+            date_from=date_from,
+            date_to=date_to,
         )
         items, total = await self.movements.list(
             page_params=page_params, sort_params=sort_params, query=query
@@ -81,42 +164,61 @@ class InventoryService:
         (`ShiprocketOperationsService.create_shipment_for_order`) — does
         NOT move any stock (that only ever happens on confirmed dispatch,
         `apply_dispatch`), purely a read. Returns the list of line items
-        that resolve to a real variant but don't have enough
-        `available_quantity`; empty means "ok to ship". Mirrors
-        `apply_dispatch`'s own leniency for a SKU that can't be resolved
-        to any variant at all (logged there, silently skipped here too)
-        — an unresolvable SKU is a data-linking gap, not proof of an
-        actual stock shortage, so it must never block a real shipment.
+        that resolve to a real variant but don't have enough stock;
+        empty means "ok to ship".
+
+        Everything here is in BOXES, and the box requirement per line is
+        computed exactly the way `apply_dispatch` will deduct it -- a
+        ceiling division of the line's packet quantity by the variant's
+        `packets_per_box` -- so this pre-flight check and the eventual
+        deduction can never disagree. A zero-quantity line requires
+        nothing and is skipped, same as in `apply_dispatch`.
+
+        Mirrors `apply_dispatch`'s own leniency for a SKU that can't be
+        resolved to any variant at all (logged there, silently skipped
+        here too) — an unresolvable SKU is a data-linking gap, not proof
+        of an actual stock shortage, so it must never block a real
+        shipment.
         """
         items = await self.order_items.list_for_order(order_id)
         shortages: list[dict[str, object]] = []
         for item in items:
+            if item.quantity <= 0:
+                continue
             variant = await self._resolve_variant(
                 product_variant_id=item.product_variant_id, sku=item.sku
             )
             if variant is None:
                 continue
-            if variant.available_quantity < item.quantity:
+            required_boxes = _ceil_div(item.quantity, variant.packets_per_box)
+            if variant.available_quantity < required_boxes:
                 shortages.append(
                     {
                         "sku": item.sku,
                         "product_name": item.product_name,
                         "available": variant.available_quantity,
-                        "required": item.quantity,
+                        "required": required_boxes,
+                        "required_packets": item.quantity,
                     }
                 )
         return shortages
+
+    # --- automatic movements (Shiprocket-driven only) --------------------
 
     async def apply_dispatch(self, *, order_id: uuid.UUID, shipment_id: uuid.UUID) -> None:
         """Called once a shipment's courier tracking first reaches a
         dispatched-or-later status (`app.integrations.shiprocket.sync.
         apply_tracking_event`). Decrements every resolvable order line
-        item's variant, once per (order, variant) -- safe to call again
-        for the same order as tracking advances through later statuses
-        (IN_TRANSIT, DELIVERED, ...) or on a pull-sync re-scan.
+        item's variant by the box-equivalent of its packet quantity, once
+        per (order, variant) -- safe to call again for the same order as
+        tracking advances through later statuses (IN_TRANSIT, DELIVERED,
+        ...) or on a pull-sync re-scan; never reads anything from Shopify.
         """
         items = await self.order_items.list_for_order(order_id)
         for item in items:
+            if item.quantity <= 0:
+                continue
+
             variant = await self._resolve_variant(
                 product_variant_id=item.product_variant_id, sku=item.sku
             )
@@ -125,25 +227,54 @@ class InventoryService:
                     "inventory_dispatch_unresolved_sku", order_id=str(order_id), sku=item.sku
                 )
                 continue
+            # Captured up front: a SAVEPOINT rollback below expires every
+            # attribute `begin_nested()` touched, `variant.id` included --
+            # under `AsyncSession`, re-reading an expired attribute needs
+            # an explicit awaited reload, so a plain `variant.id` access
+            # AFTER that rollback (e.g. in the `except` block's log call)
+            # raises `MissingGreenlet`. Everything after this point uses
+            # `variant_id`, never `variant.id`.
+            variant_id = variant.id
 
             already_moved = await self.movements.exists_for_order(
                 order_id=order_id,
-                product_variant_id=variant.id,
+                product_variant_id=variant_id,
                 movement_type=InventoryMovementType.DISPATCH,
             )
             if already_moved:
                 continue
 
-            new_quantity = variant.available_quantity - item.quantity
-            await self.variants.update(variant, available_quantity=new_quantity)
-            await self.movements.create(
-                product_variant_id=variant.id,
-                movement_type=InventoryMovementType.DISPATCH,
-                quantity_delta=-item.quantity,
-                quantity_after=new_quantity,
-                order_id=order_id,
-                shipment_id=shipment_id,
-            )
+            boxes = _ceil_div(item.quantity, variant.packets_per_box)
+            new_quantity = variant.available_quantity - boxes
+            try:
+                # SAVEPOINT, not a bare write: `exists_for_order` above is
+                # only a snapshot-time check -- a concurrent transaction
+                # (a second tracking event, a webhook racing a pull-sync
+                # re-scan) can pass that same check before either commits.
+                # The `inventory_movements` unique constraint on
+                # (product_variant_id, order_id, movement_type) is the
+                # real safety net; a nested transaction here means losing
+                # that race only unwinds THIS item's attempted change,
+                # never the whole method's already-processed items or the
+                # caller's own transaction (see module docstring).
+                async with self.session.begin_nested():
+                    await self.variants.update(variant, available_quantity=new_quantity)
+                    await self.movements.create(
+                        product_variant_id=variant_id,
+                        movement_type=InventoryMovementType.DISPATCH,
+                        quantity_delta=-boxes,
+                        quantity_after=new_quantity,
+                        order_id=order_id,
+                        shipment_id=shipment_id,
+                        reason="Shiprocket dispatch",
+                    )
+            except IntegrityError:
+                logger.info(
+                    "inventory_dispatch_lost_race",
+                    order_id=str(order_id),
+                    product_variant_id=str(variant_id),
+                )
+                continue
 
         # Unconditional, even when nothing moved -- a read-only SELECT
         # (`order_items.list_for_order`) still opens a transaction, and
@@ -160,9 +291,24 @@ class InventoryService:
         confirmed received back at the warehouse (`RTOStatus.RECEIVED`) --
         either derived automatically from tracking or set manually via
         `RTOService.update_rto`.
+
+        Restocks the EXACT box quantity this order+variant's own
+        `DISPATCH` movement removed, read back from the ledger -- not a
+        fresh `packets / packets_per_box` conversion. `packets_per_box`
+        is editable at any time (`update_packets_per_box`), and it must
+        never retroactively change what an already-recorded dispatch is
+        worth: if 120 packets were dispatched at 60/box (-2 boxes) and
+        `packets_per_box` is later changed to 30, the RTO restock must
+        still be +2 boxes, not +4. Falls back to a fresh conversion using
+        the variant's current `packets_per_box` only when no matching
+        dispatch was ever recorded through this OMS (a historical/edge
+        case) -- the best information available at that point.
         """
         items = await self.order_items.list_for_order(order_id)
         for item in items:
+            if item.quantity <= 0:
+                continue
+
             variant = await self._resolve_variant(
                 product_variant_id=item.product_variant_id, sku=item.sku
             )
@@ -171,49 +317,87 @@ class InventoryService:
                     "inventory_rto_restock_unresolved_sku", order_id=str(order_id), sku=item.sku
                 )
                 continue
+            # See the matching comment in `apply_dispatch` -- captured up
+            # front so the `except` block never touches a possibly-expired
+            # `variant`.
+            variant_id = variant.id
 
             already_moved = await self.movements.exists_for_order(
                 order_id=order_id,
-                product_variant_id=variant.id,
+                product_variant_id=variant_id,
                 movement_type=InventoryMovementType.RTO_RESTOCK,
             )
             if already_moved:
                 continue
 
-            new_quantity = variant.available_quantity + item.quantity
-            await self.variants.update(variant, available_quantity=new_quantity)
-            await self.movements.create(
-                product_variant_id=variant.id,
-                movement_type=InventoryMovementType.RTO_RESTOCK,
-                quantity_delta=item.quantity,
-                quantity_after=new_quantity,
+            dispatch_movement = await self.movements.get_for_order(
                 order_id=order_id,
-                rto_id=rto_id,
+                product_variant_id=variant_id,
+                movement_type=InventoryMovementType.DISPATCH,
             )
+            if dispatch_movement is not None:
+                boxes = abs(dispatch_movement.quantity_delta)
+            else:
+                boxes = _ceil_div(item.quantity, variant.packets_per_box)
+
+            new_quantity = variant.available_quantity + boxes
+            try:
+                # See the matching comment in `apply_dispatch` -- same
+                # SAVEPOINT + unique-constraint race protection.
+                async with self.session.begin_nested():
+                    await self.variants.update(variant, available_quantity=new_quantity)
+                    await self.movements.create(
+                        product_variant_id=variant_id,
+                        movement_type=InventoryMovementType.RTO_RESTOCK,
+                        quantity_delta=boxes,
+                        quantity_after=new_quantity,
+                        order_id=order_id,
+                        rto_id=rto_id,
+                        reason="Shiprocket RTO received",
+                    )
+            except IntegrityError:
+                logger.info(
+                    "inventory_rto_restock_lost_race",
+                    order_id=str(order_id),
+                    product_variant_id=str(variant_id),
+                )
+                continue
 
         # See the matching comment in `apply_dispatch` -- always commit,
         # even on a no-op pass.
         await self.session.commit()
 
-    async def adjust_manual(
-        self, variant_id: uuid.UUID, *, delta: int, reason: str, actor: User | None
+    # --- staff-initiated writes ------------------------------------------
+
+    async def adjust_to_target(
+        self, variant_id: uuid.UUID, *, target_boxes: int, reason: str, actor: User | None
     ) -> InventoryMovement:
-        if delta == 0:
-            raise ValidationError("Adjustment delta must be non-zero.")
+        """Absolute-target manual adjustment: staff enters the new total
+        (e.g. "25 boxes"), never a raw delta -- the delta is computed and
+        recorded here so the movement ledger always shows both the
+        intent (previous -> new) and the resulting change.
+        """
+        if target_boxes < 0:
+            raise ValidationError("Target stock cannot be negative.")
+        if not reason or not reason.strip():
+            raise ValidationError("A reason is required for a manual stock adjustment.")
 
         variant = await self.variants.get_by_id(variant_id)
         if variant is None:
             raise NotFoundError("Product variant not found.")
 
         previous_quantity = variant.available_quantity
-        new_quantity = previous_quantity + delta
-        await self.variants.update(variant, available_quantity=new_quantity)
+        delta = target_boxes - previous_quantity
+        if delta == 0:
+            raise ValidationError("New stock must be different from the current stock.")
+
+        await self.variants.update(variant, available_quantity=target_boxes)
         movement = await self.movements.create(
             product_variant_id=variant.id,
             movement_type=InventoryMovementType.MANUAL_ADJUSTMENT,
             quantity_delta=delta,
-            quantity_after=new_quantity,
-            reason=reason,
+            quantity_after=target_boxes,
+            reason=reason.strip(),
             actor_user_id=actor.id if actor else None,
         )
         await self.audit.record(
@@ -222,11 +406,42 @@ class InventoryService:
             entity_type="product_variant",
             entity_id=str(variant.id),
             previous_value={"available_quantity": previous_quantity},
-            new_value={"available_quantity": new_quantity},
-            metadata={"reason": reason},
+            new_value={"available_quantity": target_boxes},
+            metadata={"reason": reason.strip()},
         )
         await self.session.commit()
         return movement
+
+    async def update_packets_per_box(
+        self, variant_id: uuid.UUID, *, packets_per_box: int, actor: User | None
+    ) -> ProductVariant:
+        """Changes ONLY the packets<->boxes conversion/display for this
+        variant -- never touches `available_quantity`. A box count of 20
+        stays 20 boxes before and after this call; only what "20 boxes"
+        displays as in packets changes.
+        """
+        if packets_per_box <= 0:
+            raise ValidationError("Packets per box must be a positive integer.")
+
+        variant = await self.variants.get_by_id(variant_id)
+        if variant is None:
+            raise NotFoundError("Product variant not found.")
+
+        previous = variant.packets_per_box
+        if previous == packets_per_box:
+            return variant
+
+        await self.variants.update(variant, packets_per_box=packets_per_box)
+        await self.audit.record(
+            user=actor,
+            action="inventory.packets_per_box_updated",
+            entity_type="product_variant",
+            entity_id=str(variant.id),
+            previous_value={"packets_per_box": previous},
+            new_value={"packets_per_box": packets_per_box},
+        )
+        await self.session.commit()
+        return variant
 
     async def _resolve_variant(
         self, *, product_variant_id: uuid.UUID | None, sku: str

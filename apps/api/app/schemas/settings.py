@@ -70,6 +70,14 @@ class AppearanceSettings(BaseModel):
     table_density: Literal["compact", "comfortable"] = "comfortable"
 
 
+class InventorySettings(BaseModel):
+    # Boxes at or below this are LOW_STOCK (0 is always OUT_OF_STOCK
+    # regardless of this value) -- see `app.services.inventory_service.
+    # InventoryService.compute_stock_status`. Deliberately configurable
+    # rather than a hardcoded constant.
+    low_stock_threshold: int = Field(default=5, ge=0)
+
+
 class AppSettingsData(BaseModel):
     general: GeneralSettings = GeneralSettings()
     orders: OrderSettings = OrderSettings()
@@ -78,6 +86,7 @@ class AppSettingsData(BaseModel):
     dashboard: DashboardSettings = DashboardSettings()
     security: SecuritySettings = SecuritySettings()
     appearance: AppearanceSettings = AppearanceSettings()
+    inventory: InventorySettings = InventorySettings()
 
 
 class AppSettingsUpdateRequest(BaseModel):
@@ -93,6 +102,7 @@ class AppSettingsUpdateRequest(BaseModel):
     dashboard: DashboardSettings | None = None
     security: SecuritySettings | None = None
     appearance: AppearanceSettings | None = None
+    inventory: InventorySettings | None = None
 
 
 class AppSettingsResponse(BaseModel):
