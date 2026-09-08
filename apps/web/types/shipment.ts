@@ -77,6 +77,8 @@ export interface ShipmentQueueRow {
   customer_name: string | null
   customer_phone: string | null
   item_summary: string | null
+  sku_summary: string | null
+  total_quantity: number
   total_amount: string
   payment_type: string
   confirmed_at: string | null

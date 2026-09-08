@@ -56,6 +56,8 @@ const ROW = {
   customer_name: "Alice",
   customer_phone: "9990000001",
   item_summary: "Ashwagandha x2",
+  sku_summary: "ASH-001",
+  total_quantity: 2,
   total_amount: "499.00",
   payment_type: "cod",
   confirmed_at: "2026-09-01T00:00:00Z",

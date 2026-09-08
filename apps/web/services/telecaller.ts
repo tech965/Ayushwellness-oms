@@ -170,6 +170,16 @@ export function useConfirmOrder(orderId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+      // A newly-confirmed order is immediately eligible for the
+      // Fulfillment Queue/Dashboard -- invalidate those too so a
+      // Fulfillment user who already has one of those pages open (same
+      // tab an admin/superuser tests both roles from, or a page left open
+      // across a shift) sees it without a hard refresh. Cross-tab/
+      // cross-login staleness still needs `refetchOnWindowFocus` on the
+      // fulfillment-side queries themselves (see services/shipment-queue.ts)
+      // since each browser tab holds its own QueryClient.
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments"] })
     },
   })
 }
@@ -189,6 +199,8 @@ export function useUnconfirmOrder(orderId: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments"] })
     },
   })
 }
@@ -209,6 +221,8 @@ export function useBulkConfirmOrders() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments"] })
     },
   })
 }

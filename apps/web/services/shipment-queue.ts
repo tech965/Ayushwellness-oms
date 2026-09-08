@@ -38,12 +38,21 @@ async function fetchShipmentQueue(
 
 /** Confirmed orders awaiting shipment processing -- a distinct, narrower
  * view from `useShipments` (every already-processed shipment).
+ *
+ * `refetchOnWindowFocus: true` overrides the app-wide default (`false`,
+ * see `lib/query-client.ts`) specifically here: this data is routinely
+ * changed by a *different person* (a Telecaller confirming an order) in a
+ * different login/browser tab entirely, which no query-key invalidation
+ * from this tab's own mutations can ever reach. Tabbing back to a
+ * Fulfillment Queue page left open across a shift must show newly
+ * confirmed orders without a manual hard refresh.
  */
 export function useShipmentQueue(params: ShipmentQueueParams) {
   return useQuery({
     queryKey: ["shipment-queue", params],
     queryFn: () => fetchShipmentQueue(params),
     placeholderData: (previous) => previous,
+    refetchOnWindowFocus: true,
   })
 }
 
@@ -57,6 +66,7 @@ export function useShipmentSummary() {
   return useQuery({
     queryKey: ["shipments", "summary"],
     queryFn: fetchShipmentSummary,
+    refetchOnWindowFocus: true,
   })
 }
 
@@ -79,6 +89,7 @@ export function useShipmentAnalytics(params: ShipmentAnalyticsParams = {}) {
   return useQuery({
     queryKey: ["shipments", "analytics", params],
     queryFn: () => fetchShipmentAnalytics(params),
+    refetchOnWindowFocus: true,
   })
 }
 

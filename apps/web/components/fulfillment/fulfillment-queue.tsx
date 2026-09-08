@@ -154,6 +154,17 @@ function FulfillmentQueueContent() {
       cell: (r) => <span className="block max-w-[220px] truncate">{r.item_summary ?? "—"}</span>,
     },
     {
+      id: "sku_summary",
+      header: "SKU",
+      cell: (r) => <span className="block max-w-[160px] truncate">{r.sku_summary ?? "—"}</span>,
+    },
+    {
+      id: "total_quantity",
+      header: "Qty",
+      className: "text-right",
+      cell: (r) => r.total_quantity,
+    },
+    {
       id: "total_amount",
       header: "Amount",
       className: "text-right",

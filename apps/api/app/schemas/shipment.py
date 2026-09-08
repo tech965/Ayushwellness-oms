@@ -82,6 +82,8 @@ class ShipmentQueueRowResponse(BaseModel):
     customer_name: str | None
     customer_phone: str | None
     item_summary: str | None
+    sku_summary: str | None
+    total_quantity: int
     total_amount: Decimal
     payment_type: PaymentType
     confirmed_at: datetime | None

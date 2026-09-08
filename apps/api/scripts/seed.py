@@ -154,7 +154,15 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "chat.use",
     ],
     "TEAM_LEADER": ["telecalling.manage"],
-    "TELECALLER": ["calls.manage", "orders.confirm"],
+    # `orders.read` here is a plain read grant, same tier as OPERATIONS/
+    # CUSTOMER_SUPPORT/MANAGEMENT already have -- it does NOT widen what a
+    # Telecaller can see through their own `/telecaller/*` routes (those
+    # stay hard-scoped to `assigned_to == actor.id` regardless of this
+    # permission, via `resolve_telecaller_scope` -- see
+    # `telecalling_service.py`). It only grants the general `GET /orders`
+    # /`GET /orders/{id}` endpoints, which nothing in the Telecaller UI
+    # currently calls.
+    "TELECALLER": ["calls.manage", "orders.read", "orders.confirm"],
     # Dedicated shipment-processing / fulfillment staff. Deliberately
     # narrower than OPERATIONS: no orders.cancel, no couriers.update, no
     # reconciliation/payments/chat. Can read orders + confirmed-order

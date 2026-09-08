@@ -12,7 +12,7 @@ from decimal import Decimal
 
 import pytest
 from app.core.config import settings
-from app.core.exceptions import IntegrationError
+from app.core.exceptions import ConflictError, IntegrationError
 from app.integrations.registry import clear_adapters, register_adapter
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.errors import ShiprocketApiError
@@ -126,26 +126,89 @@ async def test_create_shipment_requires_pickup_location(
     assert exc_info.value.details["error_type"] == "not_configured"
 
 
-# 14. Duplicate shipment prevention
-async def test_creating_shipment_twice_for_same_shiprocket_id_does_not_duplicate(
+async def test_shiprocket_failure_does_not_create_a_local_shipment_row(
     db_session: AsyncSession,
 ) -> None:
-    order = await _make_order(db_session, "OMS-SR-2")
+    """If the Shiprocket API call itself fails, the OMS must never create
+    a `Shipment` row and pretend the order was shipped -- the exception
+    must propagate, and no partial/fake local state is left behind.
+    """
+    order = await _make_order(db_session, "OMS-SR-FAIL-1")
     client = _StubClient(
-        [_create_order_response(shipment_id="6001"), _create_order_response(shipment_id="6001")]
+        [ShiprocketApiError("Shiprocket rejected the order.", error_type="validation_error")]
     )
+    register_adapter(ShiprocketAdapter(client=client))
+
+    with pytest.raises(IntegrationError):
+        await ShiprocketOperationsService(db_session).create_shipment_for_order(
+            order.id, actor=None
+        )
+
+    from app.models.shipment import Shipment
+
+    total = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total.scalar_one() == 0
+
+
+async def test_shiprocket_failure_during_awb_assignment_leaves_shipment_unchanged(
+    db_session: AsyncSession,
+) -> None:
+    order = await _make_order(db_session, "OMS-SR-FAIL-2")
+    client = _StubClient([_create_order_response()])
+    register_adapter(ShiprocketAdapter(client=client))
+    shipment = await ShiprocketOperationsService(db_session).create_shipment_for_order(
+        order.id, actor=None
+    )
+    assert shipment.awb is None
+
+    failing_client = _StubClient(
+        [ShiprocketApiError("Courier serviceability check failed.", error_type="validation_error")]
+    )
+    register_adapter(ShiprocketAdapter(client=failing_client))
+
+    with pytest.raises(IntegrationError):
+        await ShiprocketOperationsService(db_session).assign_awb(
+            shipment.id, actor=None, courier_id=None
+        )
+
+    await db_session.refresh(shipment)
+    assert shipment.awb is None
+    assert shipment.courier_id is None
+
+
+# 14. Duplicate shipment prevention
+async def test_creating_shipment_twice_for_the_same_order_is_blocked_not_duplicated(
+    db_session: AsyncSession,
+) -> None:
+    """A second `create_shipment_for_order` call for an order that already
+    has one -- a UI double-click, or a client retry issued after the first
+    call actually succeeded -- must never reach Shiprocket a second time.
+    The local "does a shipment already exist for this order" guard rejects
+    it before the adapter is ever called -- stronger than merely
+    deduplicating two real Shiprocket responses after the fact via
+    `upsert_by_external_id` (which only helps if Shiprocket's own API
+    happens to return the same shipment_id for a retried request, not
+    guaranteed).
+    """
+    order = await _make_order(db_session, "OMS-SR-2")
+    client = _StubClient([_create_order_response(shipment_id="6001")])
     register_adapter(ShiprocketAdapter(client=client))
 
     service = ShiprocketOperationsService(db_session)
     first = await service.create_shipment_for_order(order.id, actor=None)
-    second = await service.create_shipment_for_order(order.id, actor=None)
 
-    assert first.id == second.id
+    with pytest.raises(ConflictError) as exc_info:
+        await service.create_shipment_for_order(order.id, actor=None)
+    assert exc_info.value.details["error_type"] == "shipment_already_exists"
 
     from app.models.shipment import Shipment
 
     total = await db_session.execute(select(func.count()).select_from(Shipment))
     assert total.scalar_one() == 1
+    assert first is not None
+    # The second call never reached Shiprocket -- only one HTTP request was
+    # ever made, not two.
+    assert len(client.calls) == 1
 
 
 # 8. AWB assignment / 9. Courier mapping

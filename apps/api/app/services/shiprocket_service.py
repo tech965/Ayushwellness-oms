@@ -74,6 +74,20 @@ class ShiprocketOperationsService:
         if order is None:
             raise NotFoundError("Order not found.")
 
+        # Idempotency guard (spec: "prevent duplicate external operations" —
+        # a client retry after a timeout, or a double-click, must never
+        # create a second Shiprocket order for the same OMS order). A
+        # CANCELLED shipment doesn't block a genuine re-ship. This is a
+        # local-only check (no new Shiprocket API call) — cheap and safe
+        # to run before ever touching the adapter.
+        existing_shipments = await self.shipments.list_for_order(order_id)
+        if any(s.current_status != ShipmentStatus.CANCELLED for s in existing_shipments):
+            raise ConflictError(
+                "A shipment already exists for this order — refresh the page instead of "
+                "creating another one.",
+                details={"error_type": "shipment_already_exists"},
+            )
+
         shortages = await self.inventory_service.check_stock_available(order_id)
         if shortages:
             raise ConflictError(

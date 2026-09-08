@@ -35,12 +35,16 @@ router = APIRouter()
 
 def _to_shipment_queue_row(order: Order, shipment: Shipment | None) -> ShipmentQueueRowResponse:
     item_summary = ", ".join(f"{i.product_name} x{i.quantity}" for i in order.items) or None
+    sku_summary = ", ".join(i.sku for i in order.items if i.sku) or None
+    total_quantity = sum(i.quantity for i in order.items)
     return ShipmentQueueRowResponse(
         order_id=order.id,
         order_number=order.order_number,
         customer_name=order.customer.full_name if order.customer else None,
         customer_phone=order.customer.phone if order.customer else None,
         item_summary=item_summary,
+        sku_summary=sku_summary,
+        total_quantity=total_quantity,
         total_amount=order.total_amount,
         payment_type=order.payment_type,
         confirmed_at=order.confirmed_at,
