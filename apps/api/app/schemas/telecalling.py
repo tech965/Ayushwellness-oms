@@ -11,6 +11,7 @@ from app.models.enums import (
     FulfillmentStatus,
     LeadCategory,
     LeadPriority,
+    OrderStatus,
     PaymentStatus,
     PaymentType,
     TelecallingStatus,
@@ -75,6 +76,22 @@ class ScheduleFollowUpRequest(BaseModel):
     next_follow_up_at: datetime
 
 
+class BulkConfirmOrdersRequest(BaseModel):
+    order_ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
+
+
+class BulkConfirmOrderResult(BaseModel):
+    order_id: uuid.UUID
+    success: bool
+    message: str | None = None
+
+
+class BulkConfirmOrdersResponse(BaseModel):
+    confirmed_count: int
+    failed_count: int
+    results: list[BulkConfirmOrderResult]
+
+
 class CallAttemptResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -127,7 +144,13 @@ class AssignedOrderResponse(BaseModel):
     total_amount: Decimal
     payment_type: PaymentType
     payment_status: PaymentStatus
+    # `Order.status` — the order-confirmation/pack-ship workflow. Never
+    # the same fact as `call_status` below (`TelecallingStatus`, a call
+    # outcome) — the frontend must not conflate the two.
+    status: OrderStatus
     fulfillment_status: FulfillmentStatus
+    confirmed_at: datetime | None = None
+    confirmed_by_telecaller_id: uuid.UUID | None = None
     order_datetime: datetime
     shipping_address: dict | None = None
     # Null across this whole block means "not yet assigned to anyone" —
@@ -247,6 +270,11 @@ class TelecallerPerformanceResponse(BaseModel):
     connected: int
     interested: int = 0
     follow_ups: int
+    # Call-outcome confirmed (`TelecallingStatus.CONFIRMED`, from a logged
+    # call attempt) — NOT the same fact as `orders_confirmed` below
+    # (`Order.status == CONFIRMED`, set by the telecaller Confirm action).
+    # Deliberately separate fields, never merged, per the "don't mix
+    # TelecallingStatus/OrderStatus/ShipmentStatus" rule.
     confirmed: int
     not_interested: int
     # Percentage (0-100, one decimal) of assigned leads marked CONFIRMED —
@@ -255,6 +283,12 @@ class TelecallerPerformanceResponse(BaseModel):
     # duplicate outcome systems" rule); CONFIRMED is treated as the
     # converted-lead signal.
     conversion_rate: float = 0.0
+    # Live snapshot counts from `Order.confirmed_by_telecaller_id` /
+    # `Shipment.current_status` — see
+    # `OrderRepository.telecaller_confirmation_counts`'s docstring.
+    orders_confirmed: int = 0
+    shipped: int = 0
+    delivered: int = 0
 
 
 class TelecallerDetailSummaryResponse(BaseModel):
@@ -283,6 +317,15 @@ class TelecallerDetailSummaryResponse(BaseModel):
     # `OrderAssignmentRepository.total_attempt_count`'s docstring.
     total_attempts: int = 0
     conversion_rate: float = 0.0
+    # Live snapshot counts from `Order.confirmed_by_telecaller_id` /
+    # `Shipment.current_status` — see
+    # `OrderRepository.telecaller_confirmation_counts`'s docstring for why
+    # these are current-state counts, not a day-bucketed history.
+    orders_confirmed: int = 0
+    shipped: int = 0
+    delivered: int = 0
+    ndr: int = 0
+    rto: int = 0
 
 
 class TelecallerDailyPerformancePoint(BaseModel):

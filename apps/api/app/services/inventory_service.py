@@ -76,6 +76,37 @@ class InventoryService:
         )
         return list(items), total
 
+    async def check_stock_available(self, order_id: uuid.UUID) -> list[dict[str, object]]:
+        """Pre-flight check before a shipment is created for this order
+        (`ShiprocketOperationsService.create_shipment_for_order`) — does
+        NOT move any stock (that only ever happens on confirmed dispatch,
+        `apply_dispatch`), purely a read. Returns the list of line items
+        that resolve to a real variant but don't have enough
+        `available_quantity`; empty means "ok to ship". Mirrors
+        `apply_dispatch`'s own leniency for a SKU that can't be resolved
+        to any variant at all (logged there, silently skipped here too)
+        — an unresolvable SKU is a data-linking gap, not proof of an
+        actual stock shortage, so it must never block a real shipment.
+        """
+        items = await self.order_items.list_for_order(order_id)
+        shortages: list[dict[str, object]] = []
+        for item in items:
+            variant = await self._resolve_variant(
+                product_variant_id=item.product_variant_id, sku=item.sku
+            )
+            if variant is None:
+                continue
+            if variant.available_quantity < item.quantity:
+                shortages.append(
+                    {
+                        "sku": item.sku,
+                        "product_name": item.product_name,
+                        "available": variant.available_quantity,
+                        "required": item.quantity,
+                    }
+                )
+        return shortages
+
     async def apply_dispatch(self, *, order_id: uuid.UUID, shipment_id: uuid.UUID) -> None:
         """Called once a shipment's courier tracking first reaches a
         dispatched-or-later status (`app.integrations.shiprocket.sync.

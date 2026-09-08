@@ -22,10 +22,14 @@ from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
+from app.schemas.order import OrderDetailResponse
 from app.schemas.response import ApiResponse, PaginatedResponse
 from app.schemas.telecalling import (
     AssignedCheckoutResponse,
     AssignedOrderResponse,
+    BulkConfirmOrderResult,
+    BulkConfirmOrdersRequest,
+    BulkConfirmOrdersResponse,
     CallAttemptResponse,
     CallHistoryEntryResponse,
     CheckoutCallAttemptResponse,
@@ -156,6 +160,51 @@ async def schedule_follow_up(
     )
     return ApiResponse(
         data=OrderAssignmentResponse.model_validate(assignment), message="Follow-up scheduled."
+    )
+
+
+@router.post("/orders/{order_id}/confirm", response_model=ApiResponse[OrderDetailResponse])
+async def confirm_order(
+    order_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("orders.confirm")),
+) -> ApiResponse[OrderDetailResponse]:
+    """PENDING -> CONFIRMED only — never touches `TelecallingStatus`
+    (call outcome), `FulfillmentStatus`, or `ShipmentStatus`. Gated on
+    `orders.confirm` (Telecaller-only, distinct from `calls.manage`),
+    with an additional `assigned_to == current_user.id` check inside the
+    service (bypassed only for a superuser), same defense-in-depth
+    pattern as every other telecaller mutation in this file.
+    """
+    order = await TelecallingService(session).confirm_assigned_order(
+        order_id, actor=current_user
+    )
+    return ApiResponse(data=OrderDetailResponse.model_validate(order), message="Order confirmed.")
+
+
+@router.post("/orders/confirm", response_model=ApiResponse[BulkConfirmOrdersResponse])
+async def bulk_confirm_orders(
+    payload: BulkConfirmOrdersRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("orders.confirm")),
+) -> ApiResponse[BulkConfirmOrdersResponse]:
+    """Confirms every order independently — one order already confirmed,
+    not assigned to this telecaller, or unknown never blocks the rest;
+    the response reports a per-order result instead of an all-or-nothing
+    failure (see `TelecallingService.bulk_confirm_assigned_orders`).
+    """
+    results = await TelecallingService(session).bulk_confirm_assigned_orders(
+        payload.order_ids, actor=current_user
+    )
+    result_items = [BulkConfirmOrderResult(**r) for r in results]
+    confirmed_count = sum(1 for r in result_items if r.success)
+    return ApiResponse(
+        data=BulkConfirmOrdersResponse(
+            confirmed_count=confirmed_count,
+            failed_count=len(result_items) - confirmed_count,
+            results=result_items,
+        ),
+        message=f"{confirmed_count} of {len(result_items)} orders confirmed.",
     )
 
 

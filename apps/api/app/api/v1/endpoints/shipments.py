@@ -13,12 +13,17 @@ from app.dependencies.auth import require_permission
 from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
+from app.models.order import Order
+from app.models.shipment import Shipment
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.response import ApiResponse, PaginatedResponse
 from app.schemas.shipment import (
+    ShipmentAnalyticsResponse,
     ShipmentCreateRequest,
     ShipmentEventResponse,
+    ShipmentQueueRowResponse,
     ShipmentResponse,
+    ShipmentSummaryResponse,
     ShipmentUpdateRequest,
 )
 from app.schemas.shiprocket import ShiprocketAssignAwbRequest
@@ -26,6 +31,84 @@ from app.services.shipment_service import ShipmentService
 from app.services.shiprocket_service import ShiprocketOperationsService
 
 router = APIRouter()
+
+
+def _to_shipment_queue_row(order: Order, shipment: Shipment | None) -> ShipmentQueueRowResponse:
+    item_summary = ", ".join(f"{i.product_name} x{i.quantity}" for i in order.items) or None
+    return ShipmentQueueRowResponse(
+        order_id=order.id,
+        order_number=order.order_number,
+        customer_name=order.customer.full_name if order.customer else None,
+        customer_phone=order.customer.phone if order.customer else None,
+        item_summary=item_summary,
+        total_amount=order.total_amount,
+        payment_type=order.payment_type,
+        confirmed_at=order.confirmed_at,
+        confirmed_by_telecaller_id=order.confirmed_by_telecaller_id,
+        confirmed_by_telecaller_name=(
+            order.confirmed_by_telecaller.name if order.confirmed_by_telecaller else None
+        ),
+        shipment_id=shipment.id if shipment else None,
+        shipment_status=shipment.current_status if shipment else None,
+        awb=shipment.awb if shipment else None,
+        courier_name=shipment.courier.name if shipment and shipment.courier else None,
+    )
+
+
+@router.get("/queue", response_model=PaginatedResponse[ShipmentQueueRowResponse])
+async def get_shipment_queue(
+    q: str | None = Query(default=None),
+    payment_type: str | None = Query(default=None),
+    telecaller_id: uuid.UUID | None = Query(default=None),
+    courier_id: uuid.UUID | None = Query(default=None),
+    sku: str | None = Query(default=None),
+    shipment_status: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    page_params: PageParams = Depends(pagination_params),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> PaginatedResponse[ShipmentQueueRowResponse]:
+    """Confirmed orders awaiting shipment processing — a distinct,
+    narrower view from `GET /shipments` below (every already-processed
+    shipment). Registered before `GET /{shipment_id}` so "queue" is never
+    parsed as a shipment id.
+    """
+    rows, total = await ShipmentService(session).list_shipment_queue(
+        page_params=page_params,
+        q=q,
+        payment_type=payment_type,
+        telecaller_id=telecaller_id,
+        courier_id=courier_id,
+        sku=sku,
+        shipment_status=shipment_status,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return PaginatedResponse(
+        data=[_to_shipment_queue_row(order, shipment) for order, shipment in rows],
+        meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
+
+
+@router.get("/summary", response_model=ApiResponse[ShipmentSummaryResponse])
+async def get_shipment_summary(
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[ShipmentSummaryResponse]:
+    summary = await ShipmentService(session).get_summary()
+    return ApiResponse(data=ShipmentSummaryResponse(**summary))
+
+
+@router.get("/analytics", response_model=ApiResponse[ShipmentAnalyticsResponse])
+async def get_shipment_analytics(
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[ShipmentAnalyticsResponse]:
+    analytics = await ShipmentService(session).get_analytics(date_from=date_from, date_to=date_to)
+    return ApiResponse(data=ShipmentAnalyticsResponse(**analytics))
 
 
 @router.get("", response_model=PaginatedResponse[ShipmentResponse])

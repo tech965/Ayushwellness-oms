@@ -3,13 +3,18 @@
 import * as React from "react"
 import { useParams, useRouter } from "next/navigation"
 import {
+  AlertTriangle,
   CalendarClock,
   CheckCircle2,
+  ClipboardCheck,
   ListChecks,
+  PackageCheck,
   PhoneCall,
+  Send,
   Target,
   ThumbsDown,
   Truck,
+  Undo2,
   UserCheck,
   XCircle,
 } from "lucide-react"
@@ -155,6 +160,26 @@ function TeamTelecallerWorkloadContent() {
           icon={Target}
           accent="violet"
         />
+        <StatTile
+          label="Orders Confirmed"
+          value={summary?.orders_confirmed ?? "—"}
+          icon={ClipboardCheck}
+          accent="blue"
+        />
+        <StatTile
+          label="Shipped"
+          value={summary?.shipped ?? "—"}
+          icon={Send}
+          accent="violet"
+        />
+        <StatTile
+          label="Delivered"
+          value={summary?.delivered ?? "—"}
+          icon={PackageCheck}
+          accent="emerald"
+        />
+        <StatTile label="NDR" value={summary?.ndr ?? "—"} icon={AlertTriangle} accent="orange" />
+        <StatTile label="RTO" value={summary?.rto ?? "—"} icon={Undo2} accent="orange" />
       </div>
 
       <div className="mb-6">

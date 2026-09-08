@@ -230,6 +230,33 @@ class OrderService:
         await self.session.commit()
         return await self.get_order(order_id)
 
+    async def confirm_order(self, order_id: uuid.UUID, *, actor: User) -> Order:
+        """PENDING -> CONFIRMED specifically, stamping telecaller
+        attribution in the same transaction as the status change — the
+        only caller of this is the telecaller confirm/bulk-confirm flow
+        (`TelecallingService.confirm_assigned_order`), which does its own
+        ownership check *before* calling this; this method itself has no
+        opinion on who's allowed to confirm, same separation
+        `transition_status` already has from its caller's permission
+        check. Reuses `transition_status` for the actual state-machine
+        validation/event/audit — never a second transition-rules table.
+        `confirmed_by_telecaller_id`/`confirmed_at` are set once and
+        `transition_status` never touches them again on any later
+        transition (PROCESSING/PACKED/...), so they survive the rest of
+        the order's lifecycle untouched.
+        """
+        order = await self.transition_status(
+            order_id,
+            new_status=OrderStatus.CONFIRMED,
+            actor=actor,
+            description="Confirmed by telecaller.",
+        )
+        await self.orders.update(
+            order, confirmed_by_telecaller_id=actor.id, confirmed_at=datetime.now(UTC)
+        )
+        await self.session.commit()
+        return await self.get_order(order_id)
+
     async def add_event(
         self,
         order_id: uuid.UUID,

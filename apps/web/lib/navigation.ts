@@ -64,6 +64,8 @@ export const navGroups: NavGroup[] = [
   {
     label: "Fulfillment",
     items: [
+      { label: "Shipment Dashboard", href: "/shipment-dashboard", icon: Gauge },
+      { label: "Shipment Queue", href: "/shipment-queue", icon: ListChecks },
       { label: "Shipments", href: "/shipments", icon: Truck },
       { label: "NDR", href: "/ndr", icon: PackageX },
       { label: "RTO", href: "/rto", icon: RotateCcw },

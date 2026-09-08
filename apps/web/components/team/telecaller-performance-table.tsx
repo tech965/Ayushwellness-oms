@@ -49,6 +49,9 @@ export function TelecallerPerformanceTable() {
                     <TableHead className="text-right">Follow-ups</TableHead>
                     <TableHead className="text-right">Confirmed</TableHead>
                     <TableHead className="text-right">Not Interested</TableHead>
+                    <TableHead className="text-right">Orders Confirmed</TableHead>
+                    <TableHead className="text-right">Shipped</TableHead>
+                    <TableHead className="text-right">Delivered</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -78,6 +81,15 @@ export function TelecallerPerformanceTable() {
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
                         {row.not_interested}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {row.orders_confirmed}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {row.shipped}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {row.delivered}
                       </TableCell>
                     </TableRow>
                   ))}

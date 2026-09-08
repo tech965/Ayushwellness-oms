@@ -29,6 +29,7 @@ from app.repositories.order import OrderRepository
 from app.repositories.shipment import ShipmentRepository
 from app.services.audit_service import AuditService
 from app.services.courier_service import CourierService
+from app.services.inventory_service import InventoryService
 from app.services.ndr_service import NDRService
 from app.services.shipment_service import ShipmentService
 
@@ -41,6 +42,7 @@ class ShiprocketOperationsService:
         self.shipment_service = ShipmentService(session)
         self.courier_service = CourierService(session)
         self.ndr_service = NDRService(session)
+        self.inventory_service = InventoryService(session)
         self.audit = AuditService(session)
 
     def _get_adapter(self) -> ShiprocketAdapter:
@@ -71,6 +73,13 @@ class ShiprocketOperationsService:
         order = await self.orders.get_by_id_with_items_and_customer(order_id)
         if order is None:
             raise NotFoundError("Order not found.")
+
+        shortages = await self.inventory_service.check_stock_available(order_id)
+        if shortages:
+            raise ConflictError(
+                "Cannot create shipment — insufficient stock for one or more items.",
+                details={"error_type": "insufficient_stock", "items": shortages},
+            )
 
         config = ShiprocketConfig.from_settings()
         if config is None or not config.pickup_location:

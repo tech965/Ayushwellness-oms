@@ -21,6 +21,7 @@ from app.core.exceptions import AuthorizationError, ConflictError, NotFoundError
 from app.core.timezone import ist_day_bounds, to_ist
 from app.models.auth import User
 from app.models.enums import AssignmentStatus, LeadCategory, TelecallingStatus
+from app.models.order import Order
 from app.models.telecalling import CallAttempt, CheckoutAssignment, OrderAssignment
 from app.repositories.abandoned_checkout import AbandonedCheckoutRepository
 from app.repositories.auth import UserRepository
@@ -33,6 +34,7 @@ from app.repositories.telecalling import (
 )
 from app.schemas.common import PageParams, SortParams
 from app.services.audit_service import AuditService
+from app.services.order_service import OrderService
 
 
 class ScopeFilter:
@@ -85,6 +87,7 @@ class TelecallingService:
         self.orders = OrderRepository(session)
         self.users = UserRepository(session)
         self.audit = AuditService(session)
+        self.order_service = OrderService(session)
         self.checkout_assignments = CheckoutAssignmentRepository(session)
         self.checkout_call_attempts = CheckoutCallAttemptRepository(session)
         self.checkouts = AbandonedCheckoutRepository(session)
@@ -376,6 +379,13 @@ class TelecallingService:
             )
         )
         telecaller_ids = set(order_breakdown) | set(checkout_breakdown)
+        # Unscoped by team_leader_id (that's an `OrderAssignment` concept,
+        # not something `Order.confirmed_by_telecaller_id` can filter on
+        # directly) — `telecaller_ids` above is already correctly
+        # team-scoped from the assignment breakdowns, so looking each one
+        # up in this single unscoped query is both correct and one round
+        # trip instead of N.
+        confirmation_counts = await self.orders.telecaller_confirmation_counts()
 
         results = []
         for telecaller_id in telecaller_ids:
@@ -383,10 +393,16 @@ class TelecallingService:
             merged = _merge_counts(
                 order_breakdown.get(telecaller_id, {}), checkout_breakdown.get(telecaller_id, {})
             )
+            confirmation = confirmation_counts.get(
+                telecaller_id, {"confirmed": 0, "shipped": 0, "delivered": 0, "ndr": 0, "rto": 0}
+            )
             results.append(
                 {
                     "telecaller_id": telecaller_id,
                     "telecaller_name": telecaller.name if telecaller else "Unknown",
+                    "orders_confirmed": confirmation["confirmed"],
+                    "shipped": confirmation["shipped"],
+                    "delivered": confirmation["delivered"],
                     **_performance_from_counts(merged),
                 }
             )
@@ -427,12 +443,20 @@ class TelecallingService:
             telecaller_id=telecaller_id
         )
         total_attempts = await self.assignments.total_attempt_count(telecaller_id=telecaller_id)
+        confirmation = (
+            await self.orders.telecaller_confirmation_counts(telecaller_id=telecaller_id)
+        ).get(telecaller_id, {"confirmed": 0, "shipped": 0, "delivered": 0, "ndr": 0, "rto": 0})
         return {
             "telecaller_id": telecaller_id,
             "telecaller_name": telecaller.name,
             "cancelled": merged.get(TelecallingStatus.CANCELLED.value, 0),
             "fulfilled": fulfilled_by_telecaller.get(telecaller_id, 0),
             "total_attempts": total_attempts,
+            "orders_confirmed": confirmation["confirmed"],
+            "shipped": confirmation["shipped"],
+            "delivered": confirmation["delivered"],
+            "ndr": confirmation["ndr"],
+            "rto": confirmation["rto"],
             **_performance_from_counts(merged),
         }
 
@@ -960,6 +984,56 @@ class TelecallingService:
         )
         await self.session.commit()
         return assignment
+
+    async def confirm_assigned_order(self, order_id: uuid.UUID, *, actor: User) -> Order:
+        """Telecaller-scoped order confirmation (PENDING -> CONFIRMED
+        only — a distinct concept from `TelecallingStatus`/
+        `FulfillmentStatus`/`ShipmentStatus`, never conflated with any of
+        them). Same ownership check as `log_call`/`schedule_follow_up`
+        (`assigned_to == actor.id` unless superuser), then delegates the
+        actual transition to `OrderService.confirm_order` — no
+        transition-rule or attribution logic duplicated here.
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+        return await self.order_service.confirm_order(order_id, actor=actor)
+
+    async def bulk_confirm_assigned_orders(
+        self, order_ids: list[uuid.UUID], *, actor: User
+    ) -> list[dict[str, object]]:
+        """Confirms each order independently — one order failing (already
+        confirmed, not assigned to this telecaller, unknown id) never
+        blocks or rolls back the others, per-order results are returned
+        instead of raising, and each order's confirm already commits on
+        its own success. An unexpected (non-`OMSError`) failure rolls the
+        session back before continuing so it can't corrupt the next
+        order's attempt (`confirm_order`/`transition_status` commit
+        per-order, but a mid-flush error would otherwise leave the
+        session needing a rollback before any further query succeeds).
+        """
+        results: list[dict[str, object]] = []
+        for order_id in order_ids:
+            try:
+                await self.confirm_assigned_order(order_id, actor=actor)
+            except (NotFoundError, AuthorizationError, ConflictError, ValidationError) as exc:
+                results.append(
+                    {"order_id": order_id, "success": False, "message": exc.message}
+                )
+            except Exception:
+                await self.session.rollback()
+                results.append(
+                    {
+                        "order_id": order_id,
+                        "success": False,
+                        "message": "Could not confirm this order.",
+                    }
+                )
+            else:
+                results.append({"order_id": order_id, "success": True, "message": None})
+        return results
 
     # ------------------------------------------------------------------
     # Checkout calling / follow-up mutations — `log_call`/

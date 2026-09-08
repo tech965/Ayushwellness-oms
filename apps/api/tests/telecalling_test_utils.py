@@ -114,6 +114,7 @@ async def make_order(
     payment_type: PaymentType = PaymentType.PREPAID,
     total_amount: Decimal = Decimal("999.00"),
     order_datetime: datetime | None = None,
+    status: OrderStatus = OrderStatus.CONFIRMED,
 ) -> Order:
     order = Order(
         order_number=order_number,
@@ -126,7 +127,7 @@ async def make_order(
         payment_status=(
             PaymentStatus.PENDING if payment_type == PaymentType.COD else PaymentStatus.PAID
         ),
-        status=OrderStatus.CONFIRMED,
+        status=status,
         fulfillment_status=fulfillment_status,
     )
     session.add(order)

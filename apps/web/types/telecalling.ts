@@ -1,5 +1,7 @@
 /** Mirrors apps/api/app/schemas/telecalling.py. */
 
+import type { OrderStatus } from "./order"
+
 export type TelecallingStatus =
   | "not_called"
   | "call_attempted"
@@ -65,7 +67,12 @@ export interface AssignedOrder {
   total_amount: string
   payment_type: string
   payment_status: string
+  // `Order.status` — order-confirmation/pack-ship workflow, never the
+  // same fact as `call_status` below (a call outcome). Distinct axes.
+  status: OrderStatus
   fulfillment_status: string
+  confirmed_at: string | null
+  confirmed_by_telecaller_id: string | null
   order_datetime: string
   shipping_address: {
     line1?: string
@@ -208,9 +215,15 @@ export interface TelecallerPerformance {
   connected: number
   interested: number
   follow_ups: number
+  // Call-outcome confirmed (a logged call attempt) — NOT the same fact as
+  // `orders_confirmed` below (`Order.status === "confirmed"`, set by the
+  // telecaller Confirm action). Never merged.
   confirmed: number
   not_interested: number
   conversion_rate: number
+  orders_confirmed: number
+  shipped: number
+  delivered: number
 }
 
 export interface TelecallingSummary {
@@ -273,6 +286,11 @@ export interface TelecallerDetailSummary {
   fulfilled: number
   total_attempts: number
   conversion_rate: number
+  orders_confirmed: number
+  shipped: number
+  delivered: number
+  ndr: number
+  rto: number
 }
 
 export interface TelecallerDailyPerformancePoint {
@@ -283,4 +301,16 @@ export interface TelecallerDailyPerformancePoint {
   not_interested: number
   cancelled: number
   follow_ups: number
+}
+
+export interface BulkConfirmOrderResult {
+  order_id: string
+  success: boolean
+  message: string | null
+}
+
+export interface BulkConfirmOrdersResponse {
+  confirmed_count: number
+  failed_count: number
+  results: BulkConfirmOrderResult[]
 }

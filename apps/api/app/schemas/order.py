@@ -94,6 +94,12 @@ class OrderResponse(BaseModel):
     shipping_address: dict | None
     billing_address: dict | None
     source_system: str | None
+    # Telecaller attribution for the PENDING->CONFIRMED transition — see
+    # `Order.confirmed_by_telecaller_id` in app/models/order.py. `None`
+    # for an order confirmed a different way (e.g. auto-confirmed on
+    # Shopify sync for an already-paid prepaid order), not a data gap.
+    confirmed_by_telecaller_id: uuid.UUID | None = None
+    confirmed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

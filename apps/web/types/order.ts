@@ -65,6 +65,11 @@ export interface Order {
   shipping_address: OrderAddress | null
   billing_address: OrderAddress | null
   source_system: string | null
+  // Telecaller attribution for the PENDING->CONFIRMED transition — `null`
+  // for an order confirmed a different way (e.g. auto-confirmed on
+  // Shopify sync for an already-paid prepaid order), not a data gap.
+  confirmed_by_telecaller_id: string | null
+  confirmed_at: string | null
   created_at: string
   updated_at: string
   // Present only on rows from `GET /orders` (`OrderListResponse`) — see

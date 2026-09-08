@@ -41,6 +41,11 @@ const SUMMARY = {
   fulfilled: 6,
   total_attempts: 52,
   conversion_rate: 20.0,
+  orders_confirmed: 12,
+  shipped: 7,
+  delivered: 5,
+  ndr: 1,
+  rto: 3,
 }
 
 const EMPTY_LIST = {
@@ -78,6 +83,10 @@ describe("TeamTelecallerWorkloadPage (individual telecaller performance)", () =>
     expect(screen.getByText("52")).toBeInTheDocument() // Total Attempts
     expect(screen.getByText("6")).toBeInTheDocument() // Orders Fulfilled
     expect(screen.getByText("20%")).toBeInTheDocument() // Conversion Rate
+    expect(screen.getByText("12")).toBeInTheDocument() // Orders Confirmed
+    expect(screen.getByText("7")).toBeInTheDocument() // Shipped
+    expect(screen.getByText("1")).toBeInTheDocument() // NDR
+    expect(screen.getByText("3")).toBeInTheDocument() // RTO
     expect(screen.getByText("No calls logged in the selected range.")).toBeInTheDocument()
     expect(screen.getByText("No orders assigned")).toBeInTheDocument()
     expect(screen.getByRole("link", { name: /Back to Telecallers/i })).toBeInTheDocument()

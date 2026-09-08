@@ -5,6 +5,7 @@ import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
   AssignedCheckout,
   AssignedOrder,
+  BulkConfirmOrdersResponse,
   CallAttempt,
   CallHistoryEntry,
   CheckoutAssignment,
@@ -14,6 +15,7 @@ import type {
   OrderAssignment,
   TelecallingSummary,
 } from "@/types/telecalling"
+import type { OrderDetail } from "@/types/order"
 
 interface MyOrdersParams {
   page: number
@@ -150,6 +152,44 @@ export function useDeleteCallAttempt(orderId: string) {
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "follow-ups"] })
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "summary"] })
+    },
+  })
+}
+
+/** PENDING -> CONFIRMED only (`Order.status`) -- never touches call
+ * outcome/fulfillment/shipment status. Distinct from `useLogCall`.
+ */
+export function useConfirmOrder(orderId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const response = await apiClient.post<ApiResponse<OrderDetail>>(
+        `/telecaller/orders/${orderId}/confirm`
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+    },
+  })
+}
+
+/** Confirms every selected order independently -- the response always
+ * reports a per-order result, never an all-or-nothing failure.
+ */
+export function useBulkConfirmOrders() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (orderIds: string[]) => {
+      const response = await apiClient.post<ApiResponse<BulkConfirmOrdersResponse>>(
+        "/telecaller/orders/confirm",
+        { order_ids: orderIds }
+      )
+      if (!response.data.data) throw new Error("Bulk confirm did not return a result.")
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
     },
   })
 }

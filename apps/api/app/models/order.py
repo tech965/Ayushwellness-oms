@@ -29,6 +29,7 @@ from app.models.enums import (
 from app.models.mixins import SyncMetadataMixin
 
 if TYPE_CHECKING:
+    from app.models.auth import User
     from app.models.customer import Customer
     from app.models.payment import Payment
     from app.models.product import ProductVariant
@@ -131,7 +132,24 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     shipping_address: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     billing_address: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
 
+    # Telecaller attribution for the PENDING->CONFIRMED transition (see
+    # `OrderService.confirm_order`) — deliberately NOT the same as
+    # `OrderAssignment.assigned_to` (the *current* assignee, which changes
+    # on reassignment). Set once, at confirmation time, and never
+    # overwritten afterward, so "who confirmed this order" survives any
+    # later reassignment. `NULL` for every order that reached CONFIRMED a
+    # different way (e.g. a paid prepaid order confirmed automatically by
+    # `upsert_synced_order` on Shopify sync, which never touches this
+    # column) — that's expected, not a data gap.
+    confirmed_by_telecaller_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+
     customer: Mapped[Customer | None] = relationship()
+    confirmed_by_telecaller: Mapped[User | None] = relationship(
+        foreign_keys=[confirmed_by_telecaller_id]
+    )
     items: Mapped[list[OrderItem]] = relationship(
         back_populates="order", cascade="all, delete-orphan", order_by="OrderItem.created_at"
     )

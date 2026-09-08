@@ -3,14 +3,72 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
+from app.core.timezone import to_ist
+from app.models.order import Order
 from app.models.shipment import Shipment, ShipmentEvent
 from app.repositories.base import AppendOnlyRepository, BaseRepository
 
 
 class ShipmentRepository(BaseRepository[Shipment]):
     model = Shipment
+
+    async def status_counts(self) -> dict[str, int]:
+        """Whole-table breakdown by `current_status` — backs the shipment
+        dashboard's summary cards and the analytics status breakdown.
+        """
+        stmt = select(Shipment.current_status, func.count()).group_by(Shipment.current_status)
+        rows = (await self.session.execute(stmt)).all()
+        return {status.value: count for status, count in rows}
+
+    async def payment_type_counts(self) -> dict[str, int]:
+        stmt = (
+            select(Order.payment_type, func.count())
+            .select_from(Shipment)
+            .join(Order, Order.id == Shipment.order_id)
+            .group_by(Order.payment_type)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return {ptype.value: count for ptype, count in rows}
+
+    async def count_created_in_range(self, *, date_from: datetime, date_to: datetime) -> int:
+        stmt = select(func.count()).where(
+            Shipment.created_at >= date_from, Shipment.created_at <= date_to
+        )
+        return int(await self.session.scalar(stmt) or 0)
+
+    async def daily_created_and_delivered(
+        self, *, date_from: datetime, date_to: datetime
+    ) -> list[dict[str, object]]:
+        """Day-bucketed (IST) shipment creation + delivery counts — both
+        from real, already-existing timestamps (`Shipment.created_at`,
+        `Shipment.actual_delivery_date`), never a fabricated "shipped at"
+        column. A per-order fetch-then-bucket-in-Python, same portability
+        rationale as `CallAttemptRepository.resolve_current_for_order`
+        (small result set for a dashboard trend, dialect-portable without
+        a Postgres-only `date_trunc`).
+        """
+        created_stmt = select(Shipment.created_at).where(
+            Shipment.created_at >= date_from, Shipment.created_at <= date_to
+        )
+        delivered_stmt = select(Shipment.actual_delivery_date).where(
+            Shipment.actual_delivery_date >= date_from,
+            Shipment.actual_delivery_date <= date_to,
+        )
+        created_rows = (await self.session.execute(created_stmt)).scalars().all()
+        delivered_rows = (await self.session.execute(delivered_stmt)).scalars().all()
+
+        buckets: dict[str, dict[str, int]] = {}
+        for ts in created_rows:
+            key = to_ist(ts).date().isoformat()
+            buckets.setdefault(key, {"created": 0, "delivered": 0})["created"] += 1
+        for delivered_ts in delivered_rows:
+            if delivered_ts is None:
+                continue
+            key = to_ist(delivered_ts).date().isoformat()
+            buckets.setdefault(key, {"created": 0, "delivered": 0})["delivered"] += 1
+        return [{"date": date, **counts} for date, counts in sorted(buckets.items())]
 
     async def get_by_awb(self, awb: str) -> Shipment | None:
         stmt = select(Shipment).where(Shipment.awb == awb)

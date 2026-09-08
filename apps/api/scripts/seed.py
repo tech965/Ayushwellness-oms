@@ -43,6 +43,10 @@ PERMISSIONS: dict[str, str] = {
     "orders.create": "Create orders",
     "orders.update": "Update order status/details (non-cancellation)",
     "orders.cancel": "Cancel orders",
+    "orders.confirm": (
+        "Telecaller: confirm an own-assigned order (PENDING -> CONFIRMED order status "
+        "only — distinct from logging a call outcome)"
+    ),
     "shipments.read": "View shipments",
     "shipments.update": "Create/update shipments",
     "customers.read": "View customers",
@@ -149,7 +153,7 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "chat.use",
     ],
     "TEAM_LEADER": ["telecalling.manage"],
-    "TELECALLER": ["calls.manage"],
+    "TELECALLER": ["calls.manage", "orders.confirm"],
 }
 
 COURIERS = [
