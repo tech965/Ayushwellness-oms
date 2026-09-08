@@ -17,7 +17,14 @@ from sqlalchemy import ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import AwareDateTime, Base, JSONType, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import NDRStatus, RTOStatus, ShipmentDelayStatus, ShipmentStatus, sa_enum
+from app.models.enums import (
+    NDRStatus,
+    RTOStatus,
+    ShipmentDelayStatus,
+    ShipmentStatus,
+    ShopifySyncStatus,
+    sa_enum,
+)
 from app.models.mixins import SyncMetadataMixin
 
 if TYPE_CHECKING:
@@ -67,6 +74,21 @@ class Shipment(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     actual_delivery_date: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     current_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_tracking_update_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+
+    # Outbound OMS -> Shopify fulfillment push (Phase 6). Never confused
+    # with `current_status` (Shiprocket/logistics) or the Order-level
+    # `fulfillment_status` (Shopify's own inbound summary) — see
+    # `ShopifySyncStatus`'s docstring.
+    shopify_fulfillment_id: Mapped[str | None] = mapped_column(
+        String(64), unique=True, nullable=True, index=True
+    )
+    shopify_sync_status: Mapped[ShopifySyncStatus] = mapped_column(
+        sa_enum(ShopifySyncStatus, "shopify_sync_status"),
+        nullable=False,
+        default=ShopifySyncStatus.NOT_APPLICABLE,
+    )
+    shopify_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shopify_synced_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
 
     order: Mapped[Order] = relationship(back_populates="shipments")
     courier: Mapped[Courier | None] = relationship(back_populates="shipments")

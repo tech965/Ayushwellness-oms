@@ -203,6 +203,50 @@ async def test_order_with_shipment_picked_up_leaves_queue(db_session: AsyncSessi
         assert str(order.id) not in order_ids
 
 
+async def test_order_whose_only_shipment_was_cancelled_reappears_in_queue(
+    db_session: AsyncSession,
+) -> None:
+    """A cancelled shipment attempt (wrong courier, customer address
+    issue, etc.) still leaves the order needing fulfillment -- it must
+    reappear in the queue, not be permanently excluded just because a
+    Shipment row exists. `shipment_queue_query` treats CANCELLED the same
+    as "no shipment at all" (only PICKED_UP-or-later blocks re-entry).
+    """
+    ops = await _make_ops_user(db_session)
+    customer = await make_customer(db_session)
+    order = await make_order(
+        db_session, order_number="QUEUE-CANCELLED-SHIP-1", customer=customer,
+        status=OrderStatus.CONFIRMED,
+    )
+    db_session.add(
+        Shipment(
+            order_id=order.id, current_status=ShipmentStatus.CANCELLED, source_system="manual"
+        )
+    )
+    await db_session.commit()
+
+    async with bearer_client(app, get_db, db_session, ops.id) as client:
+        response = await client.get("/api/v1/shipments/queue")
+        order_ids = {row["order_id"] for row in response.json()["data"]}
+        assert str(order.id) in order_ids
+
+
+async def test_cancelled_order_never_appears_in_queue_regardless_of_shipment_state(
+    db_session: AsyncSession,
+) -> None:
+    ops = await _make_ops_user(db_session)
+    customer = await make_customer(db_session)
+    order = await make_order(
+        db_session, order_number="QUEUE-CANCELLED-ORDER-1", customer=customer,
+        status=OrderStatus.CANCELLED,
+    )
+
+    async with bearer_client(app, get_db, db_session, ops.id) as client:
+        response = await client.get("/api/v1/shipments/queue")
+        order_ids = {row["order_id"] for row in response.json()["data"]}
+        assert str(order.id) not in order_ids
+
+
 async def test_shipment_queue_empty_state(db_session: AsyncSession) -> None:
     ops = await _make_ops_user(db_session)
     async with bearer_client(app, get_db, db_session, ops.id) as client:

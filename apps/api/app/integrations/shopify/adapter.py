@@ -15,6 +15,10 @@ from app.integrations.base import FetchPage, HealthCheckResult, IntegrationAdapt
 from app.integrations.shopify.client import ShopifyClient
 from app.integrations.shopify.config import ShopifyConfig
 from app.integrations.shopify.errors import ShopifyApiError
+from app.integrations.shopify.mutations import (
+    FULFILLMENT_CREATE_MUTATION,
+    OPEN_FULFILLMENT_ORDERS_QUERY,
+)
 from app.integrations.shopify.normalizer import ENTITY_NORMALIZERS
 from app.integrations.shopify.queries import ENTITY_QUERIES, SHOP_PING_QUERY, updated_since_filter
 from app.integrations.shopify.webhook_shapes import WEBHOOK_SHAPE_TRANSLATORS
@@ -155,6 +159,89 @@ class ShopifyAdapter(IntegrationAdapter):
         translate = WEBHOOK_SHAPE_TRANSLATORS.get(entity_type)
         graphql_shaped = translate(payload) if translate else payload
         return {"entity_type": entity_type, "normalized": normalizer.normalize(graphql_shaped)}
+
+    # ------------------------------------------------------------------
+    # Outbound: OMS -> Shopify fulfillment push (Phase 6). Everything
+    # above this point is pull-sync/webhook (inbound); these two methods
+    # are the only place this integration ever writes to Shopify.
+    # ------------------------------------------------------------------
+
+    async def get_open_fulfillment_order_id(self, shopify_order_gid: str) -> str | None:
+        """The first still-open (unfulfilled) FulfillmentOrder id for this
+        Shopify order, or `None` if there isn't one (already fully
+        fulfilled on Shopify's side, or the order has no fulfillment
+        orders at all) — `create_fulfillment` needs this id, and a `None`
+        here means "nothing to push," not an error.
+        """
+        client = self._get_client()
+        try:
+            data = await client.execute(
+                OPEN_FULFILLMENT_ORDERS_QUERY, {"orderId": shopify_order_gid}
+            )
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+        order = data.get("order")
+        if order is None:
+            return None
+        edges = (order.get("fulfillmentOrders") or {}).get("edges") or []
+        if not edges:
+            return None
+        return edges[0]["node"]["id"]
+
+    async def create_fulfillment(
+        self,
+        *,
+        fulfillment_order_id: str,
+        tracking_number: str | None,
+        tracking_company: str | None,
+        tracking_url: str | None,
+        notify_customer: bool = False,
+    ) -> dict[str, Any]:
+        """Fulfills a FulfillmentOrder's entire remaining quantity, with
+        tracking info attached when available. Raises `IntegrationError`
+        both for transport-level failures (auth/network/5xx — via
+        `ShopifyApiError`) and for Shopify's own business-validation
+        failures (`userErrors`, e.g. "already fulfilled") — the caller
+        never needs to check two different failure shapes.
+        """
+        fulfillment_input: dict[str, Any] = {
+            "lineItemsByFulfillmentOrder": [{"fulfillmentOrderId": fulfillment_order_id}],
+            "notifyCustomer": notify_customer,
+        }
+        if tracking_number or tracking_company or tracking_url:
+            fulfillment_input["trackingInfo"] = {
+                "number": tracking_number,
+                "company": tracking_company,
+                "url": tracking_url,
+            }
+
+        client = self._get_client()
+        try:
+            data = await client.execute(
+                FULFILLMENT_CREATE_MUTATION, {"fulfillment": fulfillment_input}
+            )
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+        result = data.get("fulfillmentCreate") or {}
+        user_errors = result.get("userErrors") or []
+        if user_errors:
+            message = "; ".join(
+                f"{','.join(e.get('field') or [])}: {e.get('message')}" for e in user_errors
+            )
+            raise IntegrationError(
+                f"Shopify rejected the fulfillment: {message}",
+                details={"error_type": "validation_error"},
+            )
+
+        fulfillment = result.get("fulfillment")
+        if fulfillment is None:
+            raise IntegrationError(
+                "Shopify fulfillmentCreate response had no fulfillment and no userErrors.",
+                details={"error_type": "validation_error"},
+            )
+        return fulfillment
 
     def normalize(self, entity_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         normalizer = ENTITY_NORMALIZERS.get(entity_type)

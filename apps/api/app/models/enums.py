@@ -80,6 +80,20 @@ class ShipmentDelayStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ShopifySyncStatus(StrEnum):
+    """Whether this OMS `Shipment` has been pushed to Shopify as a real
+    `Fulfillment` (`app.services.shopify_fulfillment_service`). Distinct
+    from `Shipment.current_status` (Shiprocket/logistics state) and from
+    `Order.fulfillment_status` (Shopify's own inbound-synced summary of
+    ITS fulfillment records) — this tracks the OUTBOUND push only.
+    """
+
+    NOT_APPLICABLE = "not_applicable"
+    PENDING = "pending"
+    SYNCED = "synced"
+    FAILED = "failed"
+
+
 class NDRStatus(StrEnum):
     OPEN = "open"
     CUSTOMER_CONTACTED = "customer_contacted"

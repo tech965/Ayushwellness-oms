@@ -21,7 +21,7 @@ from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.config import ShiprocketConfig
 from app.integrations.shiprocket.normalizer import TRACKING_NORMALIZER, extract_tracking_events
 from app.models.auth import User
-from app.models.enums import NDRStatus, ShipmentStatus
+from app.models.enums import NDRStatus, ShipmentStatus, ShopifySyncStatus
 from app.models.integration import IntegrationCode
 from app.models.ndr import NDR
 from app.models.shipment import Shipment
@@ -32,6 +32,7 @@ from app.services.courier_service import CourierService
 from app.services.inventory_service import InventoryService
 from app.services.ndr_service import NDRService
 from app.services.shipment_service import ShipmentService
+from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 
 class ShiprocketOperationsService:
@@ -43,6 +44,7 @@ class ShiprocketOperationsService:
         self.courier_service = CourierService(session)
         self.ndr_service = NDRService(session)
         self.inventory_service = InventoryService(session)
+        self.shopify_fulfillment_service = ShopifyFulfillmentService(session)
         self.audit = AuditService(session)
 
     def _get_adapter(self) -> ShiprocketAdapter:
@@ -127,6 +129,19 @@ class ShiprocketOperationsService:
             shiprocket_shipment_id=str(shiprocket_shipment_id),
             raw_external_payload=response,
         )
+
+        # Marks this shipment as eligible for the outbound Shopify push
+        # once it has real tracking info to send (see
+        # `ShopifyFulfillmentService`'s module docstring for why AWB
+        # assignment, not this step, is the actual trigger) — a plain
+        # OMS-manual order (no `shopify_order_id`) is never eligible.
+        # Creating a shipment never itself talks to Shopify.
+        initial_shopify_status = (
+            ShopifySyncStatus.PENDING
+            if order.shopify_order_id
+            else ShopifySyncStatus.NOT_APPLICABLE
+        )
+        await self.shipments.update(shipment, shopify_sync_status=initial_shopify_status)
 
         await self.audit.record(
             user=actor,
@@ -224,6 +239,17 @@ class ShiprocketOperationsService:
             new_value={"awb": awb_code, "courier": courier_name},
         )
         await self.session.commit()
+
+        # Trigger point for the outbound Shopify push (see
+        # `ShopifyFulfillmentService`'s module docstring) — only once the
+        # AWB assignment above is already fully committed and successful.
+        # Never raises: a Shopify failure is recorded on the shipment
+        # (`shopify_sync_status=FAILED`) and returned normally, it must
+        # never fail or roll back this already-successful AWB assignment.
+        if awb_code:
+            shipment = await self.shopify_fulfillment_service.sync_fulfillment_for_shipment(
+                shipment.id, actor=actor
+            )
         return shipment
 
     async def cancel_shipment(self, shipment_id: uuid.UUID, *, actor: User | None) -> Shipment:

@@ -18,6 +18,7 @@ import {
   useCancelShipment,
   useRequestPickup,
   useRefreshTracking,
+  useRetryShopifySync,
   useShipment,
   useShipmentTimeline,
 } from "@/services/shipments"
@@ -34,13 +35,15 @@ export default function ShipmentDetailPage() {
   const cancelShipment = useCancelShipment(shipmentId)
   const requestPickup = useRequestPickup(shipmentId)
   const refreshTracking = useRefreshTracking(shipmentId)
+  const retryShopifySync = useRetryShopifySync(shipmentId)
 
   const canOperate = hasPermission("shipments.update")
   const anyActionPending =
     assignAwb.isPending ||
     cancelShipment.isPending ||
     requestPickup.isPending ||
-    refreshTracking.isPending
+    refreshTracking.isPending ||
+    retryShopifySync.isPending
 
   const mutationOpts = (successMessage: string) => ({
     onSuccess: () => toast.success(successMessage),
@@ -95,6 +98,27 @@ export default function ShipmentDetailPage() {
               >
                 Cancel Shipment
               </Button>
+              {shipmentQuery.data?.shopify_sync_status === "failed" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={anyActionPending}
+                  onClick={() =>
+                    retryShopifySync.mutate(undefined, {
+                      onSuccess: (shipment) => {
+                        if (shipment?.shopify_sync_status === "synced") {
+                          toast.success("Shopify sync succeeded.")
+                        } else {
+                          toast.warning("Shopify sync still failing — see the error below.")
+                        }
+                      },
+                      onError: (error) => toast.error(getApiErrorMessage(error)),
+                    })
+                  }
+                >
+                  Retry Shopify Sync
+                </Button>
+              )}
             </div>
           )
         }
@@ -118,7 +142,15 @@ export default function ShipmentDetailPage() {
                 {shipment.rto_status && (
                   <StatusBadge domain="rto" status={shipment.rto_status} />
                 )}
+                <StatusBadge domain="shopify_sync" status={shipment.shopify_sync_status} />
               </CardHeader>
+              {shipment.shopify_sync_status === "failed" && shipment.shopify_sync_error && (
+                <CardContent className="border-border border-b pt-0 pb-4">
+                  <p className="text-destructive text-sm">
+                    Shopify sync failed: {shipment.shopify_sync_error}
+                  </p>
+                </CardContent>
+              )}
               <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                 <Stat
                   label="Order"
@@ -132,6 +164,10 @@ export default function ShipmentDetailPage() {
                   }
                 />
                 <Stat label="AWB" value={shipment.awb ?? "—"} />
+                <Stat
+                  label="Shopify fulfillment"
+                  value={shipment.shopify_fulfillment_id ?? "—"}
+                />
                 <Stat
                   label="Source"
                   value={

@@ -6,7 +6,14 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.enums import NDRStatus, PaymentType, RTOStatus, ShipmentDelayStatus, ShipmentStatus
+from app.models.enums import (
+    NDRStatus,
+    PaymentType,
+    RTOStatus,
+    ShipmentDelayStatus,
+    ShipmentStatus,
+    ShopifySyncStatus,
+)
 
 
 class ShipmentCreateRequest(BaseModel):
@@ -41,6 +48,10 @@ class ShipmentResponse(BaseModel):
     current_location: str | None
     last_tracking_update_at: datetime | None
     source_system: str | None
+    shopify_fulfillment_id: str | None
+    shopify_sync_status: ShopifySyncStatus
+    shopify_sync_error: str | None
+    shopify_synced_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

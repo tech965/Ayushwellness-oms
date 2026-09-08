@@ -29,6 +29,7 @@ from app.schemas.shipment import (
 from app.schemas.shiprocket import ShiprocketAssignAwbRequest
 from app.services.shipment_service import ShipmentService
 from app.services.shiprocket_service import ShiprocketOperationsService
+from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 router = APIRouter()
 
@@ -243,4 +244,27 @@ async def refresh_tracking(
     )
     return ApiResponse(
         data=ShipmentResponse.model_validate(shipment), message="Tracking refreshed."
+    )
+
+
+@router.post("/{shipment_id}/shopify/retry-sync", response_model=ApiResponse[ShipmentResponse])
+async def retry_shopify_sync(
+    shipment_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("shipments.update")),
+) -> ApiResponse[ShipmentResponse]:
+    """Manually retries the outbound Shopify fulfillment push (Part 13:
+    a "Retry Shopify Sync" action, gated by `shipments.update` — ADMIN
+    and FULFILLMENT have it, TELECALLER never does). Safe to call
+    whenever: a no-op if already SYNCED (idempotency guard lives in
+    `ShopifyFulfillmentService.sync_fulfillment_for_shipment`), and never
+    raises on a Shopify-side failure — the response is always 200 with
+    the shipment's current `shopify_sync_status`, which the frontend
+    reads to show success/still-failed.
+    """
+    shipment = await ShopifyFulfillmentService(session).sync_fulfillment_for_shipment(
+        shipment_id, actor=current_user
+    )
+    return ApiResponse(
+        data=ShipmentResponse.model_validate(shipment), message="Shopify sync retried."
     )

@@ -107,3 +107,23 @@ export function useRequestPickup(id: string) {
 export function useRefreshTracking(id: string) {
   return useShiprocketAction(id, "refresh-tracking")
 }
+
+/** Manually retries the outbound Shopify fulfillment push (Part 13's
+ * "Retry Shopify Sync" action). Always resolves 200 -- a still-failed
+ * retry comes back as a normal success response whose
+ * `shopify_sync_status` is still `"failed"`, never a rejected promise.
+ */
+export function useRetryShopifySync(id: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const response = await apiClient.post<ApiResponse<Shipment>>(
+        `/shipments/${id}/shopify/retry-sync`
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["shipments"] })
+    },
+  })
+}

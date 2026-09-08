@@ -149,6 +149,16 @@ const SHOPIFY_SHIPMENT_STATUS_TONES: Record<string, StatusTone> = {
   marked_as_fulfilled: "success",
 }
 
+// `app.models.enums.ShopifySyncStatus` — the OUTBOUND OMS -> Shopify
+// fulfillment push state (Phase 6), never the inbound `fulfillment`
+// domain above (Shopify's own summary of ITS fulfillment records).
+const SHOPIFY_SYNC_STATUS_TONES: Record<string, StatusTone> = {
+  not_applicable: "neutral",
+  pending: "warning",
+  synced: "success",
+  failed: "danger",
+}
+
 const SHIPMENT_DELAY_TONES: Record<string, StatusTone> = {
   on_time: "success",
   at_risk: "warning",
@@ -246,6 +256,7 @@ export type StatusDomain =
   | "fulfillment"
   | "shipment"
   | "shopify_shipment"
+  | "shopify_sync"
   | "shipment_delay"
   | "ndr"
   | "rto"
@@ -268,6 +279,7 @@ const TONE_MAPS: Record<StatusDomain, Record<string, StatusTone>> = {
   fulfillment: FULFILLMENT_STATUS_TONES,
   shipment: SHIPMENT_STATUS_TONES,
   shopify_shipment: SHOPIFY_SHIPMENT_STATUS_TONES,
+  shopify_sync: SHOPIFY_SYNC_STATUS_TONES,
   shipment_delay: SHIPMENT_DELAY_TONES,
   ndr: NDR_STATUS_TONES,
   rto: RTO_STATUS_TONES,

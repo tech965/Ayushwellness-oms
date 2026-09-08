@@ -13,6 +13,12 @@ export type ShipmentStatus =
 
 export type ShipmentDelayStatus = "on_time" | "at_risk" | "delayed" | "unknown"
 
+/** Outbound OMS -> Shopify fulfillment push state (Phase 6) — distinct
+ * from `ShipmentStatus` (Shiprocket/logistics) and from an order's own
+ * `fulfillment_status` (Shopify's inbound summary).
+ */
+export type ShopifySyncStatus = "not_applicable" | "pending" | "synced" | "failed"
+
 export interface Shipment {
   id: string
   order_id: string
@@ -29,6 +35,10 @@ export interface Shipment {
   current_location: string | null
   last_tracking_update_at: string | null
   source_system: string | null
+  shopify_fulfillment_id: string | null
+  shopify_sync_status: ShopifySyncStatus
+  shopify_sync_error: string | null
+  shopify_synced_at: string | null
   created_at: string
   updated_at: string
 }
