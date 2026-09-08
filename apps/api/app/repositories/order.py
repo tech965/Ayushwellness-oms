@@ -8,7 +8,7 @@ from sqlalchemy import String, and_, case, exists, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
 from app.models.customer import Customer
-from app.models.enums import OrderStatus, ShipmentStatus
+from app.models.enums import FulfillmentStatus, OrderStatus, ShipmentStatus
 from app.models.order import Order, OrderEvent, OrderItem
 from app.models.shipment import Shipment
 from app.repositories.base import AppendOnlyRepository, BaseRepository
@@ -180,14 +180,22 @@ class OrderRepository(BaseRepository[Order]):
         date_to: datetime | None = None,
     ):
         """Confirmed orders "awaiting shipment processing" — `Order.status
-        == CONFIRMED` and every `Shipment` row it has (if any) is still
-        CANCELLED or PENDING; the moment any shipment reaches PICKED_UP or
-        later it's genuinely shipping and drops out of the queue. Mirrors
-        `OrderAssignmentRepository.list_unfulfilled_pool`'s LEFT JOIN
-        shape — a NULL shipment side just means "not created yet", never
-        "dropped". Does not touch/duplicate `search_query` (the general
-        Orders list) or `ShipmentRepository.search_query` (the general
-        Shipments list) — this is a third, narrower view.
+        == CONFIRMED`, `Order.fulfillment_status != FULFILLED` (Shopify's
+        own record of whether this order was actually shipped — many
+        historical orders were fulfilled directly through Shopify and
+        never got a `Shipment` row created in this OMS at all, so
+        checking only for "no advanced Shipment row" hugely over-counted;
+        confirmed live against production, where it inflated this count
+        into the tens of thousands. Same signal
+        `OrderAssignmentRepository.list_unfulfilled_pool` already uses for
+        the identical reason), and every `Shipment` row it has (if any) is
+        still CANCELLED or PENDING; the moment any shipment reaches
+        PICKED_UP or later it's genuinely shipping and drops out of the
+        queue. Mirrors `list_unfulfilled_pool`'s LEFT JOIN shape — a NULL
+        shipment side just means "not created yet", never "dropped".
+        Does not touch/duplicate `search_query` (the general Orders list)
+        or `ShipmentRepository.search_query` (the general Shipments
+        list) — this is a third, narrower view.
         """
         active_shipment = aliased(Shipment)
         stmt = (
@@ -201,6 +209,7 @@ class OrderRepository(BaseRepository[Order]):
             )
             .where(
                 Order.status == OrderStatus.CONFIRMED,
+                Order.fulfillment_status != FulfillmentStatus.FULFILLED,
                 ~exists(
                     select(1).where(
                         Shipment.order_id == Order.id,
@@ -263,19 +272,23 @@ class OrderRepository(BaseRepository[Order]):
         return [(row[0], row[1]) for row in rows], total or 0
 
     async def confirmation_to_shipment_stats(self) -> tuple[int, int]:
-        """`(ever_confirmed, shipped_or_later)` across *every* order,
-        regardless of how it reached CONFIRMED — a telecaller confirming
-        a COD order, or `upsert_synced_order` auto-confirming an
-        already-paid prepaid order on Shopify sync, both count. "Ever
-        confirmed" is `status` currently at CONFIRMED or anything after
-        it in the strictly-monotonic state machine
-        (`ORDER_STATUS_TRANSITIONS`) — PROCESSING/PACKED/SHIPPED/
-        DELIVERED all imply the order passed through CONFIRMED at some
-        point, so a plain `IN (...)` on the current column is exact, no
-        `OrderEvent` history scan needed. `shipped_or_later` reuses the
-        same PICKED_UP-or-later definition `shipment_queue_query` and
-        `telecaller_confirmation_counts` already use for "genuinely
-        shipping, not just queued".
+        """`(ever_confirmed, shipped_or_later)`, scoped to orders that
+        were ever actually *eligible* for this OMS's own shipment
+        pipeline — `fulfillment_status != FULFILLED` (excludes orders
+        fulfilled directly through Shopify, which never touch this OMS's
+        `Shipment` table at all; same reasoning as
+        `shipment_queue_query`, and the same fix — confirmed live in
+        production, where omitting this filter inflated the historical
+        "ever confirmed" denominator into the tens of thousands and
+        made the resulting rate ~1%, meaningless noise). "Ever confirmed"
+        is `status` currently at CONFIRMED or anything after it in the
+        strictly-monotonic state machine (`ORDER_STATUS_TRANSITIONS`) —
+        PROCESSING/PACKED/SHIPPED/DELIVERED all imply the order passed
+        through CONFIRMED at some point, so a plain `IN (...)` on the
+        current column is exact, no `OrderEvent` history scan needed.
+        `shipped_or_later` reuses the same PICKED_UP-or-later definition
+        `shipment_queue_query` and `telecaller_confirmation_counts`
+        already use for "genuinely shipping, not just queued".
         """
         ever_confirmed_statuses = [
             OrderStatus.CONFIRMED,
@@ -298,7 +311,8 @@ class OrderRepository(BaseRepository[Order]):
             )
         )
         stmt = select(func.count(), func.count(case((has_shipped, 1)))).where(
-            Order.status.in_(ever_confirmed_statuses)
+            Order.status.in_(ever_confirmed_statuses),
+            Order.fulfillment_status != FulfillmentStatus.FULFILLED,
         )
         ever_confirmed, shipped_or_later = (await self.session.execute(stmt)).one()
         return int(ever_confirmed or 0), int(shipped_or_later or 0)

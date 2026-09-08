@@ -67,6 +67,33 @@ async def test_pending_order_does_not_appear_in_queue(db_session: AsyncSession) 
         assert str(order.id) not in order_ids
 
 
+async def test_confirmed_order_already_fulfilled_via_shopify_does_not_appear_in_queue(
+    db_session: AsyncSession,
+) -> None:
+    """Regression test: production showed 52,317 orders "awaiting
+    shipment" because a CONFIRMED order that was fulfilled directly
+    through Shopify (never touching this OMS's own Shipment table at
+    all) was incorrectly counted as still queued. `fulfillment_status`
+    is the real signal for "was this actually shipped".
+    """
+    from app.models.enums import FulfillmentStatus
+
+    ops = await _make_ops_user(db_session)
+    customer = await make_customer(db_session)
+    order = await make_order(
+        db_session,
+        order_number="QUEUE-FULFILLED-1",
+        customer=customer,
+        status=OrderStatus.CONFIRMED,
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+    )
+
+    async with bearer_client(app, get_db, db_session, ops.id) as client:
+        response = await client.get("/api/v1/shipments/queue")
+        order_ids = {row["order_id"] for row in response.json()["data"]}
+        assert str(order.id) not in order_ids
+
+
 async def test_order_with_shipment_still_pending_stays_in_queue(
     db_session: AsyncSession,
 ) -> None:
@@ -138,6 +165,51 @@ async def test_shipment_summary_returns_real_counts(db_session: AsyncSession) ->
         data = response.json()["data"]
         assert data["confirmed_awaiting_shipment"] >= 1
         assert data["total_shipments"] == 0
+
+
+async def test_confirmation_to_shipment_rate_excludes_shopify_fulfilled_orders(
+    db_session: AsyncSession,
+) -> None:
+    """Regression test: without excluding already-Shopify-fulfilled
+    orders from the denominator, this rate compared an all-time
+    historical count against a tiny OMS-only numerator and came out as
+    ~1% in production -- meaningless. A CONFIRMED-and-already-fulfilled
+    order must not dilute "ever confirmed" here: with one shipped order
+    and one already-fulfilled (excluded) order, the rate must be 100%,
+    not 50%.
+    """
+    from app.models.enums import FulfillmentStatus, ShipmentStatus
+    from app.models.shipment import Shipment
+
+    ops = await _make_ops_user(db_session)
+    customer = await make_customer(db_session)
+    await make_order(
+        db_session,
+        order_number="RATE-FULFILLED-1",
+        customer=customer,
+        status=OrderStatus.CONFIRMED,
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+    )
+    shipped_order = await make_order(
+        db_session,
+        order_number="RATE-SHIPPED-1",
+        customer=customer,
+        status=OrderStatus.CONFIRMED,
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+    )
+    db_session.add(
+        Shipment(
+            order_id=shipped_order.id,
+            current_status=ShipmentStatus.IN_TRANSIT,
+            source_system="manual",
+        )
+    )
+    await db_session.commit()
+
+    async with bearer_client(app, get_db, db_session, ops.id) as client:
+        response = await client.get("/api/v1/shipments/analytics")
+        assert response.status_code == 200
+        assert response.json()["data"]["confirmation_to_shipment_rate"] == 100.0
 
 
 async def test_shipment_analytics_empty_state_does_not_crash(db_session: AsyncSession) -> None:

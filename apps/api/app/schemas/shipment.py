@@ -132,8 +132,11 @@ class ShipmentAnalyticsResponse(BaseModel):
     status_breakdown: list[ShipmentStatusBreakdownItem]
     # % of orders that ever reached CONFIRMED (or any status after it —
     # the state machine is strictly monotonic, so PROCESSING/PACKED/
-    # SHIPPED/DELIVERED all imply "was confirmed") whose shipment has
-    # moved beyond the queue (PICKED_UP or later).
+    # SHIPPED/DELIVERED all imply "was confirmed") AND were never
+    # fulfilled directly through Shopify (excluded — those never enter
+    # this OMS's own shipment pipeline at all) whose shipment has moved
+    # beyond the queue (PICKED_UP or later). See
+    # `OrderRepository.confirmation_to_shipment_stats`'s docstring.
     confirmation_to_shipment_rate: float = 0.0
     daily_trend: list[DailyShipmentTrendPoint]
     telecaller_stats: list[TelecallerShipmentStats]
