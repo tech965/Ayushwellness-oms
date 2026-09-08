@@ -259,9 +259,16 @@ async def _diagnose() -> None:
                 if mismatch:
                     print(
                         "    *** MISMATCH: available_quantity does not equal the ledger's own "
-                        "running sum -- may indicate additional history beyond just the "
-                        "duplicate groups above; worth a closer look before trusting any "
-                        "auto-correction. ***"
+                        "running sum. Known, expected cause: `a4e9d3c7f158` (the migration that "
+                        "introduced available_quantity) seeded it via "
+                        "`UPDATE product_variants SET available_quantity = inventory_quantity` "
+                        "-- a one-time bulk copy with NO corresponding INITIAL_STOCK ledger row. "
+                        "Every variant's real starting balance is invisible to this ledger; "
+                        "sum(quantity_delta) only reflects movements SINCE that seed point. "
+                        "This mismatch alone is NOT evidence of corruption -- but it does mean "
+                        "the ledger must never be treated as a complete history, and this is "
+                        "exactly why the migration's dedup logic never uses available_quantity "
+                        "to justify a quantity correction. ***"
                     )
                 else:
                     print("    OK: available_quantity matches the ledger's running sum.")
