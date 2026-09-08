@@ -370,6 +370,52 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
             by_telecaller.setdefault(assigned_to, {})["_follow_ups"] = count
         return list(by_telecaller.items())
 
+    async def total_attempt_count(self, *, telecaller_id: uuid.UUID) -> int:
+        """Real total call-attempt count across every order currently
+        assigned to this telecaller — `sum(attempt_count)`, distinct from
+        the per-order "called/not called" breakdown `telecaller_performance`
+        gives (an order called 3 times still only counts once there).
+        `attempt_count` itself already reflects edits/deletes correctly
+        (see `TelecallingService._recompute_assignment_from_attempts`), so
+        this stays accurate without re-deriving it from `CallAttempt` rows.
+        """
+        stmt = select(func.coalesce(func.sum(OrderAssignment.attempt_count), 0)).where(
+            OrderAssignment.assignment_status == AssignmentStatus.ACTIVE,
+            OrderAssignment.assigned_to == telecaller_id,
+        )
+        return int(await self.session.scalar(stmt) or 0)
+
+    async def fulfilled_counts(
+        self, *, team_leader_id: uuid.UUID | None = None, telecaller_id: uuid.UUID | None = None
+    ) -> dict[uuid.UUID, int]:
+        """How many of a telecaller's *currently* assigned orders are
+        *currently* `Order.fulfillment_status == FULFILLED` — a live
+        snapshot, not a historical "fulfilled on day X" count (no
+        reliable fulfillment-timestamp exists anywhere in this schema; see
+        `TelecallingService.telecaller_detail_summary`'s docstring).
+        Deliberately never conflated with `TelecallingStatus.CONFIRMED` —
+        a call outcome and an actual fulfillment are separate facts about
+        an order.
+        """
+        base_filters = [OrderAssignment.assignment_status == AssignmentStatus.ACTIVE]
+        if team_leader_id is not None:
+            base_filters.append(OrderAssignment.team_leader_id == team_leader_id)
+        if telecaller_id is not None:
+            base_filters.append(OrderAssignment.assigned_to == telecaller_id)
+
+        stmt = (
+            select(OrderAssignment.assigned_to, func.count())
+            .select_from(OrderAssignment)
+            .join(Order, Order.id == OrderAssignment.order_id)
+            .where(*base_filters, Order.fulfillment_status == FulfillmentStatus.FULFILLED)
+            .group_by(OrderAssignment.assigned_to)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        result: dict[uuid.UUID, int] = {}
+        for assigned_to, count in rows:
+            result[assigned_to] = count
+        return result
+
 
 class CallAttemptRepository(AppendOnlyRepository[CallAttempt]):
     model = CallAttempt
@@ -386,6 +432,64 @@ class CallAttemptRepository(AppendOnlyRepository[CallAttempt]):
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def resolve_current_for_order(
+        self, order_id: uuid.UUID, *, include_void: bool = False
+    ) -> list[CallAttempt]:
+        """Resolves every `attempt_number` for this order to its *current*
+        row — the original, or its latest correction if it's been edited
+        or deleted (see `CallAttempt`'s docstring). Reverse-chronological
+        by `attempt_number`, same ordering as `list_for_order`.
+
+        Resolution is by chain structure, not by comparing `created_at`:
+        the "current" row for an `attempt_number` is whichever row is
+        never itself referenced by another row's `corrects_attempt_id` —
+        the one tip of that correction chain. This is exact regardless of
+        timestamp precision (SQLite's `CURRENT_TIMESTAMP` default is
+        whole-second, so an attempt corrected within the same second as
+        it was created would tie under a `created_at` comparison — this
+        approach has no such edge case). A per-order fetch-then-resolve-
+        in-Python (never a DB-side `DISTINCT ON`) — an order realistically
+        has a handful of call attempts, never enough for this to be a
+        performance concern, and staying in Python keeps this dialect-
+        portable (SQLite in tests, Postgres in production).
+        """
+        all_rows = await self.list_for_order(order_id)
+        corrected_ids = {r.corrects_attempt_id for r in all_rows if r.corrects_attempt_id}
+        resolved = sorted(
+            (r for r in all_rows if r.id not in corrected_ids),
+            key=lambda r: r.attempt_number,
+            reverse=True,
+        )
+        if not include_void:
+            resolved = [r for r in resolved if not r.is_void]
+        return resolved
+
+    async def get_correctable_for_order(
+        self, attempt_id: uuid.UUID, order_id: uuid.UUID
+    ) -> CallAttempt | None:
+        """The *current* row for whichever `attempt_number` `attempt_id`
+        belongs to — resolving via `attempt_number` (not returning
+        `attempt_id`'s row itself) means editing/deleting always applies
+        to the latest state, so two edits made in quick succession both
+        land on top of each other correctly instead of one silently
+        clobbering based on a stale id. Returns `None` if `attempt_id`
+        doesn't belong to this order, or the attempt is already void.
+        """
+        target = await self.get_by_id(attempt_id)
+        if target is None or target.order_id != order_id:
+            return None
+        current = next(
+            (
+                r
+                for r in await self.resolve_current_for_order(order_id, include_void=True)
+                if r.attempt_number == target.attempt_number
+            ),
+            None,
+        )
+        if current is None or current.is_void:
+            return None
+        return current
 
     async def next_attempt_number(self, order_id: uuid.UUID) -> int:
         stmt = select(func.max(CallAttempt.attempt_number)).where(CallAttempt.order_id == order_id)
@@ -410,6 +514,44 @@ class CallAttemptRepository(AppendOnlyRepository[CallAttempt]):
         )
         rows = (await self.session.execute(stmt)).all()
         return [(row[0], row[1]) for row in rows]
+
+    async def list_resolved_for_telecaller_in_range(
+        self, telecaller_id: uuid.UUID, *, date_from: datetime, date_to: datetime
+    ) -> list[CallAttempt]:
+        """Every *currently active* (non-void, latest-corrected) call
+        attempt this telecaller made with `attempted_at` in
+        `[date_from, date_to]` — backs the daily performance graph. An
+        edit preserves the original `attempted_at` (see
+        `TelecallingService.edit_call_attempt`), so filtering on
+        `attempted_at` here always keeps a corrected attempt in the same
+        day-bucket its call actually happened in, never the day it was
+        edited. Resolution is chain-tip-based, same as
+        `resolve_current_for_order` (see its docstring for why, not a
+        `created_at` comparison) — just across every order for one
+        telecaller instead of one order.
+
+        Known limitation: filters on `CallAttempt.telecaller_id`, so if an
+        order is reassigned to a *different* telecaller who then edits or
+        deletes an attempt originally logged by this telecaller, that
+        correction row (owned by the new telecaller) won't be fetched
+        here, and this method would still show the pre-correction state.
+        `calls.manage` only ever lets the *currently* assigned telecaller
+        correct an attempt, so this only diverges when a reassignment
+        happens between the original call and a later correction of it —
+        rare, and not a permission or crash risk, just a display lag for
+        that one edge case.
+        """
+        stmt = (
+            select(CallAttempt)
+            .where(
+                CallAttempt.telecaller_id == telecaller_id,
+                CallAttempt.attempted_at >= date_from,
+                CallAttempt.attempted_at <= date_to,
+            )
+        )
+        rows = list((await self.session.execute(stmt)).scalars().all())
+        corrected_ids = {r.corrects_attempt_id for r in rows if r.corrects_attempt_id}
+        return [r for r in rows if r.id not in corrected_ids and not r.is_void]
 
 
 class CheckoutAssignmentRepository(BaseRepository[CheckoutAssignment]):

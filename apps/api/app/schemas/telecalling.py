@@ -87,6 +87,7 @@ class CallAttemptResponse(BaseModel):
     notes: str | None
     next_follow_up_at: datetime | None
     created_at: datetime
+    is_edited: bool = False
 
 
 class OrderAssignmentResponse(BaseModel):
@@ -254,6 +255,44 @@ class TelecallerPerformanceResponse(BaseModel):
     # duplicate outcome systems" rule); CONFIRMED is treated as the
     # converted-lead signal.
     conversion_rate: float = 0.0
+
+
+class TelecallerDetailSummaryResponse(BaseModel):
+    """Summary cards for one telecaller's individual performance page —
+    `TelecallerPerformanceResponse`'s fields plus `cancelled` and
+    `fulfilled` (a live count, not a historical one — see
+    `TelecallingService.telecaller_detail_summary`'s docstring for why no
+    day-bucketed fulfillment figure is offered).
+    """
+
+    telecaller_id: uuid.UUID
+    telecaller_name: str
+    assigned: int
+    called: int
+    pending: int = 0
+    connected: int
+    interested: int = 0
+    follow_ups: int
+    confirmed: int
+    not_interested: int
+    cancelled: int = 0
+    fulfilled: int = 0
+    # Real total call-attempt count (an order called 3 times counts as 3
+    # here, not 1) — distinct from `called`, which is a per-order "has
+    # this order been called at least once" count. See
+    # `OrderAssignmentRepository.total_attempt_count`'s docstring.
+    total_attempts: int = 0
+    conversion_rate: float = 0.0
+
+
+class TelecallerDailyPerformancePoint(BaseModel):
+    date: str
+    attempts: int
+    connected: int
+    confirmed: int
+    not_interested: int
+    cancelled: int
+    follow_ups: int
 
 
 class TelecallingSummaryResponse(BaseModel):

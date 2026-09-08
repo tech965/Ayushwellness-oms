@@ -2,12 +2,28 @@
 
 import * as React from "react"
 import { useParams } from "next/navigation"
-import { CalendarClock, CheckCircle2, PhoneCall, XCircle } from "lucide-react"
+import {
+  CalendarClock,
+  CheckCircle2,
+  Pencil,
+  PhoneCall,
+  Trash2,
+  XCircle,
+} from "lucide-react"
 import { toast } from "sonner"
 
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -27,15 +43,22 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDateTime, formatMoney } from "@/lib/format"
 import {
   useCallHistory,
+  useDeleteCallAttempt,
+  useEditCallAttempt,
   useLogCall,
   useMyOrder,
   useScheduleFollowUp,
 } from "@/services/telecaller"
-import { CALL_OUTCOME_OPTIONS, type TelecallingStatus } from "@/types/telecalling"
+import {
+  CALL_OUTCOME_OPTIONS,
+  type CallAttempt,
+  type TelecallingStatus,
+} from "@/types/telecalling"
 
 function SummaryStat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -48,6 +71,17 @@ function SummaryStat({ label, value }: { label: string; value: React.ReactNode }
   )
 }
 
+/** ISO datetime -> the local-time value a `datetime-local` input expects
+ * ("YYYY-MM-DDTHH:mm") — used only to pre-fill the Edit dialog with an
+ * existing attempt's follow-up date; a fresh Log Call always starts blank
+ * so this conversion was never needed there.
+ */
+function toDatetimeLocalValue(iso: string): string {
+  const date = new Date(iso)
+  const offsetMs = date.getTimezoneOffset() * 60_000
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16)
+}
+
 export default function TelecallerOrderDetailPage() {
   const params = useParams<{ id: string }>()
   const orderId = params.id
@@ -56,6 +90,8 @@ export default function TelecallerOrderDetailPage() {
   const historyQuery = useCallHistory(orderId)
   const logCall = useLogCall(orderId)
   const scheduleFollowUp = useScheduleFollowUp(orderId)
+  const editCallAttempt = useEditCallAttempt(orderId)
+  const deleteCallAttempt = useDeleteCallAttempt(orderId)
 
   const [logCallOpen, setLogCallOpen] = React.useState(false)
   const [followUpOpen, setFollowUpOpen] = React.useState(false)
@@ -63,6 +99,58 @@ export default function TelecallerOrderDetailPage() {
   const [notes, setNotes] = React.useState("")
   const [nextFollowUp, setNextFollowUp] = React.useState("")
   const [followUpOnly, setFollowUpOnly] = React.useState("")
+
+  const [editTarget, setEditTarget] = React.useState<CallAttempt | null>(null)
+  const [editOutcome, setEditOutcome] = React.useState<TelecallingStatus>("connected")
+  const [editNotes, setEditNotes] = React.useState("")
+  const [editFollowUp, setEditFollowUp] = React.useState("")
+  const [deleteTarget, setDeleteTarget] = React.useState<CallAttempt | null>(null)
+
+  function openEdit(attempt: CallAttempt) {
+    setEditTarget(attempt)
+    setEditOutcome(attempt.outcome)
+    setEditNotes(attempt.notes ?? "")
+    setEditFollowUp(
+      attempt.next_follow_up_at ? toDatetimeLocalValue(attempt.next_follow_up_at) : ""
+    )
+  }
+
+  function handleEditSave() {
+    if (!editTarget) return
+    editCallAttempt.mutate(
+      {
+        attemptId: editTarget.id,
+        input: {
+          outcome: editOutcome,
+          notes: editNotes || undefined,
+          next_follow_up_at: editFollowUp
+            ? new Date(editFollowUp).toISOString()
+            : undefined,
+        },
+      },
+      {
+        onSuccess: () => {
+          toast.success("Call attempt updated.")
+          setEditTarget(null)
+        },
+        onError: (error) => toast.error(getApiErrorMessage(error)),
+      }
+    )
+  }
+
+  function handleConfirmDelete() {
+    if (!deleteTarget) return
+    deleteCallAttempt.mutate(deleteTarget.id, {
+      onSuccess: () => {
+        toast.success("Call attempt deleted.")
+        setDeleteTarget(null)
+      },
+      onError: (error) => {
+        toast.error(getApiErrorMessage(error))
+        setDeleteTarget(null)
+      },
+    })
+  }
 
   function handleLogCall() {
     logCall.mutate(
@@ -266,10 +354,47 @@ export default function TelecallerOrderDetailPage() {
                           className="border-border border-b pb-4 last:border-0 last:pb-0"
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-semibold">
+                            <span className="flex items-center gap-1.5 text-sm font-semibold">
                               Attempt #{attempt.attempt_number}
+                              {attempt.is_edited && (
+                                <span className="text-muted-foreground text-xs font-normal">
+                                  (edited)
+                                </span>
+                              )}
                             </span>
-                            <StatusBadge domain="telecalling" status={attempt.outcome} />
+                            <div className="flex items-center gap-1">
+                              <StatusBadge
+                                domain="telecalling"
+                                status={attempt.outcome}
+                              />
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    aria-label="Edit call attempt"
+                                    onClick={() => openEdit(attempt)}
+                                  >
+                                    <Pencil />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Edit</TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                                    aria-label="Delete call attempt"
+                                    onClick={() => setDeleteTarget(attempt)}
+                                  >
+                                    <Trash2 />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Delete</TooltipContent>
+                              </Tooltip>
+                            </div>
                           </div>
                           <p className="text-muted-foreground mt-0.5 text-xs">
                             {formatDateTime(attempt.attempted_at)}
@@ -365,6 +490,86 @@ export default function TelecallerOrderDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={editTarget !== null}
+        onOpenChange={(open) => !open && setEditTarget(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Edit Attempt {editTarget ? `#${editTarget.attempt_number}` : ""}
+            </DialogTitle>
+            <DialogDescription>
+              Correct the outcome or notes for this call.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <Select
+              value={editOutcome}
+              onValueChange={(v) => setEditOutcome(v as TelecallingStatus)}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {CALL_OUTCOME_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Textarea
+              placeholder="Notes (optional)"
+              value={editNotes}
+              onChange={(e) => setEditNotes(e.target.value)}
+            />
+            <div>
+              <label className="text-muted-foreground mb-1 block text-xs">
+                Next follow-up (optional)
+              </label>
+              <Input
+                type="datetime-local"
+                value={editFollowUp}
+                onChange={(e) => setEditFollowUp(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditTarget(null)}>
+              Cancel
+            </Button>
+            <Button onClick={handleEditSave} disabled={editCallAttempt.isPending}>
+              {editCallAttempt.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this call attempt?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This call history entry will be permanently removed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmDelete}
+              disabled={deleteCallAttempt.isPending}
+            >
+              {deleteCallAttempt.isPending ? "Deleting..." : "Delete"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }

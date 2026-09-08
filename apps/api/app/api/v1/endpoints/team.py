@@ -10,7 +10,7 @@ scoping.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +37,8 @@ from app.schemas.telecalling import (
     OrderAssignmentResponse,
     ReassignCheckoutRequest,
     ReassignOrderRequest,
+    TelecallerDailyPerformancePoint,
+    TelecallerDetailSummaryResponse,
     TelecallerOptionResponse,
     TelecallerPerformanceResponse,
     TelecallingSummaryResponse,
@@ -499,6 +501,44 @@ async def get_telecaller_checkouts(
         ],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
+
+
+@router.get(
+    "/telecallers/{telecaller_id}/summary",
+    response_model=ApiResponse[TelecallerDetailSummaryResponse],
+)
+async def get_telecaller_summary(
+    telecaller_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("telecalling.manage")),
+) -> ApiResponse[TelecallerDetailSummaryResponse]:
+    summary = await TelecallingService(session).telecaller_detail_summary(
+        telecaller_id, actor=current_user
+    )
+    return ApiResponse(data=TelecallerDetailSummaryResponse(**summary))
+
+
+@router.get(
+    "/telecallers/{telecaller_id}/daily",
+    response_model=ApiResponse[list[TelecallerDailyPerformancePoint]],
+)
+async def get_telecaller_daily_performance(
+    telecaller_id: uuid.UUID,
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("telecalling.manage")),
+) -> ApiResponse[list[TelecallerDailyPerformancePoint]]:
+    """Defaults to the last 30 days — same default window convention as
+    the Admin dashboard's own analytics timeseries (`DEFAULT_WINDOW_DAYS`
+    in `app.services.analytics_service`).
+    """
+    resolved_to = date_to or datetime.now(UTC)
+    resolved_from = date_from or (resolved_to - timedelta(days=30))
+    points = await TelecallingService(session).telecaller_daily_performance(
+        telecaller_id, actor=current_user, date_from=resolved_from, date_to=resolved_to
+    )
+    return ApiResponse(data=[TelecallerDailyPerformancePoint(**p) for p in points])
 
 
 @router.get("/summary", response_model=ApiResponse[TelecallingSummaryResponse])

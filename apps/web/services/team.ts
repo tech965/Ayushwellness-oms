@@ -14,6 +14,8 @@ import type {
   OrderAssignment,
   ReassignCheckoutInput,
   ReassignOrderInput,
+  TelecallerDailyPerformancePoint,
+  TelecallerDetailSummary,
   TelecallerOption,
   TelecallerPerformance,
   TelecallingSummary,
@@ -196,6 +198,56 @@ export function useTelecallerOrders(
     queryFn: () => fetchTelecallerOrders(telecallerId, params),
     enabled: Boolean(telecallerId),
     placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchTelecallerSummary(
+  telecallerId: string
+): Promise<TelecallerDetailSummary> {
+  const response = await apiClient.get<ApiResponse<TelecallerDetailSummary>>(
+    `/team/telecallers/${telecallerId}/summary`
+  )
+  if (!response.data.data) throw new Error("Telecaller summary not available.")
+  return response.data.data
+}
+
+export function useTelecallerSummary(telecallerId: string) {
+  return useQuery({
+    queryKey: ["team", "telecallers", telecallerId, "summary"],
+    queryFn: () => fetchTelecallerSummary(telecallerId),
+    enabled: Boolean(telecallerId),
+  })
+}
+
+interface TelecallerDailyParams {
+  date_from?: string
+  date_to?: string
+}
+
+async function fetchTelecallerDailyPerformance(
+  telecallerId: string,
+  params: TelecallerDailyParams
+): Promise<TelecallerDailyPerformancePoint[]> {
+  const response = await apiClient.get<ApiResponse<TelecallerDailyPerformancePoint[]>>(
+    `/team/telecallers/${telecallerId}/daily`,
+    {
+      params: {
+        date_from: params.date_from || undefined,
+        date_to: params.date_to || undefined,
+      },
+    }
+  )
+  return response.data.data ?? []
+}
+
+export function useTelecallerDailyPerformance(
+  telecallerId: string,
+  params: TelecallerDailyParams = {}
+) {
+  return useQuery({
+    queryKey: ["team", "telecallers", telecallerId, "daily", params],
+    queryFn: () => fetchTelecallerDailyPerformance(telecallerId, params),
+    enabled: Boolean(telecallerId),
   })
 }
 

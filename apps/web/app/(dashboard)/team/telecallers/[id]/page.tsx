@@ -2,15 +2,32 @@
 
 import * as React from "react"
 import { useParams, useRouter } from "next/navigation"
+import {
+  CalendarClock,
+  CheckCircle2,
+  ListChecks,
+  PhoneCall,
+  Target,
+  ThumbsDown,
+  Truck,
+  UserCheck,
+  XCircle,
+} from "lucide-react"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
+import { StatTile } from "@/components/shared/stat-tile"
 import { StatusBadge } from "@/components/shared/status-badge"
+import { TelecallerDailyPerformanceChart } from "@/components/team/telecaller-daily-performance-chart"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import { useTelecallerOrders } from "@/services/team"
+import {
+  useTelecallerDailyPerformance,
+  useTelecallerOrders,
+  useTelecallerSummary,
+} from "@/services/team"
 import type { AssignedOrder } from "@/types/telecalling"
 
 const FILTER_DEFAULTS = { page: 1, page_size: 20 }
@@ -63,18 +80,90 @@ function TeamTelecallerWorkloadContent() {
   const telecallerId = params.id
   const { filters, setFilters } = useUrlFilters(FILTER_DEFAULTS)
 
+  const summaryQuery = useTelecallerSummary(telecallerId)
+  const dailyQuery = useTelecallerDailyPerformance(telecallerId)
   const query = useTelecallerOrders(telecallerId, {
     page: filters.page,
     pageSize: filters.page_size,
   })
 
+  const summary = summaryQuery.data
+  const title = summary
+    ? `${summary.telecaller_name} — Telecaller Performance`
+    : "Telecaller Performance"
+
   return (
     <>
       <PageHeader
-        title="Telecaller Workload"
+        title={title}
         backHref="/team/telecallers"
         backLabel="Back to Telecallers"
       />
+
+      <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+        <StatTile
+          label="Total Assigned"
+          value={summary?.assigned ?? "—"}
+          icon={ListChecks}
+          accent="slate"
+        />
+        <StatTile
+          label="Total Attempts"
+          value={summary?.total_attempts ?? "—"}
+          icon={PhoneCall}
+          accent="blue"
+        />
+        <StatTile
+          label="Connected"
+          value={summary?.connected ?? "—"}
+          icon={UserCheck}
+          accent="violet"
+        />
+        <StatTile
+          label="Confirmed"
+          value={summary?.confirmed ?? "—"}
+          icon={CheckCircle2}
+          accent="emerald"
+        />
+        <StatTile
+          label="Not Interested"
+          value={summary?.not_interested ?? "—"}
+          icon={ThumbsDown}
+          accent="orange"
+        />
+        <StatTile
+          label="Cancelled"
+          value={summary?.cancelled ?? "—"}
+          icon={XCircle}
+          accent="orange"
+        />
+        <StatTile
+          label="Follow-ups"
+          value={summary?.follow_ups ?? "—"}
+          icon={CalendarClock}
+          accent="amber"
+        />
+        <StatTile
+          label="Orders Fulfilled"
+          value={summary?.fulfilled ?? "—"}
+          icon={Truck}
+          accent="emerald"
+        />
+        <StatTile
+          label="Conversion Rate"
+          value={summary ? `${summary.conversion_rate}%` : "—"}
+          icon={Target}
+          accent="violet"
+        />
+      </div>
+
+      <div className="mb-6">
+        <TelecallerDailyPerformanceChart
+          data={dailyQuery.data}
+          isLoading={dailyQuery.isLoading}
+        />
+      </div>
+
       <QueryStates
         isLoading={query.isLoading}
         isError={query.isError}

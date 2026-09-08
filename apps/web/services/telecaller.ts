@@ -9,6 +9,7 @@ import type {
   CallHistoryEntry,
   CheckoutAssignment,
   CheckoutCallAttempt,
+  EditCallAttemptInput,
   LogCallInput,
   OrderAssignment,
   TelecallingSummary,
@@ -103,6 +104,49 @@ export function useLogCall(orderId: string) {
       // TanStack's partial-match check silently skipped it and the list
       // kept showing stale status/attempt data until its 30s staleTime
       // happened to expire.
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "follow-ups"] })
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "summary"] })
+    },
+  })
+}
+
+export function useEditCallAttempt(orderId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({
+      attemptId,
+      input,
+    }: {
+      attemptId: string
+      input: EditCallAttemptInput
+    }) => {
+      const response = await apiClient.patch<ApiResponse<CallAttempt>>(
+        `/telecaller/orders/${orderId}/calls/${attemptId}`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      // See `useLogCall`'s identical comment above — an edit can change
+      // `current_status`/`attempt_count`, so the order detail and list
+      // queries need invalidating too, not just call history.
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "follow-ups"] })
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "summary"] })
+    },
+  })
+}
+
+export function useDeleteCallAttempt(orderId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (attemptId: string) => {
+      await apiClient.delete<ApiResponse<null>>(
+        `/telecaller/orders/${orderId}/calls/${attemptId}`
+      )
+    },
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "follow-ups"] })
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "summary"] })

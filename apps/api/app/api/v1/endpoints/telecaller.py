@@ -108,6 +108,42 @@ async def log_call(
     return ApiResponse(data=CallAttemptResponse.model_validate(attempt), message="Call logged.")
 
 
+@router.patch(
+    "/orders/{order_id}/calls/{attempt_id}", response_model=ApiResponse[CallAttemptResponse]
+)
+async def edit_call_attempt(
+    order_id: uuid.UUID,
+    attempt_id: uuid.UUID,
+    payload: LogCallRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("calls.manage")),
+) -> ApiResponse[CallAttemptResponse]:
+    correction = await TelecallingService(session).edit_call_attempt(
+        order_id,
+        attempt_id,
+        outcome=payload.outcome,
+        notes=payload.notes,
+        next_follow_up_at=payload.next_follow_up_at,
+        actor=current_user,
+    )
+    return ApiResponse(
+        data=CallAttemptResponse.model_validate(correction), message="Call attempt updated."
+    )
+
+
+@router.delete("/orders/{order_id}/calls/{attempt_id}", response_model=ApiResponse[None])
+async def delete_call_attempt(
+    order_id: uuid.UUID,
+    attempt_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("calls.manage")),
+) -> ApiResponse[None]:
+    await TelecallingService(session).delete_call_attempt(
+        order_id, attempt_id, actor=current_user
+    )
+    return ApiResponse(data=None, message="Call attempt deleted.")
+
+
 @router.post("/orders/{order_id}/follow-up", response_model=ApiResponse[OrderAssignmentResponse])
 async def schedule_follow_up(
     order_id: uuid.UUID,

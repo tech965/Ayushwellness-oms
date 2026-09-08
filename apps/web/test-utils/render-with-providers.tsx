@@ -2,8 +2,13 @@ import type { ReactElement } from "react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { render, type RenderResult } from "@testing-library/react"
 
-/** Wraps a component under test in a fresh QueryClientProvider — every
- * retry/staleTime is disabled so tests are deterministic and fast.
+import { TooltipProvider } from "@/components/ui/tooltip"
+
+/** Wraps a component under test in a fresh QueryClientProvider (every
+ * retry/staleTime disabled so tests are deterministic and fast) plus the
+ * same `TooltipProvider` `app/providers.tsx` mounts in production — any
+ * component under test that renders a `Tooltip` needs one in its
+ * ancestry or Radix throws, same as it would in the real app tree.
  */
 export function renderWithProviders(ui: ReactElement): RenderResult {
   const queryClient = new QueryClient({
@@ -13,5 +18,9 @@ export function renderWithProviders(ui: ReactElement): RenderResult {
     },
   })
 
-  return render(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>)
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>{ui}</TooltipProvider>
+    </QueryClientProvider>
+  )
 }

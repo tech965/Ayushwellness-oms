@@ -162,6 +162,7 @@ export interface CallAttempt {
   notes: string | null
   next_follow_up_at: string | null
   created_at: string
+  is_edited: boolean
 }
 
 export interface CallHistoryEntry extends CallAttempt {
@@ -245,4 +246,41 @@ export interface LogCallInput {
   outcome: TelecallingStatus
   notes?: string
   next_follow_up_at?: string
+}
+
+/** Same shape as `LogCallInput` — the edit dialog pre-fills these from
+ * the attempt being corrected.
+ */
+export type EditCallAttemptInput = LogCallInput
+
+/** One telecaller's individual performance page — `TelecallerPerformance`'s
+ * fields plus `cancelled` and `fulfilled` (a live snapshot count, not a
+ * historical one — see the backend service's docstring for why no
+ * day-bucketed fulfillment figure exists).
+ */
+export interface TelecallerDetailSummary {
+  telecaller_id: string
+  telecaller_name: string
+  assigned: number
+  called: number
+  pending: number
+  connected: number
+  interested: number
+  follow_ups: number
+  confirmed: number
+  not_interested: number
+  cancelled: number
+  fulfilled: number
+  total_attempts: number
+  conversion_rate: number
+}
+
+export interface TelecallerDailyPerformancePoint {
+  date: string
+  attempts: number
+  connected: number
+  confirmed: number
+  not_interested: number
+  cancelled: number
+  follow_ups: number
 }

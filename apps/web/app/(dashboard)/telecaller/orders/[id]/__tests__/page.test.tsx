@@ -6,6 +6,8 @@ import { renderWithProviders } from "@/test-utils/render-with-providers"
 import TelecallerOrderDetailPage from "@/app/(dashboard)/telecaller/orders/[id]/page"
 import {
   useCallHistory,
+  useDeleteCallAttempt,
+  useEditCallAttempt,
   useLogCall,
   useMyOrder,
   useScheduleFollowUp,
@@ -22,12 +24,16 @@ vi.mock("@/services/telecaller", () => ({
   useCallHistory: vi.fn(),
   useLogCall: vi.fn(),
   useScheduleFollowUp: vi.fn(),
+  useEditCallAttempt: vi.fn(),
+  useDeleteCallAttempt: vi.fn(),
 }))
 
 const mockedUseMyOrder = vi.mocked(useMyOrder)
 const mockedUseCallHistory = vi.mocked(useCallHistory)
 const mockedUseLogCall = vi.mocked(useLogCall)
 const mockedUseScheduleFollowUp = vi.mocked(useScheduleFollowUp)
+const mockedUseEditCallAttempt = vi.mocked(useEditCallAttempt)
+const mockedUseDeleteCallAttempt = vi.mocked(useDeleteCallAttempt)
 
 const ORDER = {
   order_id: "order-1",
@@ -61,39 +67,49 @@ const CALL_HISTORY = [
     notes: null,
     next_follow_up_at: null,
     created_at: "2026-08-27T11:32:00Z",
+    is_edited: false,
   },
 ]
+
+function mockCommonHooks() {
+  mockedUseMyOrder.mockReturnValue({
+    isLoading: false,
+    isError: false,
+    error: null,
+    data: ORDER,
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useMyOrder>)
+  mockedUseCallHistory.mockReturnValue({
+    isLoading: false,
+    isError: false,
+    error: null,
+    data: CALL_HISTORY,
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useCallHistory>)
+  mockedUseScheduleFollowUp.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useScheduleFollowUp>)
+}
 
 describe("TelecallerOrderDetailPage", () => {
   it("renders order + call management info and submits a logged call", async () => {
     const user = userEvent.setup()
     const mutate = vi.fn()
 
-    mockedUseMyOrder.mockReturnValue({
-      isLoading: false,
-      isError: false,
-      error: null,
-      data: ORDER,
-      refetch: vi.fn(),
-    } as unknown as ReturnType<typeof useMyOrder>)
-
-    mockedUseCallHistory.mockReturnValue({
-      isLoading: false,
-      isError: false,
-      error: null,
-      data: CALL_HISTORY,
-      refetch: vi.fn(),
-    } as unknown as ReturnType<typeof useCallHistory>)
-
+    mockCommonHooks()
     mockedUseLogCall.mockReturnValue({
       mutate,
       isPending: false,
     } as unknown as ReturnType<typeof useLogCall>)
-
-    mockedUseScheduleFollowUp.mockReturnValue({
+    mockedUseEditCallAttempt.mockReturnValue({
       mutate: vi.fn(),
       isPending: false,
-    } as unknown as ReturnType<typeof useScheduleFollowUp>)
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
 
     renderWithProviders(<TelecallerOrderDetailPage />)
 
@@ -114,32 +130,88 @@ describe("TelecallerOrderDetailPage", () => {
     const user = userEvent.setup()
     const mutate = vi.fn()
 
-    mockedUseMyOrder.mockReturnValue({
-      isLoading: false,
-      isError: false,
-      error: null,
-      data: ORDER,
-      refetch: vi.fn(),
-    } as unknown as ReturnType<typeof useMyOrder>)
-    mockedUseCallHistory.mockReturnValue({
-      isLoading: false,
-      isError: false,
-      error: null,
-      data: CALL_HISTORY,
-      refetch: vi.fn(),
-    } as unknown as ReturnType<typeof useCallHistory>)
+    mockCommonHooks()
     mockedUseLogCall.mockReturnValue({
       mutate,
       isPending: false,
     } as unknown as ReturnType<typeof useLogCall>)
-    mockedUseScheduleFollowUp.mockReturnValue({
+    mockedUseEditCallAttempt.mockReturnValue({
       mutate: vi.fn(),
       isPending: false,
-    } as unknown as ReturnType<typeof useScheduleFollowUp>)
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
 
     renderWithProviders(<TelecallerOrderDetailPage />)
 
     await user.click(screen.getByRole("button", { name: /Mark Confirmed/i }))
     expect(mutate).toHaveBeenCalledWith({ outcome: "confirmed" }, expect.anything())
+  })
+
+  it("edits a call attempt via the Edit dialog, pre-filled with its current values", async () => {
+    const user = userEvent.setup()
+    const editMutate = vi.fn()
+
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: editMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Edit call attempt$/i }))
+    expect(screen.getByText("Edit Attempt #1")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /^Save$/i }))
+
+    expect(editMutate).toHaveBeenCalledWith(
+      {
+        attemptId: "call-1",
+        input: {
+          outcome: "not_received",
+          notes: undefined,
+          next_follow_up_at: undefined,
+        },
+      },
+      expect.anything()
+    )
+  })
+
+  it("deletes a call attempt after confirming in the alert dialog", async () => {
+    const user = userEvent.setup()
+    const deleteMutate = vi.fn()
+
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: deleteMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Delete call attempt$/i }))
+    expect(screen.getByText("Delete this call attempt?")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /^Delete$/i }))
+    expect(deleteMutate).toHaveBeenCalledWith("call-1", expect.anything())
   })
 })

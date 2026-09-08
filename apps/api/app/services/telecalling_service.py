@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthorizationError, ConflictError, NotFoundError, ValidationError
-from app.core.timezone import ist_day_bounds
+from app.core.timezone import ist_day_bounds, to_ist
 from app.models.auth import User
 from app.models.enums import AssignmentStatus, LeadCategory, TelecallingStatus
 from app.models.telecalling import CallAttempt, CheckoutAssignment, OrderAssignment
@@ -200,8 +200,14 @@ class TelecallingService:
     async def list_call_history(
         self, order_id: uuid.UUID, *, scope: ScopeFilter
     ) -> list[CallAttempt]:
+        """The Telecaller order-detail page's Call History — the *current*
+        state of every attempt (edits applied, deleted ones dropped), not
+        the raw append-only row list. Full history (including void rows
+        and every superseded edit) stays in the table for audit but is
+        never surfaced to this read path.
+        """
         await self.get_scoped_assignment(order_id, scope=scope)
-        return await self.call_attempts.list_for_order(order_id)
+        return await self.call_attempts.resolve_current_for_order(order_id)
 
     async def list_my_call_history(self, telecaller_id: uuid.UUID) -> list[tuple[CallAttempt, str]]:
         """Every call `telecaller_id` has personally made, across every
@@ -385,6 +391,97 @@ class TelecallingService:
                 }
             )
         return results
+
+    async def telecaller_detail_summary(
+        self, telecaller_id: uuid.UUID, *, actor: User
+    ) -> dict[str, object]:
+        """Summary cards for the individual Telecaller dashboard (Team
+        Leader/Admin view of one telecaller's own numbers) — real
+        aggregate queries, same as `team_telecaller_performance`, plus
+        `fulfilled`: a *live* count of this telecaller's currently
+        assigned orders that are currently `FULFILLED`, not a historical
+        "fulfilled on day X" figure. No `fulfilled_at`/equivalent
+        timestamp exists anywhere in this schema (`Order`, `Shipment`, and
+        the append-only `OrderEvent` order timeline were all checked —
+        fulfillment sync overwrites `Order.fulfillment_status` directly
+        without logging a dedicated event), so a day-bucketed fulfillment
+        figure is deliberately not offered here or in the daily graph
+        rather than approximated from an unrelated timestamp like
+        `Order.updated_at`.
+        """
+        telecaller = await self.assert_telecaller_in_team_scope(telecaller_id, actor=actor)
+        order_breakdown = dict(
+            await self.assignments.telecaller_performance(
+                team_leader_id=None, telecaller_id=telecaller_id
+            )
+        )
+        checkout_breakdown = dict(
+            await self.checkout_assignments.telecaller_performance(
+                team_leader_id=None, telecaller_id=telecaller_id
+            )
+        )
+        merged = _merge_counts(
+            order_breakdown.get(telecaller_id, {}), checkout_breakdown.get(telecaller_id, {})
+        )
+        fulfilled_by_telecaller = await self.assignments.fulfilled_counts(
+            telecaller_id=telecaller_id
+        )
+        total_attempts = await self.assignments.total_attempt_count(telecaller_id=telecaller_id)
+        return {
+            "telecaller_id": telecaller_id,
+            "telecaller_name": telecaller.name,
+            "cancelled": merged.get(TelecallingStatus.CANCELLED.value, 0),
+            "fulfilled": fulfilled_by_telecaller.get(telecaller_id, 0),
+            "total_attempts": total_attempts,
+            **_performance_from_counts(merged),
+        }
+
+    async def telecaller_daily_performance(
+        self, telecaller_id: uuid.UUID, *, actor: User, date_from: datetime, date_to: datetime
+    ) -> list[dict[str, object]]:
+        """Day-bucketed (IST calendar day) call-attempt activity for the
+        daily performance graph — built from real `CallAttempt` rows in
+        range, resolved through any edits/deletes (see
+        `CallAttemptRepository.list_resolved_for_telecaller_in_range`), so
+        a deleted attempt never inflates a day's numbers and an edited
+        attempt is counted by its corrected outcome. "Follow-ups" here
+        means calls that day which set a `next_follow_up_at`, not the
+        dashboard's current-snapshot "assignments with a pending
+        follow-up" figure — a different, both-valid meaning of the same
+        word for a per-day series.
+        """
+        await self.assert_telecaller_in_team_scope(telecaller_id, actor=actor)
+        attempts = await self.call_attempts.list_resolved_for_telecaller_in_range(
+            telecaller_id, date_from=date_from, date_to=date_to
+        )
+
+        buckets: dict[str, dict[str, int]] = {}
+        for attempt in attempts:
+            key = to_ist(attempt.attempted_at).date().isoformat()
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "attempts": 0,
+                    "connected": 0,
+                    "confirmed": 0,
+                    "not_interested": 0,
+                    "cancelled": 0,
+                    "follow_ups": 0,
+                },
+            )
+            bucket["attempts"] += 1
+            if attempt.outcome == TelecallingStatus.CONNECTED:
+                bucket["connected"] += 1
+            elif attempt.outcome == TelecallingStatus.CONFIRMED:
+                bucket["confirmed"] += 1
+            elif attempt.outcome == TelecallingStatus.NOT_INTERESTED:
+                bucket["not_interested"] += 1
+            elif attempt.outcome == TelecallingStatus.CANCELLED:
+                bucket["cancelled"] += 1
+            if attempt.next_follow_up_at is not None:
+                bucket["follow_ups"] += 1
+
+        return [{"date": date, **counts} for date, counts in sorted(buckets.items())]
 
     async def list_assignable_telecallers(self, *, scope: ScopeFilter) -> list[User]:
         """The roster for a "Select Telecaller" assignment dropdown — every
@@ -709,6 +806,138 @@ class TelecallingService:
         )
         await self.session.commit()
         return attempt
+
+    async def edit_call_attempt(
+        self,
+        order_id: uuid.UUID,
+        attempt_id: uuid.UUID,
+        *,
+        outcome: TelecallingStatus,
+        notes: str | None,
+        next_follow_up_at: datetime | None,
+        actor: User,
+    ) -> CallAttempt:
+        """Corrects an existing call attempt's outcome/notes/follow-up —
+        implemented as a new row that `corrects_attempt_id`s the current
+        one, never a mutation (`CallAttempt` stays append-only; see its
+        model docstring). Scoped identically to `log_call`: only the
+        telecaller the order is actively assigned to (or an admin) may
+        edit, and only an order that's actually theirs.
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+
+        target = await self.call_attempts.get_correctable_for_order(attempt_id, order_id)
+        if target is None:
+            raise NotFoundError("Call attempt not found.")
+
+        correction = await self.call_attempts.create(
+            order_id=order_id,
+            telecaller_id=actor.id,
+            attempt_number=target.attempt_number,
+            attempted_at=target.attempted_at,
+            outcome=outcome,
+            notes=notes,
+            next_follow_up_at=next_follow_up_at,
+            corrects_attempt_id=target.id,
+            is_void=False,
+        )
+        await self._recompute_assignment_from_attempts(
+            order_id, assignment=assignment, edited_or_deleted=target
+        )
+        await self.audit.record(
+            user=actor,
+            action="call_attempt.edited",
+            entity_type="call_attempt",
+            entity_id=str(target.id),
+            previous_value={"outcome": target.outcome.value, "notes": target.notes},
+            new_value={"outcome": outcome.value, "notes": notes},
+        )
+        await self.session.commit()
+        return correction
+
+    async def delete_call_attempt(
+        self, order_id: uuid.UUID, attempt_id: uuid.UUID, *, actor: User
+    ) -> None:
+        """Removes a call attempt from the visible call history — again a
+        new (void) correction row, never a real delete, so the full trail
+        survives for audit even though the UI shows it as gone. Same
+        ownership scoping as `edit_call_attempt`/`log_call`.
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+
+        target = await self.call_attempts.get_correctable_for_order(attempt_id, order_id)
+        if target is None:
+            raise NotFoundError("Call attempt not found.")
+
+        await self.call_attempts.create(
+            order_id=order_id,
+            telecaller_id=actor.id,
+            attempt_number=target.attempt_number,
+            attempted_at=target.attempted_at,
+            outcome=target.outcome,
+            notes=target.notes,
+            next_follow_up_at=target.next_follow_up_at,
+            corrects_attempt_id=target.id,
+            is_void=True,
+        )
+        await self._recompute_assignment_from_attempts(
+            order_id, assignment=assignment, edited_or_deleted=target
+        )
+        await self.audit.record(
+            user=actor,
+            action="call_attempt.deleted",
+            entity_type="call_attempt",
+            entity_id=str(target.id),
+            previous_value={
+                "outcome": target.outcome.value,
+                "attempt_number": target.attempt_number,
+            },
+            new_value=None,
+        )
+        await self.session.commit()
+
+    async def _recompute_assignment_from_attempts(
+        self, order_id: uuid.UUID, *, assignment: OrderAssignment, edited_or_deleted: CallAttempt
+    ) -> None:
+        """Re-derives `attempt_count`/`current_status`/`last_attempt_at`
+        from the *current* resolved attempt list — never incremented/
+        decremented, since an edit or delete can change any attempt, not
+        just the latest one. `next_follow_up_at` is left alone unless
+        `edited_or_deleted` was the most-recently-attempted active call
+        (the only case where it's plausible that attempt is what's
+        currently driving the assignment's follow-up date) — it can also
+        be set independently via `schedule_follow_up`, with no record of
+        which call (if any) actually set it, so this is deliberately
+        narrow rather than guessing.
+        """
+        resolved = await self.call_attempts.resolve_current_for_order(order_id)
+        was_most_recent = not resolved or all(
+            r.attempted_at <= edited_or_deleted.attempted_at
+            for r in resolved
+            if r.attempt_number != edited_or_deleted.attempt_number
+        )
+
+        updates: dict[str, object] = {"attempt_count": len(resolved)}
+        if resolved:
+            latest = max(resolved, key=lambda r: (r.attempted_at, r.attempt_number))
+            updates["current_status"] = latest.outcome
+            updates["last_attempt_at"] = latest.attempted_at
+            if was_most_recent:
+                updates["next_follow_up_at"] = latest.next_follow_up_at
+        else:
+            updates["current_status"] = TelecallingStatus.NOT_CALLED
+            updates["last_attempt_at"] = None
+            if was_most_recent:
+                updates["next_follow_up_at"] = None
+        await self.assignments.update(assignment, **updates)
 
     async def schedule_follow_up(
         self, order_id: uuid.UUID, *, next_follow_up_at: datetime, actor: User

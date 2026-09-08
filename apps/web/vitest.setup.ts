@@ -20,3 +20,15 @@ if (typeof Element !== "undefined") {
     Element.prototype.scrollIntoView = () => {}
   }
 }
+
+// jsdom has no `ResizeObserver` at all -- some Radix primitives (e.g.
+// AlertDialog, via `@radix-ui/react-use-size`) call it on mount to
+// measure content. A no-op stub is enough since no test asserts on
+// anything that would depend on real size measurements.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+}

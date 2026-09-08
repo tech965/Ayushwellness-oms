@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Index, Integer, Text, text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import AwareDateTime, Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -110,6 +110,19 @@ class CallAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """Append-only call-attempt log. No update/delete path is exposed by
     `CallAttemptRepository` — every call creates a new row, never edits a
     previous one (spec: "Do not overwrite previous attempts").
+
+    "Edit"/"Delete" from the Telecaller order page are themselves
+    implemented as new rows, not mutations — `corrects_attempt_id` points
+    at the attempt being corrected and shares its `attempt_number` (so
+    correcting an attempt never consumes a new attempt-number slot);
+    `is_void=True` marks a correction as "the corrected attempt is
+    deleted" rather than "the corrected attempt's fields changed". For a
+    given `attempt_number`, the *current* state is whichever row (the
+    original or its latest correction) has the greatest `created_at` — see
+    `CallAttemptRepository.resolve_current_for_order`. This keeps the
+    "never mutate history" rule intact (nothing is ever updated or
+    deleted) while still letting the UI show a clean, editable/removable
+    list — the full correction trail stays in the table for audit.
     """
 
     __tablename__ = "call_attempts"
@@ -131,8 +144,23 @@ class CallAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     next_follow_up_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    corrects_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("call_attempts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    is_void: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     order: Mapped[Order] = relationship()
+
+    @property
+    def is_edited(self) -> bool:
+        """True for a row returned by `resolve_current_for_order` that is
+        itself a correction (not the original attempt) — lets
+        `CallAttemptResponse` show an "Edited" indicator without a second
+        query, since it's a plain attribute read off an already-loaded row.
+        """
+        return self.corrects_attempt_id is not None
 
 
 class CheckoutAssignment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
