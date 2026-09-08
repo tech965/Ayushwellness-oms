@@ -77,6 +77,21 @@ describe("SidebarNav role-based navigation", () => {
     expect(screen.queryByText("Users")).not.toBeInTheDocument()
     expect(screen.queryByText("Integrations")).not.toBeInTheDocument()
   })
+
+  it("renders only the minimal Fulfillment nav — no admin links", () => {
+    mockedUseAuth.mockReturnValue(
+      authWithRoles(["FULFILLMENT"], ["shipments.read", "ndr.read", "rto.read"])
+    )
+    renderWithProviders(<SidebarNav />)
+    expect(screen.getByText("Fulfillment Dashboard")).toBeInTheDocument()
+    expect(screen.getByText("Confirmed Orders")).toBeInTheDocument()
+    expect(screen.getByText("Shipments")).toBeInTheDocument()
+    expect(screen.queryByText("Orders")).not.toBeInTheDocument()
+    expect(screen.queryByText("Users")).not.toBeInTheDocument()
+    expect(screen.queryByText("Integrations")).not.toBeInTheDocument()
+    expect(screen.queryByText("Telecallers")).not.toBeInTheDocument()
+    expect(screen.queryByText("Settings")).not.toBeInTheDocument()
+  })
 })
 
 describe("SidebarNav Administration gating", () => {

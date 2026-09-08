@@ -132,6 +132,8 @@ export interface TelecallerShipmentStats {
   confirmed: number
   shipped: number
   delivered: number
+  ndr: number
+  rto: number
 }
 
 export interface ShipmentAnalytics {

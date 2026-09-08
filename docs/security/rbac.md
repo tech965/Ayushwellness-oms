@@ -35,6 +35,9 @@ Full list, seeded by `apps/api/scripts/seed.py`:
 | `CUSTOMER_SUPPORT` | Customers, Orders (read/cancel), Shipments (read), NDR (read), Returns |
 | `MARKETING` | Analytics (read) — Meta/Instagram/Leads/Campaigns access is added once those modules ship (Phase 5/6) |
 | `MANAGEMENT` | Analytics, and read access across Orders/Customers/Shipments/NDR/RTO/Returns/Refunds/Payments/Couriers |
+| `TEAM_LEADER` | `telecalling.manage` — team orders/telecallers, assign/reassign, team calling activity + performance |
+| `TELECALLER` | `calls.manage` (own assigned orders, log calls, own follow-ups) + `orders.confirm` (confirm an own-assigned order, PENDING → CONFIRMED order status only — never a shipment, never a call outcome) |
+| `FULFILLMENT` | Dedicated shipment-processing staff: `orders.read`, `shipments.read`, `shipments.update` (create/update shipments — runs the internal InventoryService stock pre-check), `inventory.read`, `ndr.read/update`, `rto.read/update`, `couriers.read`. Deliberately narrower than `OPERATIONS`: no `orders.cancel`/`orders.update`, no `couriers.update`, no reconciliation/payments/chat, and never `calls.manage` or `orders.confirm` |
 
 A user can hold more than one role (`UserRole` is a join table);
 effective permissions are the union across all assigned roles

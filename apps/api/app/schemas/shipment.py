@@ -126,6 +126,8 @@ class TelecallerShipmentStats(BaseModel):
     confirmed: int
     shipped: int
     delivered: int
+    ndr: int = 0
+    rto: int = 0
 
 
 class ShipmentAnalyticsResponse(BaseModel):

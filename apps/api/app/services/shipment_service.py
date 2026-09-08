@@ -157,6 +157,8 @@ class ShipmentService:
                     "confirmed": counts["confirmed"],
                     "shipped": counts["shipped"],
                     "delivered": counts["delivered"],
+                    "ndr": counts["ndr"],
+                    "rto": counts["rto"],
                 }
             )
         telecaller_stats.sort(key=lambda t: t["confirmed"], reverse=True)  # type: ignore[arg-type,return-value]

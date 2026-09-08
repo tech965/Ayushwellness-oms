@@ -105,6 +105,41 @@ describe("RoleRedirect", () => {
     expect(mockReplace).not.toHaveBeenCalled()
   })
 
+  it("Fulfillment user on /dashboard is redirected to /fulfillment/dashboard", () => {
+    mockReplace.mockClear()
+    mockUsePathname.mockReturnValue("/dashboard")
+    mockedUseAuth.mockReturnValue(authWithRoles(["FULFILLMENT"]))
+    renderWithProviders(<RoleRedirect />)
+    expect(mockReplace).toHaveBeenCalledTimes(1)
+    expect(mockReplace).toHaveBeenCalledWith("/fulfillment/dashboard")
+  })
+
+  it("Fulfillment user stays on /fulfillment/orders (no redirect)", () => {
+    mockReplace.mockClear()
+    mockUsePathname.mockReturnValue("/fulfillment/orders")
+    mockedUseAuth.mockReturnValue(authWithRoles(["FULFILLMENT"]))
+    renderWithProviders(<RoleRedirect />)
+    expect(mockReplace).not.toHaveBeenCalled()
+  })
+
+  it("Fulfillment user stays on the shared processing pages /orders/:id and /shipments/:id", () => {
+    for (const path of ["/orders/abc-123", "/shipments/def-456"]) {
+      mockReplace.mockClear()
+      mockUsePathname.mockReturnValue(path)
+      mockedUseAuth.mockReturnValue(authWithRoles(["FULFILLMENT"]))
+      renderWithProviders(<RoleRedirect />)
+      expect(mockReplace).not.toHaveBeenCalled()
+    }
+  })
+
+  it("Team Leader wins over Fulfillment when a user holds both", () => {
+    mockReplace.mockClear()
+    mockUsePathname.mockReturnValue("/fulfillment/orders")
+    mockedUseAuth.mockReturnValue(authWithRoles(["FULFILLMENT", "TEAM_LEADER"]))
+    renderWithProviders(<RoleRedirect />)
+    expect(mockReplace).toHaveBeenCalledWith("/team/dashboard")
+  })
+
   it("Admin (neither role) is never redirected to either role dashboard", () => {
     mockReplace.mockClear()
     mockUsePathname.mockReturnValue("/dashboard")

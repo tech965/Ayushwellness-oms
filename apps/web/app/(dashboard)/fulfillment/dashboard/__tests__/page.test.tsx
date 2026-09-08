@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import { screen } from "@testing-library/react"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
-import ShipmentDashboardPage from "@/app/(dashboard)/shipment-dashboard/page"
+import FulfillmentDashboardPage from "@/app/(dashboard)/fulfillment/dashboard/page"
 import { useShipmentAnalytics, useShipmentSummary } from "@/services/shipment-queue"
 
 vi.mock("next/navigation", () => ({
@@ -17,8 +17,8 @@ vi.mock("@/services/shipment-queue", () => ({
 const mockedUseShipmentSummary = vi.mocked(useShipmentSummary)
 const mockedUseShipmentAnalytics = vi.mocked(useShipmentAnalytics)
 
-describe("ShipmentDashboardPage", () => {
-  it("renders real summary numbers from the backend", () => {
+describe("FulfillmentDashboardPage", () => {
+  it("renders real summary + per-telecaller NDR/RTO from the backend", () => {
     mockedUseShipmentSummary.mockReturnValue({
       isLoading: false,
       data: {
@@ -33,7 +33,7 @@ describe("ShipmentDashboardPage", () => {
         rto: 2,
         cancelled: 1,
         cod: 60,
-        prepaid: 60,
+        prepaid: 55,
         todays_shipments: 9,
       },
     } as unknown as ReturnType<typeof useShipmentSummary>)
@@ -50,36 +50,42 @@ describe("ShipmentDashboardPage", () => {
             confirmed: 12,
             shipped: 7,
             delivered: 5,
-            ndr: 1,
-            rto: 0,
+            ndr: 3,
+            rto: 1,
           },
         ],
       },
     } as unknown as ReturnType<typeof useShipmentAnalytics>)
 
-    renderWithProviders(<ShipmentDashboardPage />)
+    renderWithProviders(<FulfillmentDashboardPage />)
 
     expect(screen.getByText("Fulfillment Dashboard")).toBeInTheDocument()
-    expect(screen.getByText("14")).toBeInTheDocument() // Confirmed, Awaiting Shipment
-    expect(screen.getByText("120")).toBeInTheDocument() // Total Shipments
-    expect(screen.getAllByText("80").length).toBeGreaterThan(0) // Delivered (tile + breakdown)
-    expect(screen.getByText("66.7%")).toBeInTheDocument() // Conversion rate
+    expect(screen.getByText("14")).toBeInTheDocument()
+    expect(screen.getByText("55")).toBeInTheDocument() // Prepaid Shipments tile
+    expect(screen.getByText("66.7%")).toBeInTheDocument()
     expect(screen.getByText("Sourabh")).toBeInTheDocument()
+    // Per-telecaller NDR/RTO columns render (value 3 = Sourabh's NDR count;
+    // also proves the extra analytics fields flow through).
+    expect(screen.getAllByText("3").length).toBeGreaterThan(0)
   })
 
-  it("does not crash with empty analytics/summary data", () => {
+  it("shows an empty telecaller state without crashing", () => {
     mockedUseShipmentSummary.mockReturnValue({
       isLoading: false,
       data: undefined,
     } as unknown as ReturnType<typeof useShipmentSummary>)
     mockedUseShipmentAnalytics.mockReturnValue({
       isLoading: false,
-      data: { status_breakdown: [], confirmation_to_shipment_rate: 0, daily_trend: [], telecaller_stats: [] },
+      data: {
+        status_breakdown: [],
+        confirmation_to_shipment_rate: 0,
+        daily_trend: [],
+        telecaller_stats: [],
+      },
     } as unknown as ReturnType<typeof useShipmentAnalytics>)
 
-    renderWithProviders(<ShipmentDashboardPage />)
+    renderWithProviders(<FulfillmentDashboardPage />)
 
-    expect(screen.getByText("Fulfillment Dashboard")).toBeInTheDocument()
     expect(screen.getByText("No telecaller-confirmed orders yet.")).toBeInTheDocument()
   })
 })

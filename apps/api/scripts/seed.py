@@ -1,7 +1,8 @@
 """Development database seed script.
 
 Creates, in a single transaction:
-  - 5 roles (ADMIN, OPERATIONS, CUSTOMER_SUPPORT, MARKETING, MANAGEMENT)
+  - Roles: ADMIN, OPERATIONS, CUSTOMER_SUPPORT, MARKETING, MANAGEMENT,
+    TEAM_LEADER, TELECALLER, FULFILLMENT
   - Every `module.action` permission the API actually enforces
   - RolePermission assignments matching the access grid in
     docs/security/rbac.md
@@ -154,6 +155,25 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
     ],
     "TEAM_LEADER": ["telecalling.manage"],
     "TELECALLER": ["calls.manage", "orders.confirm"],
+    # Dedicated shipment-processing / fulfillment staff. Deliberately
+    # narrower than OPERATIONS: no orders.cancel, no couriers.update, no
+    # reconciliation/payments/chat. Can read orders + confirmed-order
+    # queue, create/update shipments (which runs the internal
+    # InventoryService stock pre-check — no separate inventory.check
+    # permission exists), read stock levels, and work NDR/RTO. No
+    # calls.manage and no orders.confirm — a fulfillment user can never
+    # touch telecaller call history or confirm an order.
+    "FULFILLMENT": [
+        "orders.read",
+        "shipments.read",
+        "shipments.update",
+        "inventory.read",
+        "ndr.read",
+        "ndr.update",
+        "rto.read",
+        "rto.update",
+        "couriers.read",
+    ],
 }
 
 COURIERS = [

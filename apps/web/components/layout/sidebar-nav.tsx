@@ -7,7 +7,12 @@ import { Separator } from "@/components/ui/separator"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAuth } from "@/lib/auth-context"
 import { cn } from "@/lib/utils"
-import { navGroups, teamLeaderNavGroups, telecallerNavGroups } from "@/lib/navigation"
+import {
+  fulfillmentNavGroups,
+  navGroups,
+  teamLeaderNavGroups,
+  telecallerNavGroups,
+} from "@/lib/navigation"
 
 export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
   const pathname = usePathname()
@@ -22,7 +27,9 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
     ? telecallerNavGroups
     : hasRole("TEAM_LEADER")
       ? teamLeaderNavGroups
-      : navGroups
+      : hasRole("FULFILLMENT")
+        ? fulfillmentNavGroups
+        : navGroups
 
   // RBAC nav gating: "Users" and "Roles" only render for a viewer who
   // actually has `users.manage`/`roles.manage`. An item with no

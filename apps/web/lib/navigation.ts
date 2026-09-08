@@ -64,8 +64,8 @@ export const navGroups: NavGroup[] = [
   {
     label: "Fulfillment",
     items: [
-      { label: "Shipment Dashboard", href: "/shipment-dashboard", icon: Gauge },
-      { label: "Shipment Queue", href: "/shipment-queue", icon: ListChecks },
+      { label: "Fulfillment Dashboard", href: "/fulfillment/dashboard", icon: Gauge },
+      { label: "Confirmed Orders", href: "/fulfillment/orders", icon: ListChecks },
       { label: "Shipments", href: "/shipments", icon: Truck },
       { label: "NDR", href: "/ndr", icon: PackageX },
       { label: "RTO", href: "/rto", icon: RotateCcw },
@@ -142,6 +142,26 @@ export const telecallerNavGroups: NavGroup[] = [
       },
       { label: "Follow-ups", href: "/telecaller/follow-ups", icon: CalendarClock },
       { label: "Call History", href: "/telecaller/calls", icon: PhoneCall },
+    ],
+  },
+]
+
+/** Minimal nav for FULFILLMENT — a dedicated shipment-processing role.
+ * Mirrors `telecallerNavGroups`: a focused module, not the full Admin OMS
+ * menu. The real access boundary is backend-side (`shipments.read` /
+ * `shipments.update` / `orders.read`); this is UI simplification only.
+ * `/orders/[id]` and `/shipments/[id]` (reached from the queue's "Process
+ * Shipment" action) stay usable — see `RoleRedirect`.
+ */
+export const fulfillmentNavGroups: NavGroup[] = [
+  {
+    label: "Fulfillment",
+    items: [
+      { label: "Fulfillment Dashboard", href: "/fulfillment/dashboard", icon: Gauge },
+      { label: "Confirmed Orders", href: "/fulfillment/orders", icon: ListChecks },
+      { label: "Shipments", href: "/fulfillment/shipments", icon: Truck },
+      { label: "NDR", href: "/ndr", icon: PackageX, permission: "ndr.read" },
+      { label: "RTO", href: "/rto", icon: RotateCcw, permission: "rto.read" },
     ],
   },
 ]
