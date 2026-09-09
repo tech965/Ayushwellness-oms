@@ -87,6 +87,12 @@ export interface Order {
   shipment_status?: string | null
   courier_name?: string | null
   tracking_number?: string | null
+  // The most recent shipment's id/outbound-Shopify-push status -- lets
+  // the frontend link straight to `/shipments/{id}` (e.g. "Retry Sync")
+  // without a second lookup. Both `null`/absent exactly when
+  // `shipment_status` is `null` (no shipment yet).
+  shipment_id?: string | null
+  shopify_sync_status?: string | null
   // See `confirmed_by_telecaller_id` above -- resolved name, present on
   // `GET /orders` rows (`OrderListResponse`). `null`/absent whenever the
   // id itself is `null`, never a fabricated value.

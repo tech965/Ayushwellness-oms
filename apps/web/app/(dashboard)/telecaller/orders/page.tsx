@@ -574,8 +574,9 @@ function TelecallerOrdersContent() {
             </AlertDialogTitle>
             <AlertDialogDescription>
               Undoes the confirmation — the order leaves the shipment queue and goes back to
-              Pending. Only possible if fulfillment hasn&apos;t created a shipment for it yet. This
-              does not change the call status.
+              Pending. Only possible before the shipment has actually started moving — a pending
+              shipment is cancelled automatically; one already picked up, in transit, or
+              delivered can&apos;t be reverted here. This does not change the call status.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

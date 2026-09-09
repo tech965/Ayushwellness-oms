@@ -348,7 +348,18 @@ async def test_unconfirm_pending_order_returns_409_not_500(db_session: AsyncSess
         assert response.status_code == 409
 
 
-async def test_unconfirm_blocked_once_a_shipment_exists(db_session: AsyncSession) -> None:
+async def test_unconfirm_allowed_when_shipment_is_still_pending_and_cancels_it(
+    db_session: AsyncSession,
+) -> None:
+    """Production bug fix: the gate is shipment PROGRESS, never mere row
+    existence. A `Shipment` row that was never actually registered with
+    Shiprocket (`source_system="manual"`, no `shiprocket_shipment_id` --
+    e.g. created directly via `POST /shipments` rather than through the
+    real Shiprocket push) has nothing external to cancel; the revert
+    proceeds and that row is marked CANCELLED directly (see
+    `test_unconfirm_cancels_the_real_shiprocket_shipment_first` below for
+    the case where there IS a real external shipment to cancel first).
+    """
     from app.models.enums import ShipmentStatus
     from app.models.shipment import Shipment
 
@@ -362,17 +373,396 @@ async def test_unconfirm_blocked_once_a_shipment_exists(db_session: AsyncSession
     async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
         await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
 
+        shipment = Shipment(
+            order_id=order.id, current_status=ShipmentStatus.PENDING, source_system="manual"
+        )
+        db_session.add(shipment)
+        await db_session.commit()
+        await db_session.refresh(shipment)
+
+        response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 200
+        assert response.json()["data"]["status"] == "pending"
+        assert response.json()["data"]["confirmed_by_telecaller_id"] is None
+
+        await db_session.refresh(shipment)
+        assert shipment.current_status == ShipmentStatus.CANCELLED
+
+        # The revert cancels the existing row -- it never creates a second
+        # one alongside it.
+        from sqlalchemy import select
+
+        all_shipments = (
+            await db_session.execute(select(Shipment).where(Shipment.order_id == order.id))
+        ).scalars().all()
+        assert len(all_shipments) == 1
+
+
+async def test_unconfirm_allowed_when_the_only_shipment_is_already_cancelled(
+    db_session: AsyncSession,
+) -> None:
+    from app.models.enums import ShipmentStatus
+    from app.models.shipment import Shipment
+
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session, order_number="UNCONF-006", customer=customer, status=OrderStatus.PENDING
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
         db_session.add(
             Shipment(
-                order_id=order.id, current_status=ShipmentStatus.PENDING, source_system="manual"
+                order_id=order.id, current_status=ShipmentStatus.CANCELLED, source_system="manual"
+            )
+        )
+        await db_session.commit()
+
+        response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 200
+        assert response.json()["data"]["status"] == "pending"
+
+
+async def test_unconfirm_blocked_once_shipment_has_progressed_past_pending(
+    db_session: AsyncSession,
+) -> None:
+    """The one case that must always stay blocked: fulfillment may
+    already be physically handling the order, and Shiprocket itself will
+    not accept a cancellation at this point either.
+    """
+    from app.models.enums import ShipmentStatus
+    from app.models.shipment import Shipment
+
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session, order_number="UNCONF-007", customer=customer, status=OrderStatus.PENDING
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
+        db_session.add(
+            Shipment(
+                order_id=order.id,
+                current_status=ShipmentStatus.IN_TRANSIT,
+                source_system="manual",
             )
         )
         await db_session.commit()
 
         response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
         assert response.status_code == 409
+        # Specific reason, never the old generic "a shipment already exists"
+        # message that blocked reverting any order with a shipment row at all.
+        assert (
+            response.json()["error"]["message"]
+            == "Cannot revert this order because the shipment is already in transit."
+        )
 
         # The order must still be confirmed -- the block must not have
         # partially applied.
+        order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
+        assert order_view.json()["data"]["status"] == "confirmed"
+
+
+async def test_unconfirm_cancels_the_real_shiprocket_shipment_first(
+    db_session: AsyncSession,
+) -> None:
+    """The important end-to-end case: a shipment genuinely registered
+    with Shiprocket (has a `shiprocket_shipment_id`), still `PENDING` (not
+    picked up). Revert must call the SAME `ShiprocketOperationsService.
+    cancel_shipment` the shipment detail page's own "Cancel Shipment"
+    button uses -- never a second, local-only copy -- and only proceed to
+    revert the order once that external call actually succeeds.
+    """
+    from app.core.config import settings
+    from app.integrations.registry import clear_adapters, register_adapter
+    from app.integrations.shiprocket.adapter import ShiprocketAdapter
+    from app.models.enums import ShipmentStatus
+    from app.models.shipment import Shipment
+
+    monkeypatch_targets = [
+        ("SHIPROCKET_EMAIL", "ops@example.com"),
+        ("SHIPROCKET_PASSWORD", "secret"),
+        ("SHIPROCKET_PICKUP_LOCATION", "Main Warehouse"),
+    ]
+    originals = {name: getattr(settings, name) for name, _ in monkeypatch_targets}
+    for name, value in monkeypatch_targets:
+        setattr(settings, name, value)
+
+    class _StubClient:
+        def __init__(self, responses: list) -> None:
+            self._responses = list(responses)
+            self.calls: list[tuple[str, str]] = []
+
+        async def request(self, method, path, *, json=None, params=None):  # noqa: ANN001
+            self.calls.append((method, path))
+            return self._responses.pop(0)
+
+        async def ensure_authenticated(self) -> None:
+            pass
+
+    stub_client = _StubClient([{"message": "Shipment cancelled."}])
+    register_adapter(ShiprocketAdapter(client=stub_client))
+
+    try:
+        leader, telecaller, _other, customer = await _setup(db_session)
+        order = await make_order(
+            db_session, order_number="UNCONF-008", customer=customer, status=OrderStatus.PENDING
+        )
+        async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+            await _assign(leader_client, str(order.id), str(telecaller.id))
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
+            shipment = Shipment(
+                order_id=order.id,
+                current_status=ShipmentStatus.PENDING,
+                source_system="shiprocket",
+                shiprocket_shipment_id="5555",
+            )
+            db_session.add(shipment)
+            await db_session.commit()
+            await db_session.refresh(shipment)
+
+            response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+            assert response.status_code == 200
+            assert response.json()["data"]["status"] == "pending"
+
+            # The real Shiprocket cancel endpoint was actually called.
+            assert any("cancel" in path for _method, path in stub_client.calls)
+
+            await db_session.refresh(shipment)
+            assert shipment.current_status == ShipmentStatus.CANCELLED
+    finally:
+        clear_adapters()
+        for name, value in originals.items():
+            setattr(settings, name, value)
+
+
+async def test_unconfirm_stays_confirmed_when_shiprocket_cancellation_fails(
+    db_session: AsyncSession,
+) -> None:
+    """Never revert to PENDING while Shiprocket still has an active
+    shipment -- if the external cancel call itself fails, the order must
+    stay CONFIRMED exactly as if unconfirm was never called.
+    """
+    from app.core.config import settings
+    from app.integrations.registry import clear_adapters, register_adapter
+    from app.integrations.shiprocket.adapter import ShiprocketAdapter
+    from app.integrations.shiprocket.errors import ShiprocketApiError
+    from app.models.enums import ShipmentStatus
+    from app.models.shipment import Shipment
+
+    monkeypatch_targets = [
+        ("SHIPROCKET_EMAIL", "ops@example.com"),
+        ("SHIPROCKET_PASSWORD", "secret"),
+        ("SHIPROCKET_PICKUP_LOCATION", "Main Warehouse"),
+    ]
+    originals = {name: getattr(settings, name) for name, _ in monkeypatch_targets}
+    for name, value in monkeypatch_targets:
+        setattr(settings, name, value)
+
+    class _StubClient:
+        def __init__(self, responses: list) -> None:
+            self._responses = list(responses)
+
+        async def request(self, method, path, *, json=None, params=None):  # noqa: ANN001
+            response = self._responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        async def ensure_authenticated(self) -> None:
+            pass
+
+    stub_client = _StubClient(
+        [ShiprocketApiError("Shipment already picked up.", error_type="validation_error")]
+    )
+    register_adapter(ShiprocketAdapter(client=stub_client))
+
+    try:
+        leader, telecaller, _other, customer = await _setup(db_session)
+        order = await make_order(
+            db_session, order_number="UNCONF-009", customer=customer, status=OrderStatus.PENDING
+        )
+        async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+            await _assign(leader_client, str(order.id), str(telecaller.id))
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
+            shipment = Shipment(
+                order_id=order.id,
+                current_status=ShipmentStatus.PENDING,
+                source_system="shiprocket",
+                shiprocket_shipment_id="5556",
+            )
+            db_session.add(shipment)
+            await db_session.commit()
+
+            response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+            # Re-raised as a plain 409 with a clear, specific reason -- never
+            # Shiprocket's own raw 502 IntegrationError text.
+            assert response.status_code == 409
+            assert (
+                response.json()["error"]["message"]
+                == "Shiprocket cancellation failed. The order was not reverted."
+            )
+
+            order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
+            assert order_view.json()["data"]["status"] == "confirmed"
+
+            await db_session.refresh(shipment)
+            assert shipment.current_status == ShipmentStatus.PENDING
+    finally:
+        clear_adapters()
+        for name, value in originals.items():
+            setattr(settings, name, value)
+
+
+@pytest.mark.parametrize(
+    ("shipment_status", "expected_message"),
+    [
+        (
+            "out_for_delivery",
+            "Cannot revert this order because the shipment is already out for delivery.",
+        ),
+        (
+            "delivered",
+            "Cannot revert this order because the shipment has already been delivered.",
+        ),
+        (
+            "picked_up",
+            "Cannot revert this order because the shipment has already been picked up.",
+        ),
+        (
+            "rto_initiated",
+            "Cannot revert this order because the shipment is already in an RTO (return) flow.",
+        ),
+    ],
+)
+async def test_unconfirm_blocked_messages_match_the_actual_shipment_status(
+    db_session: AsyncSession, shipment_status: str, expected_message: str
+) -> None:
+    """Each blocked shipment state gets its own specific reason -- never
+    the generic "a shipment already exists" message that made every
+    CONFIRMED order with any shipment look permanently non-reversible.
+    """
+    from app.models.enums import ShipmentStatus
+    from app.models.shipment import Shipment
+
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session,
+        order_number=f"UNCONF-STATUS-{shipment_status}",
+        customer=customer,
+        status=OrderStatus.PENDING,
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
+        db_session.add(
+            Shipment(
+                order_id=order.id,
+                current_status=ShipmentStatus(shipment_status),
+                source_system="manual",
+            )
+        )
+        await db_session.commit()
+
+        response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 409
+        assert response.json()["error"]["message"] == expected_message
+
+        order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
+        assert order_view.json()["data"]["status"] == "confirmed"
+
+
+async def test_unconfirm_blocked_when_shopify_fulfillment_already_synced(
+    db_session: AsyncSession,
+) -> None:
+    """A shipment can be Shiprocket-`PENDING` (not yet picked up) while
+    already `shopify_sync_status=SYNCED` -- the outbound Shopify push
+    fires on AWB assignment, independent of courier tracking. Reverting
+    here would leave a real Shopify `Fulfillment` behind with no OMS
+    order to match it, and `ShopifyFulfillmentService` has no cancel
+    capability to undo it, so this must block outright.
+    """
+    from app.models.enums import ShipmentStatus, ShopifySyncStatus
+    from app.models.shipment import Shipment
+
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session, order_number="UNCONF-SHOPIFY-001", customer=customer, status=OrderStatus.PENDING
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
+        shipment = Shipment(
+            order_id=order.id,
+            current_status=ShipmentStatus.PENDING,
+            source_system="shiprocket",
+            shiprocket_shipment_id="7001",
+            shopify_sync_status=ShopifySyncStatus.SYNCED,
+        )
+        db_session.add(shipment)
+        await db_session.commit()
+
+        response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 409
+        assert "Shopify fulfillment has already been created" in response.json()["error"]["message"]
+
+        order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
+        assert order_view.json()["data"]["status"] == "confirmed"
+
+        # Blocked before any Shiprocket cancellation was even attempted.
+        await db_session.refresh(shipment)
+        assert shipment.current_status == ShipmentStatus.PENDING
+
+
+async def test_unconfirm_blocked_when_shopify_already_shows_order_fulfilled(
+    db_session: AsyncSession,
+) -> None:
+    """An order Shopify fulfilled directly (never went through this OMS's
+    own shipment pipeline at all -- no local `Shipment` row to inspect)
+    must still block the revert: `Order.fulfillment_status` is Shopify's
+    own inbound summary, independent of any local `Shipment` row.
+    """
+    from app.models.enums import FulfillmentStatus
+
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await make_order(
+        db_session,
+        order_number="UNCONF-SHOPIFY-002",
+        customer=customer,
+        status=OrderStatus.PENDING,
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+
+        response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+        assert response.status_code == 409
+        assert (
+            response.json()["error"]["message"]
+            == "Cannot revert this order because Shopify already shows it as fulfilled."
+        )
+
         order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
         assert order_view.json()["data"]["status"] == "confirmed"

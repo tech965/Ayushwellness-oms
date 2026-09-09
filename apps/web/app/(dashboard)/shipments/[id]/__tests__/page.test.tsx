@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { screen } from "@testing-library/react"
+import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -184,5 +184,120 @@ describe("ShipmentDetailPage — Shopify sync", () => {
     expect(
       screen.queryByRole("button", { name: /Retry Shopify Sync/i })
     ).not.toBeInTheDocument()
+  })
+})
+
+describe("ShipmentDetailPage — Cancel Shipment", () => {
+  it("shows a confirmation dialog before cancelling a not-yet-picked-up shipment", async () => {
+    const user = userEvent.setup()
+    const cancelMutate = vi.fn((_vars, opts) => opts.onSuccess())
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockedUseShipment.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: { ...BASE_SHIPMENT, current_status: "pending" },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useShipment>)
+    mockCommonHooks()
+    mockedUseCancelShipment.mockReturnValue({
+      mutate: cancelMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useCancelShipment>)
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
+
+    renderWithProviders(<ShipmentDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Cancel Shipment$/i }))
+    // The mutation must not fire just from opening the dialog -- it's a
+    // confirmation, not an immediate action.
+    expect(cancelMutate).not.toHaveBeenCalled()
+    expect(
+      screen.getByText("Are you sure you want to cancel this shipment?")
+    ).toBeInTheDocument()
+
+    const dialog = screen.getByRole("alertdialog")
+    await user.click(within(dialog).getByRole("button", { name: /^Cancel Shipment$/i }))
+    expect(cancelMutate).toHaveBeenCalled()
+  })
+
+  it("never offers Cancel Shipment once picked up -- shows the cannot-be-reversed message instead", () => {
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockedUseShipment.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: { ...BASE_SHIPMENT, current_status: "picked_up" },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useShipment>)
+    mockCommonHooks()
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
+
+    renderWithProviders(<ShipmentDetailPage />)
+
+    expect(screen.queryByRole("button", { name: /Cancel Shipment/i })).not.toBeInTheDocument()
+    expect(
+      screen.getByText("Shipment cannot be automatically reversed at this stage. Contact Admin.")
+    ).toBeInTheDocument()
+  })
+
+  it("never offers Cancel Shipment (or the contact-admin message) once already cancelled", () => {
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockedUseShipment.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: { ...BASE_SHIPMENT, current_status: "cancelled" },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useShipment>)
+    mockCommonHooks()
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
+
+    renderWithProviders(<ShipmentDetailPage />)
+
+    expect(screen.queryByRole("button", { name: /Cancel Shipment/i })).not.toBeInTheDocument()
+    expect(
+      screen.queryByText("Shipment cannot be automatically reversed at this stage. Contact Admin.")
+    ).not.toBeInTheDocument()
+  })
+
+  it("delivered shipments also show the cannot-be-reversed message, never a false Undo", () => {
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockedUseShipment.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: { ...BASE_SHIPMENT, current_status: "delivered" },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useShipment>)
+    mockCommonHooks()
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
+
+    renderWithProviders(<ShipmentDetailPage />)
+
+    expect(screen.queryByRole("button", { name: /Cancel Shipment/i })).not.toBeInTheDocument()
+    expect(
+      screen.getByText("Shipment cannot be automatically reversed at this stage. Contact Admin.")
+    ).toBeInTheDocument()
   })
 })

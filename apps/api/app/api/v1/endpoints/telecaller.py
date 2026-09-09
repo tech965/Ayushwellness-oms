@@ -190,8 +190,10 @@ async def unconfirm_order(
 ) -> ApiResponse[OrderDetailResponse]:
     """The inverse of `confirm_order` — CONFIRMED -> PENDING only, for
     undoing a mistaken confirmation. Same `orders.confirm` permission +
-    `assigned_to == current_user.id` check as confirming. Returns 409 once
-    a shipment already exists for the order (`OrderService.unconfirm_order`).
+    `assigned_to == current_user.id` check as confirming. Returns 409 with
+    a specific reason once the shipment has actually progressed past
+    PENDING, or once a Shopify fulfillment already exists for it — never
+    merely because a `Shipment` row exists (`OrderService.unconfirm_order`).
     """
     order = await TelecallingService(session).unconfirm_assigned_order(
         order_id, actor=current_user

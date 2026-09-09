@@ -123,6 +123,10 @@ class ShipmentQueueRowResponse(BaseModel):
     shipment_status: ShipmentStatus | None = None
     awb: str | None = None
     courier_name: str | None = None
+    # Outbound Shopify push status for this row's shipment -- lets the
+    # queue table offer "Retry Shopify Sync" directly, without opening
+    # the shipment. `None` exactly when `shipment_id` is `None`.
+    shopify_sync_status: ShopifySyncStatus | None = None
 
 
 class ShipmentSummaryResponse(BaseModel):
@@ -177,6 +181,17 @@ class BulkShipOrdersResponse(BaseModel):
     shipped_count: int
     failed_count: int
     results: list[BulkShipOrderResult]
+
+
+class BulkShipValidationResult(BaseModel):
+    """One order's dry-run eligibility result from `ShiprocketOperations
+    Service.validate_shipment_eligibility` -- never creates anything, just
+    classifies. `reason` is `None` exactly when `ready` is `True`.
+    """
+
+    order_id: uuid.UUID
+    ready: bool
+    reason: str | None = None
 
 
 class ShipmentAnalyticsResponse(BaseModel):

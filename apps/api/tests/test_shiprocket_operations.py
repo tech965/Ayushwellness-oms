@@ -18,7 +18,7 @@ from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.errors import ShiprocketApiError
 from app.models.audit_log import AuditLog
 from app.models.courier import Courier
-from app.models.enums import NDRStatus, PaymentType
+from app.models.enums import NDRStatus, OrderStatus, PaymentType
 from app.repositories.ndr import NDRRepository
 from app.repositories.shipment import ShipmentRepository
 from app.schemas.order import OrderItemCreateRequest
@@ -62,7 +62,16 @@ def _configure_shiprocket(monkeypatch: pytest.MonkeyPatch):
 
 
 async def _make_order(session: AsyncSession, order_number: str = "OMS-SR-1"):
-    return await OrderService(session).create_order(
+    """Confirmed, with a shipping address -- the minimum a real order
+    needs to pass `ShiprocketOperationsService._check_shippable` (see
+    that method's docstring: not-confirmed / no-address / already-
+    fulfilled are all rejected before any Shiprocket call is made). Set
+    directly rather than via `OrderService.transition_status`/a real
+    Telecaller confirm flow -- this file is testing the Shiprocket push
+    itself, not order-confirmation state machinery (already covered by
+    `tests/test_order_confirmation.py`).
+    """
+    order = await OrderService(session).create_order(
         actor=None,
         order_number=order_number,
         customer_id=None,
@@ -77,6 +86,17 @@ async def _make_order(session: AsyncSession, order_number: str = "OMS-SR-1"):
             )
         ],
     )
+    order.status = OrderStatus.CONFIRMED
+    order.shipping_address = {
+        "line1": "123 Test St",
+        "city": "Mumbai",
+        "state": "MH",
+        "country": "India",
+        "pin_code": "400001",
+    }
+    await session.commit()
+    await session.refresh(order)
+    return order
 
 
 def _create_order_response(shipment_id: str = "5001", shiprocket_order_id: str = "9001") -> dict:
@@ -479,3 +499,105 @@ async def test_full_order_to_shipment_to_awb_to_tracking_flow(db_session: AsyncS
         "shipment.awb_assigned",
         "shipment.tracking_refreshed",
     }.issubset(set(audit_actions))
+
+
+# --- bulk-ship eligibility validation (shared with create_shipment_for_order) --
+
+
+async def test_create_shipment_rejects_an_order_that_is_not_confirmed(
+    db_session: AsyncSession,
+) -> None:
+    order = await _make_order(db_session, "OMS-SR-NOTCONF-1")
+    order.status = OrderStatus.PENDING
+    await db_session.commit()
+    register_adapter(ShiprocketAdapter(client=_StubClient([])))
+
+    with pytest.raises(ConflictError) as exc_info:
+        await ShiprocketOperationsService(db_session).create_shipment_for_order(
+            order.id, actor=None
+        )
+    assert exc_info.value.details["error_type"] == "not_confirmed"
+
+
+async def test_create_shipment_rejects_an_already_fulfilled_order(
+    db_session: AsyncSession,
+) -> None:
+    from app.models.enums import FulfillmentStatus
+
+    order = await _make_order(db_session, "OMS-SR-FULFILLED-1")
+    order.fulfillment_status = FulfillmentStatus.FULFILLED
+    await db_session.commit()
+    register_adapter(ShiprocketAdapter(client=_StubClient([])))
+
+    with pytest.raises(ConflictError) as exc_info:
+        await ShiprocketOperationsService(db_session).create_shipment_for_order(
+            order.id, actor=None
+        )
+    assert exc_info.value.details["error_type"] == "already_fulfilled"
+
+
+async def test_create_shipment_rejects_an_order_with_no_shipping_address(
+    db_session: AsyncSession,
+) -> None:
+    order = await _make_order(db_session, "OMS-SR-NOADDR-1")
+    order.shipping_address = None
+    await db_session.commit()
+    register_adapter(ShiprocketAdapter(client=_StubClient([])))
+
+    with pytest.raises(ConflictError) as exc_info:
+        await ShiprocketOperationsService(db_session).create_shipment_for_order(
+            order.id, actor=None
+        )
+    assert exc_info.value.details["error_type"] == "missing_shipping_address"
+
+
+async def test_validate_shipment_eligibility_classifies_ready_and_not_ready_without_creating_anything(
+    db_session: AsyncSession,
+) -> None:
+    ready_order = await _make_order(db_session, "OMS-SR-VALID-READY")
+    not_confirmed_order = await _make_order(db_session, "OMS-SR-VALID-PENDING")
+    not_confirmed_order.status = OrderStatus.PENDING
+    await db_session.commit()
+
+    results = await ShiprocketOperationsService(db_session).validate_shipment_eligibility(
+        [ready_order.id, not_confirmed_order.id]
+    )
+    by_id = {r["order_id"]: r for r in results}
+
+    assert by_id[ready_order.id]["ready"] is True
+    assert by_id[ready_order.id]["reason"] is None
+    assert by_id[not_confirmed_order.id]["ready"] is False
+    assert "not confirmed" in by_id[not_confirmed_order.id]["reason"] or "pending" in by_id[
+        not_confirmed_order.id
+    ]["reason"]
+
+    from app.models.shipment import Shipment
+
+    total = await db_session.execute(select(func.count()).select_from(Shipment))
+    assert total.scalar_one() == 0
+
+
+async def test_validate_shipment_eligibility_endpoint(db_session: AsyncSession) -> None:
+    from app.db.session import get_db
+    from app.main import app
+
+    from tests.telecalling_test_utils import bearer_client, make_role, make_user
+
+    ready_order = await _make_order(db_session, "OMS-SR-VALID-EP-READY")
+    not_ready_order = await _make_order(db_session, "OMS-SR-VALID-EP-BAD")
+    not_ready_order.shipping_address = None
+    await db_session.commit()
+
+    role = await make_role(db_session, name="FULFILLMENT", permission_codes=["shipments.update"])
+    user = await make_user(db_session, email="ff@validate.example.com", role=role)
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.post(
+            "/api/v1/orders/bulk-ship/validate",
+            json={"order_ids": [str(ready_order.id), str(not_ready_order.id)]},
+        )
+    assert response.status_code == 200
+    by_id = {row["order_id"]: row for row in response.json()["data"]}
+    assert by_id[str(ready_order.id)]["ready"] is True
+    assert by_id[str(not_ready_order.id)]["ready"] is False
+    assert by_id[str(not_ready_order.id)]["reason"]

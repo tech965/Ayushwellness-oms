@@ -41,6 +41,7 @@ from app.schemas.shipment import (
     BulkShipOrderResult,
     BulkShipOrdersRequest,
     BulkShipOrdersResponse,
+    BulkShipValidationResult,
     ShipmentResponse,
 )
 from app.schemas.shiprocket import ShiprocketShipRequest
@@ -164,6 +165,8 @@ def _to_list_response(order: Order) -> OrderListResponse:
         shipment_status=shipment.current_status.value if shipment else None,
         courier_name=shipment.courier.name if shipment and shipment.courier else None,
         tracking_number=shipment.awb if shipment else None,
+        shipment_id=shipment.id if shipment else None,
+        shopify_sync_status=shipment.shopify_sync_status.value if shipment else None,
         confirmed_by_telecaller_name=(
             order.confirmed_by_telecaller.name if order.confirmed_by_telecaller else None
         ),
@@ -270,6 +273,24 @@ async def add_order_event(
         order_id, actor=current_user, **payload.model_dump()
     )
     return ApiResponse(data=OrderEventResponse.model_validate(event), message="Event recorded.")
+
+
+@router.post("/bulk-ship/validate", response_model=ApiResponse[list[BulkShipValidationResult]])
+async def validate_bulk_ship_orders(
+    payload: BulkShipOrdersRequest,
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.update")),
+) -> ApiResponse[list[BulkShipValidationResult]]:
+    """Read-only dry run for the bulk-ship confirmation screen — classifies
+    each selected order as ready/not-ready, with a reason, WITHOUT
+    creating anything. Registered before `/bulk-ship` so "validate" is
+    never parsed as a stray path segment of that route. Same permission
+    as the real `/bulk-ship`, since it exposes the same order data.
+    """
+    results = await ShiprocketOperationsService(session).validate_shipment_eligibility(
+        payload.order_ids
+    )
+    return ApiResponse(data=[BulkShipValidationResult(**r) for r in results])
 
 
 @router.post("/bulk-ship", response_model=ApiResponse[BulkShipOrdersResponse])

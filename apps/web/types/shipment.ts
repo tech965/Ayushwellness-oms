@@ -105,6 +105,10 @@ export interface ShipmentQueueRow {
   confirmed_by_telecaller_name: string | null
   shipment_id: string | null
   shipment_status: ShipmentStatus | null
+  // Outbound Shopify push status for this row's shipment -- backs a
+  // direct "Retry Sync" action in the table, without opening the
+  // shipment. `null` exactly when `shipment_id` is `null`.
+  shopify_sync_status: string | null
   awb: string | null
   courier_name: string | null
 }

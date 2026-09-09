@@ -21,9 +21,10 @@ from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.config import ShiprocketConfig
 from app.integrations.shiprocket.normalizer import TRACKING_NORMALIZER, extract_tracking_events
 from app.models.auth import User
-from app.models.enums import NDRStatus, ShipmentStatus, ShopifySyncStatus
+from app.models.enums import FulfillmentStatus, NDRStatus, OrderStatus, ShipmentStatus, ShopifySyncStatus
 from app.models.integration import IntegrationCode
 from app.models.ndr import NDR
+from app.models.order import Order
 from app.models.shipment import Shipment
 from app.repositories.order import OrderRepository
 from app.repositories.shipment import ShipmentRepository
@@ -62,6 +63,82 @@ class ShiprocketOperationsService:
             raise NotFoundError("Shipment not found.")
         return shipment
 
+    async def _check_shippable(self, order: Order) -> None:
+        """The single source of truth for "can a Shiprocket shipment be
+        created for this order right now" — raises `ConflictError` with a
+        human-readable reason on the first check that fails, otherwise
+        returns normally. Shared by `create_shipment_for_order` (which
+        actually executes) and `validate_shipment_eligibility` (a
+        read-only dry run for the bulk-ship confirmation screen) so the
+        two can never drift apart on what "eligible" means — never a
+        second, looser copy of these rules.
+
+        Deliberately does NOT check Shiprocket configuration (an
+        environment-wide concern, not a per-order one — checked once by
+        `create_shipment_for_order` itself, not repeated per order in a
+        bulk validation pass).
+        """
+        if order.status != OrderStatus.CONFIRMED:
+            raise ConflictError(
+                f"Order is '{order.status.value}', not confirmed — cannot ship.",
+                details={"error_type": "not_confirmed"},
+            )
+        if order.fulfillment_status == FulfillmentStatus.FULFILLED:
+            raise ConflictError(
+                "Order is already fulfilled.",
+                details={"error_type": "already_fulfilled"},
+            )
+        if not order.shipping_address:
+            raise ConflictError(
+                "Order has no shipping address on file.",
+                details={"error_type": "missing_shipping_address"},
+            )
+
+        # Idempotency guard (spec: "prevent duplicate external operations" —
+        # a client retry after a timeout, or a double-click, must never
+        # create a second Shiprocket order for the same OMS order). A
+        # CANCELLED shipment doesn't block a genuine re-ship. This is a
+        # local-only check (no new Shiprocket API call) — cheap and safe
+        # to run before ever touching the adapter.
+        existing_shipments = await self.shipments.list_for_order(order.id)
+        if any(s.current_status != ShipmentStatus.CANCELLED for s in existing_shipments):
+            raise ConflictError(
+                "A shipment already exists for this order — refresh the page instead of "
+                "creating another one.",
+                details={"error_type": "shipment_already_exists"},
+            )
+
+        shortages = await self.inventory_service.check_stock_available(order.id)
+        if shortages:
+            raise ConflictError(
+                "Cannot create shipment — insufficient stock for one or more items.",
+                details={"error_type": "insufficient_stock", "items": shortages},
+            )
+
+    async def validate_shipment_eligibility(
+        self, order_ids: list[uuid.UUID]
+    ) -> list[dict[str, object]]:
+        """Read-only dry run of `_check_shippable` for every selected
+        order — never creates or touches anything, purely classifies each
+        order as ready/not-ready with a reason, for the bulk-ship
+        confirmation screen ("3 ready, 2 cannot be shipped"). Reuses the
+        exact same eligibility rules `create_shipment_for_order` itself
+        enforces; never a second, looser copy of them.
+        """
+        results: list[dict[str, object]] = []
+        for order_id in order_ids:
+            order = await self.orders.get_by_id_with_items_and_customer(order_id)
+            if order is None:
+                results.append({"order_id": order_id, "ready": False, "reason": "Order not found."})
+                continue
+            try:
+                await self._check_shippable(order)
+            except ConflictError as exc:
+                results.append({"order_id": order_id, "ready": False, "reason": exc.message})
+            else:
+                results.append({"order_id": order_id, "ready": True, "reason": None})
+        return results
+
     async def create_shipment_for_order(
         self,
         order_id: uuid.UUID,
@@ -76,26 +153,7 @@ class ShiprocketOperationsService:
         if order is None:
             raise NotFoundError("Order not found.")
 
-        # Idempotency guard (spec: "prevent duplicate external operations" —
-        # a client retry after a timeout, or a double-click, must never
-        # create a second Shiprocket order for the same OMS order). A
-        # CANCELLED shipment doesn't block a genuine re-ship. This is a
-        # local-only check (no new Shiprocket API call) — cheap and safe
-        # to run before ever touching the adapter.
-        existing_shipments = await self.shipments.list_for_order(order_id)
-        if any(s.current_status != ShipmentStatus.CANCELLED for s in existing_shipments):
-            raise ConflictError(
-                "A shipment already exists for this order — refresh the page instead of "
-                "creating another one.",
-                details={"error_type": "shipment_already_exists"},
-            )
-
-        shortages = await self.inventory_service.check_stock_available(order_id)
-        if shortages:
-            raise ConflictError(
-                "Cannot create shipment — insufficient stock for one or more items.",
-                details={"error_type": "insufficient_stock", "items": shortages},
-            )
+        await self._check_shippable(order)
 
         config = ShiprocketConfig.from_settings()
         if config is None or not config.pickup_location:

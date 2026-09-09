@@ -2,18 +2,10 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { Truck } from "lucide-react"
 import { toast } from "sonner"
 
-import {
-  AlertDialog,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog"
+import { BulkShipDialog } from "@/components/fulfillment/bulk-ship-dialog"
+import { ShipmentActionCell } from "@/components/fulfillment/shipment-action-cell"
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import type { DateRangeValue } from "@/components/shared/date-range-picker"
 import { FilterBar } from "@/components/shared/filter-bar"
@@ -32,11 +24,7 @@ import {
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import {
-  useBulkShipOrders,
-  useShipmentQueue,
-  useShipOrderFromQueue,
-} from "@/services/shipment-queue"
+import { useShipmentQueue, useShipOrderFromQueue } from "@/services/shipment-queue"
 import { useTeamTelecallers } from "@/services/team"
 import { PAYMENT_TYPE_OPTIONS } from "@/types/order"
 import {
@@ -77,7 +65,6 @@ function FulfillmentQueueContent() {
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
   const [bulkShipOpen, setBulkShipOpen] = React.useState(false)
   const shipOrder = useShipOrderFromQueue()
-  const bulkShip = useBulkShipOrders()
 
   function toggleOne(id: string) {
     setSelectedIds((prev) => {
@@ -103,23 +90,6 @@ function FulfillmentQueueContent() {
   function handleShipOrder(orderId: string) {
     shipOrder.mutate(orderId, {
       onSuccess: () => toast.success("Shipment created via Shiprocket."),
-      onError: (error) => toast.error(getApiErrorMessage(error)),
-    })
-  }
-
-  function handleBulkShip() {
-    bulkShip.mutate(Array.from(selectedIds), {
-      onSuccess: (result) => {
-        if (result.failed_count === 0) {
-          toast.success(`${result.shipped_count} shipments created via Shiprocket.`)
-        } else {
-          toast.warning(
-            `${result.shipped_count} shipped, ${result.failed_count} could not be shipped.`
-          )
-        }
-        setBulkShipOpen(false)
-        setSelectedIds(new Set())
-      },
       onError: (error) => toast.error(getApiErrorMessage(error)),
     })
   }
@@ -204,32 +174,18 @@ function FulfillmentQueueContent() {
     {
       id: "actions",
       header: "",
-      cell: (r) =>
-        r.shipment_id ? (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={(e) => {
-              e.stopPropagation()
-              router.push(`/shipments/${r.shipment_id}`)
-            }}
-          >
-            Process Shipment
-          </Button>
-        ) : (
-          <Button
-            size="sm"
-            disabled={shipOrder.isPending && shipOrder.variables === r.order_id}
-            onClick={(e) => {
-              e.stopPropagation()
-              handleShipOrder(r.order_id)
-            }}
-          >
-            {shipOrder.isPending && shipOrder.variables === r.order_id
-              ? "Shipping..."
-              : "Ship Order"}
-          </Button>
-        ),
+      cell: (r) => (
+        <ShipmentActionCell
+          orderId={r.order_id}
+          shipmentId={r.shipment_id}
+          shipmentStatus={r.shipment_status}
+          shopifySyncStatus={r.shopify_sync_status}
+          orderStatus="confirmed"
+          fulfillmentStatus="unfulfilled"
+          onShip={handleShipOrder}
+          shipPending={shipOrder.isPending && shipOrder.variables === r.order_id}
+        />
+      ),
     },
   ]
 
@@ -241,14 +197,6 @@ function FulfillmentQueueContent() {
           query.data
             ? `${query.data.meta.total_items} confirmed orders ready for shipment.`
             : "Confirmed orders ready for shipment."
-        }
-        actions={
-          selectedIds.size > 0 ? (
-            <Button size="sm" onClick={() => setBulkShipOpen(true)}>
-              <Truck />
-              Bulk Ship via Shiprocket ({selectedIds.size})
-            </Button>
-          ) : undefined
         }
       />
       <div className="flex flex-col gap-4">
@@ -322,10 +270,15 @@ function FulfillmentQueueContent() {
 
         {selectedIds.size > 0 && (
           <div className="bg-muted/50 border-border flex items-center justify-between rounded-lg border px-4 py-2 text-sm">
-            <span className="font-medium">{selectedIds.size} orders selected</span>
-            <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
-              Clear selection
-            </Button>
+            <span className="font-medium">Selected {selectedIds.size} orders</span>
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={() => setBulkShipOpen(true)}>
+                Create Shipments
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
+                Clear Selection
+              </Button>
+            </div>
           </div>
         )}
 
@@ -358,32 +311,23 @@ function FulfillmentQueueContent() {
                 pageSizeOptions={[10, 20, 50, 100]}
                 onPageSizeChange={(page_size) => setFilters({ page_size, page: 1 })}
               />
+              <BulkShipDialog
+                open={bulkShipOpen}
+                onOpenChange={setBulkShipOpen}
+                rows={data.data
+                  .filter((r) => selectedIds.has(r.order_id))
+                  .map((r) => ({
+                    id: r.order_id,
+                    order_number: r.order_number,
+                    payment_type: r.payment_type,
+                    total_amount: r.total_amount,
+                  }))}
+                onDone={() => setSelectedIds(new Set())}
+              />
             </>
           )}
         </QueryStates>
       </div>
-
-      <AlertDialog open={bulkShipOpen} onOpenChange={setBulkShipOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Ship {selectedIds.size} selected orders via Shiprocket?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Creates a Shiprocket shipment for each order (checking stock availability first).
-              Orders with insufficient stock, or that already have a shipment, are reported as
-              failed without blocking the rest. You still assign AWB and request pickup per
-              shipment afterward.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <Button onClick={handleBulkShip} disabled={bulkShip.isPending}>
-              {bulkShip.isPending ? "Shipping..." : "Ship Orders"}
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </>
   )
 }

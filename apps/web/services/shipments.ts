@@ -76,6 +76,13 @@ export function useShipmentsForOrder(orderId: string) {
   })
 }
 
+/** A shipment action (AWB assignment, cancel, pickup, tracking refresh)
+ * can change what "Orders Need Shipment"/"Confirmed by Telecaller" show
+ * for this order too (e.g. cancelling reopens it for re-shipping) --
+ * invalidating `["orders"]` alongside `["shipments"]` keeps those pages
+ * correct without a manual reload. Matches `services/shipment-queue.ts`'s
+ * `invalidateAfterShipmentChange`.
+ */
 function useShiprocketAction(id: string, path: string) {
   const queryClient = useQueryClient()
   return useMutation({
@@ -88,6 +95,8 @@ function useShiprocketAction(id: string, path: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["shipments"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["orders"] })
     },
   })
 }
@@ -124,6 +133,8 @@ export function useRetryShopifySync(id: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["shipments"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["orders"] })
     },
   })
 }
