@@ -24,6 +24,7 @@ from app.models.enums import (
     OrderStatus,
     PaymentStatus,
     PaymentType,
+    ShopifySyncStatus,
     sa_enum,
 )
 from app.models.mixins import SyncMetadataMixin
@@ -145,6 +146,32 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+
+    # Outbound OMS -> Shopify push for the Telecaller-confirmation event
+    # itself (`ShopifyFulfillmentService.sync_confirmation_fulfillment`) --
+    # a real Shopify `Fulfillment` created purely to reflect "OMS says this
+    # order is confirmed," with no AWB/tracking and no Shiprocket shipment
+    # behind it. Deliberately a separate id from any `Shipment.
+    # shopify_fulfillment_id` (the real shipping-time push on AWB
+    # assignment): this one is OMS-owned from the moment it's created, so
+    # `unconfirm_order` can safely `fulfillmentCancel` exactly this id and
+    # never anything created independently outside the OMS. `NULL` means
+    # "nothing to reverse" -- never synced, already reversed, or (the one
+    # edge case) synced by a retry that couldn't recover the real
+    # fulfillment id, which is instead recorded as `SYNCED` with this
+    # column left `NULL` -- see that method's docstring.
+    shopify_confirmation_fulfillment_id: Mapped[str | None] = mapped_column(
+        String(64), unique=True, nullable=True, index=True
+    )
+    shopify_confirmation_sync_status: Mapped[ShopifySyncStatus] = mapped_column(
+        sa_enum(ShopifySyncStatus, "shopify_sync_status"),
+        nullable=False,
+        default=ShopifySyncStatus.NOT_APPLICABLE,
+    )
+    shopify_confirmation_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shopify_confirmation_synced_at: Mapped[datetime | None] = mapped_column(
+        AwareDateTime(), nullable=True
+    )
 
     customer: Mapped[Customer | None] = relationship()
     confirmed_by_telecaller: Mapped[User | None] = relationship(

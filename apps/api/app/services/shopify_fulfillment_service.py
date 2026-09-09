@@ -1,27 +1,50 @@
-"""OMS -> Shopify outbound fulfillment push (Phase 6).
+"""OMS -> Shopify outbound fulfillment push (Phase 6, extended for
+Telecaller-confirmation sync).
 
-Trigger point (deliberate design decision — see report): AWB assignment
-(`ShiprocketOperationsService.assign_awb`), never Telecaller confirmation
-and never bare shipment creation. AWB assignment is the first point in
-the existing shipment lifecycle where there's a real courier + tracking
-number worth showing the customer on their Shopify order, and it's the
-first point that represents a real, committed shipping action rather
-than just "a Shiprocket order object exists."
+Two independent pushes live here, each with its own id/status columns so
+neither can ever be mistaken for or cancel the other:
+
+  - Real shipping (`sync_fulfillment_for_shipment`): triggered by AWB
+    assignment (`ShiprocketOperationsService.assign_awb`), never
+    Telecaller confirmation and never bare shipment creation. Tracked on
+    `Shipment.shopify_fulfillment_id`/`shopify_sync_status`.
+  - Telecaller confirmation (`sync_confirmation_fulfillment` /
+    `reverse_confirmation_fulfillment`): triggered by `OrderService.
+    confirm_order`/`unconfirm_order`. Marks the Shopify order Fulfilled
+    purely to reflect "OMS confirmed this order" — no AWB, no Shiprocket
+    shipment. Tracked on `Order.shopify_confirmation_fulfillment_id`/
+    `shopify_confirmation_sync_status`.
+
+Because a Telecaller confirmation can close the order's only
+FulfillmentOrder before any real shipment exists, `sync_fulfillment_for_
+shipment` has a fallback: if there's no remaining OPEN FulfillmentOrder
+*and* the order has a `shopify_confirmation_fulfillment_id`, it attaches
+real tracking to that SAME Fulfillment (`fulfillmentTrackingInfoUpdate`)
+instead of trying to create a second one. This is the one place the two
+pushes touch — see that method's docstring.
 
 Failure isolation is the core contract here: a Shopify failure must
 NEVER undo or fail the Shiprocket/OMS operation that triggered it. Every
 public method here catches its own failures, records them on the
-`Shipment` row (`shopify_sync_status`/`shopify_sync_error`), commits, and
-returns normally — it never raises out to a caller that also has its own
-(already-successful) Shiprocket state to preserve. The one exception is
-`NotFoundError` for a genuinely bad `shipment_id`, which is a caller bug,
-not an external-system failure.
+relevant row (`shopify_sync_status`/`shopify_sync_error` or their
+`shopify_confirmation_*` counterparts), commits, and returns normally —
+it never raises out to a caller that also has its own (already-
+successful) OMS state to preserve. The one exception is
+`reverse_confirmation_fulfillment`, which DOES raise on a fulfillment-
+cancellation failure: `unconfirm_order`'s existing safety contract
+(mirrors its Shiprocket-cancel-first rule) requires the whole revert to
+abort — order stays CONFIRMED — rather than silently leave Shopify
+Fulfilled while OMS calls the order PENDING. `NotFoundError` for a
+genuinely bad `shipment_id`/`order_id` is likewise a caller bug, not an
+external-system failure, and always raises.
 
-Idempotency: a `Shipment` with `shopify_fulfillment_id` already set is
-never re-pushed — reused unchanged on every subsequent call (including
-manual retry). See `sync_fulfillment_for_shipment`'s docstring for how a
-FAILED retry that turns out to have actually succeeded upstream is
-detected without creating a second Shopify Fulfillment.
+Idempotency: a row with its `shopify_fulfillment_id` (or
+`shopify_confirmation_fulfillment_id`) already set is never re-pushed —
+reused unchanged on every subsequent call (including manual retry). See
+`sync_fulfillment_for_shipment`'s docstring for how a FAILED retry that
+turns out to have actually succeeded upstream is detected without
+creating a second Shopify Fulfillment; `sync_confirmation_fulfillment`
+has the identical guard for the confirmation push.
 """
 
 from __future__ import annotations
@@ -38,6 +61,7 @@ from app.integrations.shopify.adapter import ShopifyAdapter
 from app.models.auth import User
 from app.models.enums import ShopifySyncStatus
 from app.models.integration import IntegrationCode
+from app.models.order import Order
 from app.models.shipment import Shipment
 from app.repositories.courier import CourierRepository
 from app.repositories.order import OrderRepository
@@ -53,9 +77,12 @@ logger = get_logger(__name__)
 _MAX_ERROR_MESSAGE_LENGTH = 2000
 
 # Pushed to the Shopify order on Telecaller confirmation (`OrderService.
-# confirm_order`) -- purely informational; never mark the Shopify order
-# Fulfilled here (that stays gated on a real Shiprocket shipment/AWB, see
-# `sync_fulfillment_for_shipment`).
+# confirm_order`), alongside (never instead of) the real confirmation
+# Fulfillment `sync_confirmation_fulfillment` creates -- a marker proving
+# the OMS is driving the workflow. Removed again by `unconfirm_order` via
+# `reverse_confirmation_fulfillment`. Purely informational either way:
+# never read back as a business-state source (Order.status/confirmation
+# columns stay authoritative -- see module docstring).
 CONFIRMATION_TAG = "OMS Confirmed"
 
 
@@ -92,15 +119,26 @@ class ShopifyFulfillmentService:
           invokes this once an AWB exists, so this branch is really only
           reachable if the retry endpoint is called too early.
         - Shopify reports no remaining OPEN fulfillment order for this
-          order: if this is the FIRST attempt, that's a legitimate
-          "nothing to push" (`NOT_APPLICABLE`) -- e.g. an order Shopify
-          already fulfilled through some other channel. If it's a RETRY
-          after a previous `FAILED` attempt, it instead means the earlier
-          attempt likely succeeded upstream even though the OMS lost
-          track of the result (timeout, etc.) -- marked `SYNCED` (no
-          `shopify_fulfillment_id`, since we genuinely don't know it, but
-          never re-attempted either) rather than left permanently stuck
-          retrying and risking a duplicate `fulfillmentCreate`.
+          order AND `Order.shopify_confirmation_fulfillment_id` is set:
+          Telecaller confirmation already closed the order's one
+          FulfillmentOrder by creating a Fulfillment of its own (see
+          `sync_confirmation_fulfillment`) -- there is genuinely nothing
+          left to `fulfillmentCreate`. Real tracking is attached to that
+          SAME Fulfillment instead (`fulfillmentTrackingInfoUpdate`),
+          which both marks this shipment `SYNCED` with that fulfillment's
+          id AND is what makes the Shopify order actually show the AWB/
+          courier once real shipping happens, rather than silently
+          no-oping just because confirmation got there first.
+        - Otherwise, no remaining OPEN fulfillment order: if this is the
+          FIRST attempt, that's a legitimate "nothing to push"
+          (`NOT_APPLICABLE`) -- e.g. an order Shopify already fulfilled
+          through some other channel. If it's a RETRY after a previous
+          `FAILED` attempt, it instead means the earlier attempt likely
+          succeeded upstream even though the OMS lost track of the result
+          (timeout, etc.) -- marked `SYNCED` (no `shopify_fulfillment_id`,
+          since we genuinely don't know it, but never re-attempted
+          either) rather than left permanently stuck retrying and risking
+          a duplicate `fulfillmentCreate`.
         """
         shipment = await self.shipments.get_by_id(shipment_id)
         if shipment is None:
@@ -127,7 +165,39 @@ class ShopifyFulfillmentService:
 
         try:
             fulfillment_order_id = await adapter.get_open_fulfillment_order_id(order_gid)
+            courier = (
+                await self.couriers.get_by_id(shipment.courier_id) if shipment.courier_id else None
+            )
             if fulfillment_order_id is None:
+                if order.shopify_confirmation_fulfillment_id:
+                    fulfillment = await adapter.update_fulfillment_tracking(
+                        fulfillment_id=order.shopify_confirmation_fulfillment_id,
+                        tracking_number=shipment.awb,
+                        tracking_company=courier.name if courier else None,
+                        tracking_url=None,
+                        notify_customer=False,
+                    )
+                    await self.shipments.update(
+                        shipment,
+                        shopify_fulfillment_id=fulfillment["id"],
+                        shopify_sync_status=ShopifySyncStatus.SYNCED,
+                        shopify_sync_error=None,
+                        shopify_synced_at=datetime.now(UTC),
+                    )
+                    await self.audit.record(
+                        user=actor,
+                        action="shipment.shopify_tracking_synced_to_confirmation_fulfillment",
+                        entity_type="shipment",
+                        entity_id=str(shipment.id),
+                        new_value={"shopify_fulfillment_id": fulfillment["id"]},
+                    )
+                    await self.session.commit()
+                    logger.info(
+                        "shopify_tracking_synced_to_confirmation_fulfillment",
+                        shipment_id=str(shipment.id),
+                        order_id=str(order.id),
+                    )
+                    return shipment
                 if previous_status == ShopifySyncStatus.FAILED:
                     await self.shipments.update(
                         shipment,
@@ -146,9 +216,6 @@ class ShopifyFulfillmentService:
                 await self.session.commit()
                 return shipment
 
-            courier = (
-                await self.couriers.get_by_id(shipment.courier_id) if shipment.courier_id else None
-            )
             fulfillment = await adapter.create_fulfillment(
                 fulfillment_order_id=fulfillment_order_id,
                 tracking_number=shipment.awb,
@@ -191,10 +258,11 @@ class ShopifyFulfillmentService:
     async def sync_confirmation_tag(self, order_id: uuid.UUID, *, actor: User | None) -> None:
         """Best-effort outbound push of `CONFIRMATION_TAG` to the Shopify
         order once a Telecaller confirms it in the OMS -- a purely
-        informational marker proving the OMS is driving the workflow,
-        never a fulfillment signal (`Order.fulfillment_status`/Shopify's
-        own fulfillment state are untouched here, and must stay
-        UNFULFILLED until a real shipment exists).
+        informational marker proving the OMS is driving the workflow.
+        Independent of the actual Fulfillment push (`sync_confirmation_
+        fulfillment`, called separately by `OrderService.confirm_order`)
+        -- a failure here never blocks that, and vice versa, so either
+        half can be retried without redoing the other.
 
         Skipped entirely for a non-Shopify order (`shopify_order_id` is
         `None`, e.g. a manually-created OMS order) -- nothing to tag.
@@ -238,6 +306,238 @@ class ShopifyFulfillmentService:
         )
         await self.session.commit()
         logger.info("shopify_confirmation_tag_synced", order_id=str(order_id))
+
+    async def sync_confirmation_fulfillment(
+        self, order_id: uuid.UUID, *, actor: User | None
+    ) -> Order:
+        """Pushes the Telecaller confirmation to Shopify as a real
+        `Fulfillment` -- no AWB, no tracking, no Shiprocket shipment
+        involved; purely "OMS confirmed this order." Safe to call more
+        than once for the same order (including from the manual retry
+        endpoint and from `OrderService.confirm_order` on a bulk-confirm
+        retry hitting an already-confirmed order):
+
+        - Already synced (`shopify_confirmation_fulfillment_id` set) ->
+          returned unchanged, Shopify is never called again.
+        - Order isn't from Shopify (`shopify_order_id` is `None`, i.e. a
+          manually-created OMS order) -> `NOT_APPLICABLE`, no call.
+        - Shopify reports no remaining OPEN fulfillment order: if this is
+          the FIRST attempt, that's a legitimate "nothing to push"
+          (`NOT_APPLICABLE`) -- e.g. an order Shopify already fulfilled
+          through some other channel. If it's a RETRY after a previous
+          `FAILED` attempt, the earlier attempt likely succeeded upstream
+          even though the OMS lost track of the result -- marked `SYNCED`
+          (no `shopify_confirmation_fulfillment_id`, since we genuinely
+          don't know it, but never re-attempted either). That one
+          combination -- `SYNCED` with a `None` id -- is exactly what
+          `unconfirm_order` treats as unreversible and blocks on, same as
+          an order fulfilled directly through Shopify with no OMS record
+          of how.
+
+        Never raises: same failure-isolation contract as
+        `sync_fulfillment_for_shipment` -- OMS confirmation must never be
+        rolled back, delayed, or blocked by a Shopify-side failure. The
+        failure is recorded on `Order.shopify_confirmation_sync_status`/
+        `shopify_confirmation_sync_error` so `POST /orders/{id}/shopify/
+        retry-confirmation-sync` can retry just this half without
+        re-pushing the (already-independently-idempotent) tag.
+        """
+        order = await self.orders.get_by_id(order_id)
+        if order is None:
+            raise NotFoundError("Order not found.")
+
+        if not order.shopify_order_id:
+            if order.shopify_confirmation_sync_status != ShopifySyncStatus.NOT_APPLICABLE:
+                await self.orders.update(
+                    order, shopify_confirmation_sync_status=ShopifySyncStatus.NOT_APPLICABLE
+                )
+                await self.session.commit()
+            return order
+
+        if order.shopify_confirmation_fulfillment_id:
+            return order
+
+        previous_status = order.shopify_confirmation_sync_status
+        adapter = self._get_adapter()
+        order_gid = f"gid://shopify/Order/{order.shopify_order_id}"
+
+        try:
+            fulfillment_order_id = await adapter.get_open_fulfillment_order_id(order_gid)
+            if fulfillment_order_id is None:
+                if previous_status == ShopifySyncStatus.FAILED:
+                    await self.orders.update(
+                        order,
+                        shopify_confirmation_sync_status=ShopifySyncStatus.SYNCED,
+                        shopify_confirmation_sync_error=(
+                            "Shopify reports no remaining open fulfillment orders for this "
+                            "order -- treating as already fulfilled (likely by an earlier "
+                            "attempt whose result the OMS failed to record). The OMS does not "
+                            "know this Fulfillment's id, so unconfirm cannot automatically "
+                            "reverse it."
+                        ),
+                        shopify_confirmation_synced_at=datetime.now(UTC),
+                    )
+                else:
+                    await self.orders.update(
+                        order,
+                        shopify_confirmation_sync_status=ShopifySyncStatus.NOT_APPLICABLE,
+                    )
+                await self.session.commit()
+                return order
+
+            fulfillment = await adapter.create_fulfillment(
+                fulfillment_order_id=fulfillment_order_id,
+                tracking_number=None,
+                tracking_company=None,
+                tracking_url=None,
+                notify_customer=False,
+            )
+        except IntegrationError as exc:
+            return await self._record_confirmation_failure(order, actor=actor, message=exc.message)
+        except Exception as exc:  # noqa: BLE001 - never let an unexpected error block confirmation
+            await self.session.rollback()
+            order = await self.orders.get_by_id(order_id)
+            assert order is not None
+            return await self._record_confirmation_failure(
+                order, actor=actor, message=f"Unexpected error syncing to Shopify: {exc}"
+            )
+
+        await self.orders.update(
+            order,
+            shopify_confirmation_fulfillment_id=fulfillment["id"],
+            shopify_confirmation_sync_status=ShopifySyncStatus.SYNCED,
+            shopify_confirmation_sync_error=None,
+            shopify_confirmation_synced_at=datetime.now(UTC),
+        )
+        await self.audit.record(
+            user=actor,
+            action="order.shopify_confirmation_fulfillment_synced",
+            entity_type="order",
+            entity_id=str(order_id),
+            new_value={"shopify_confirmation_fulfillment_id": fulfillment["id"]},
+        )
+        await self.session.commit()
+        logger.info("shopify_confirmation_fulfillment_synced", order_id=str(order_id))
+        return order
+
+    async def reverse_confirmation_fulfillment(
+        self, order_id: uuid.UUID, *, actor: User | None
+    ) -> Order:
+        """The inverse of `sync_confirmation_fulfillment` -- called by
+        `OrderService.unconfirm_order` before it transitions the order
+        back to PENDING. Removes `CONFIRMATION_TAG` (best-effort, same
+        failure-isolation as the forward tag push: `tagsRemove` is a
+        no-op for a tag that's already gone, so this is always safe to
+        retry) and cancels EXACTLY the Fulfillment
+        `shopify_confirmation_fulfillment_id` names -- never a generic
+        "cancel whatever is open" call, so a real fulfillment created
+        independently outside the OMS is never touched.
+
+        Unlike every other method in this service, the fulfillment-
+        cancellation half DOES raise (`IntegrationError`) on failure,
+        deliberately: `unconfirm_order` must never transition the order
+        to PENDING while Shopify still shows it Fulfilled, mirroring the
+        existing rule that a failed Shiprocket cancellation also aborts
+        the whole revert. The failure is still recorded first
+        (`shopify_confirmation_sync_status=FAILED`) so a retry has
+        something to act on and OMS confirmation history -- the order
+        stays CONFIRMED, `confirmed_by_telecaller_id`/`confirmed_at`
+        untouched -- is never corrupted by the failed attempt.
+
+        Idempotent: `shopify_confirmation_fulfillment_id` already `None`
+        (never synced, or a previous reversal already succeeded) ->
+        returned unchanged, no Shopify call for the fulfillment half at
+        all. `unconfirm_order` itself blocks BEFORE ever calling this
+        when `shopify_confirmation_sync_status == SYNCED` but the id is
+        `None` (the one case in `sync_confirmation_fulfillment` where the
+        OMS knows Shopify was fulfilled but not the Fulfillment's real
+        id) -- there is nothing this method could safely cancel then.
+        """
+        order = await self.orders.get_by_id(order_id)
+        if order is None:
+            raise NotFoundError("Order not found.")
+
+        if not order.shopify_order_id:
+            return order
+
+        adapter = self._get_adapter()
+        order_gid = f"gid://shopify/Order/{order.shopify_order_id}"
+        try:
+            await adapter.remove_order_tags(order_gid, [CONFIRMATION_TAG])
+        except IntegrationError as exc:
+            logger.warning(
+                "shopify_confirmation_tag_removal_failed", order_id=str(order_id), error=exc.message
+            )
+        except Exception as exc:  # noqa: BLE001 - tag removal is best-effort, never blocking
+            logger.warning(
+                "shopify_confirmation_tag_removal_failed", order_id=str(order_id), error=str(exc)
+            )
+
+        if not order.shopify_confirmation_fulfillment_id:
+            return order
+
+        try:
+            await adapter.cancel_fulfillment(order.shopify_confirmation_fulfillment_id)
+        except IntegrationError as exc:
+            truncated = exc.message[:_MAX_ERROR_MESSAGE_LENGTH]
+            await self.orders.update(
+                order,
+                shopify_confirmation_sync_status=ShopifySyncStatus.FAILED,
+                shopify_confirmation_sync_error=truncated,
+            )
+            await self.audit.record(
+                user=actor,
+                action="order.shopify_confirmation_fulfillment_reversal_failed",
+                entity_type="order",
+                entity_id=str(order_id),
+                new_value={"error": truncated},
+            )
+            await self.session.commit()
+            logger.warning(
+                "shopify_confirmation_fulfillment_reversal_failed",
+                order_id=str(order_id),
+                error=truncated,
+            )
+            raise
+
+        await self.orders.update(
+            order,
+            shopify_confirmation_fulfillment_id=None,
+            shopify_confirmation_sync_status=ShopifySyncStatus.NOT_APPLICABLE,
+            shopify_confirmation_sync_error=None,
+            shopify_confirmation_synced_at=None,
+        )
+        await self.audit.record(
+            user=actor,
+            action="order.shopify_confirmation_fulfillment_reversed",
+            entity_type="order",
+            entity_id=str(order_id),
+        )
+        await self.session.commit()
+        logger.info("shopify_confirmation_fulfillment_reversed", order_id=str(order_id))
+        return order
+
+    async def _record_confirmation_failure(
+        self, order: Order, *, actor: User | None, message: str
+    ) -> Order:
+        truncated = message[:_MAX_ERROR_MESSAGE_LENGTH]
+        await self.orders.update(
+            order,
+            shopify_confirmation_sync_status=ShopifySyncStatus.FAILED,
+            shopify_confirmation_sync_error=truncated,
+        )
+        await self.audit.record(
+            user=actor,
+            action="order.shopify_confirmation_fulfillment_sync_failed",
+            entity_type="order",
+            entity_id=str(order.id),
+            new_value={"error": truncated},
+        )
+        await self.session.commit()
+        logger.warning(
+            "shopify_confirmation_fulfillment_sync_failed", order_id=str(order.id), error=truncated
+        )
+        return order
 
     async def _record_failure(
         self, shipment: Shipment, *, actor: User | None, message: str

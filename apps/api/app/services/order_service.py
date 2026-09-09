@@ -299,14 +299,19 @@ class OrderService:
         transition (PROCESSING/PACKED/...), so they survive the rest of
         the order's lifecycle untouched.
 
-        Also pushes the `CONFIRMATION_TAG` marker to the Shopify order
-        (`ShopifyFulfillmentService.sync_confirmation_tag`) once the OMS
-        side above has fully committed -- proof the OMS, not Shopify, is
-        driving confirmation, without ever marking the order Fulfilled or
-        touching Shiprocket (a shipment is only ever created by an
-        explicit Ship Order/Bulk Ship action, never by confirming). Best
-        effort: a Shopify failure here never undoes or fails the
-        confirmation that already succeeded.
+        Also pushes the `CONFIRMATION_TAG` marker AND a real Shopify
+        `Fulfillment` for this confirmation (`ShopifyFulfillmentService.
+        sync_confirmation_tag`/`sync_confirmation_fulfillment`) once the
+        OMS side above has fully committed -- proof the OMS is driving
+        confirmation, and what makes the Shopify order actually show
+        Fulfilled. Deliberately still never touches Shiprocket (a
+        shipment is only ever created by an explicit Ship Order/Bulk Ship
+        action, never by confirming) and never assigns an AWB -- the
+        Fulfillment this creates carries no tracking info. Best effort:
+        either Shopify push failing is recorded as retryable
+        (`Order.shopify_confirmation_sync_status`/`POST /orders/{id}/
+        shopify/retry-confirmation-sync`) and never undoes or fails the
+        OMS confirmation that already succeeded.
         """
         order = await self.transition_status(
             order_id,
@@ -326,7 +331,9 @@ class OrderService:
         # pattern in `unconfirm_order` for `shiprocket_service`).
         from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
-        await ShopifyFulfillmentService(self.session).sync_confirmation_tag(order_id, actor=actor)
+        shopify_sync = ShopifyFulfillmentService(self.session)
+        await shopify_sync.sync_confirmation_tag(order_id, actor=actor)
+        await shopify_sync.sync_confirmation_fulfillment(order_id, actor=actor)
         return await self.get_order(order_id)
 
     async def unconfirm_order(self, order_id: uuid.UUID, *, actor: User) -> Order:
@@ -357,14 +364,24 @@ class OrderService:
             already be physically handling the order, and Shiprocket
             itself will not accept a cancellation at that point either.
           - A `shopify_sync_status` of `SYNCED` on any shipment -- a real
-            Shopify `Fulfillment` object already exists for this order --
-            also blocks outright, regardless of that shipment's Shiprocket
-            state: `ShopifyFulfillmentService` (the only Shopify
-            integration this OMS has) has no fulfillment-cancellation
-            capability, so there is no existing, safe way to undo it. Same
-            for `Order.fulfillment_status == FULFILLED`, Shopify's own
-            inbound summary -- covers an order fulfilled directly through
-            Shopify with no local `Shipment` row at all to inspect.
+            shipping-time Shopify `Fulfillment` exists for this order
+            (pushed on AWB assignment, see `sync_fulfillment_for_
+            shipment`) -- also blocks outright, regardless of that
+            shipment's Shiprocket state: that Fulfillment carries real
+            tracking info a customer may already be watching, and is
+            never something this method reverses.
+          - `Order.fulfillment_status == FULFILLED` blocks UNLESS
+            `Order.shopify_confirmation_fulfillment_id` is set -- i.e.
+            unless the OMS itself knows exactly which Fulfillment made it
+            Fulfilled (the confirmation push below) and can therefore
+            safely reverse it. An order Shopify shows Fulfilled for any
+            OTHER reason (fulfilled directly through Shopify, or the one
+            `sync_confirmation_fulfillment` edge case where a recovered
+            retry is marked `SYNCED` without ever learning the real
+            Fulfillment id) still blocks outright -- `fulfillment_status`
+            alone is Shopify's coarse inbound summary, never trusted here
+            as proof of what's safe to undo (see `shopify_confirmation_
+            fulfillment_id`'s docstring on `Order`).
 
         Both blocks above are checked for every shipment BEFORE any
         Shiprocket cancellation is attempted for any of them, so an order
@@ -372,19 +389,37 @@ class OrderService:
         successfully cancelled while a sibling then blocks the actual
         revert -- either the whole thing proceeds, or nothing does.
 
+        The Shopify confirmation Fulfillment (if any) is reversed next,
+        via `ShopifyFulfillmentService.reverse_confirmation_fulfillment`
+        -- cancelling EXACTLY the Fulfillment this OMS created at confirm
+        time, never a fulfillment created independently outside the OMS.
+        Checked and attempted before any Shiprocket cancellation below,
+        same "external state first" ordering as the Shiprocket loop
+        itself: if it fails, the whole revert aborts (`ConflictError`,
+        409) before anything else changes, mirroring the existing
+        Shiprocket-cancel-first safety rule -- the order is never left
+        PENDING while Shopify still shows it Fulfilled.
+
         `transition_status` still independently blocks reverting anything
         that isn't currently CONFIRMED (not in
-        `ORDER_STATUS_TRANSITIONS[order.status]`).
+        `ORDER_STATUS_TRANSITIONS[order.status]`) -- calling this twice in
+        a row fails cleanly on the second call for that reason alone
+        (the Shopify/Shiprocket reversal steps above are themselves
+        idempotent no-ops by then, so nothing duplicates or corrupts
+        either).
 
         Clears `confirmed_by_telecaller_id`/`confirmed_at` back to `None`
         so the order stops showing as telecaller-confirmed anywhere (the
         Fulfillment Queue, the confirmation analytics) — the permanent
         record of "confirmed, then reverted" (and, when applicable, the
-        Shiprocket cancellation just above) still lives in the
+        Shopify/Shiprocket cancellations just above) still lives in the
         append-only `OrderEvent` timeline / audit log; nothing is deleted.
         """
         order = await self.get_order(order_id)
-        if order.fulfillment_status == FulfillmentStatus.FULFILLED:
+        if (
+            order.fulfillment_status == FulfillmentStatus.FULFILLED
+            and not order.shopify_confirmation_fulfillment_id
+        ):
             raise ConflictError(
                 "Cannot revert this order because Shopify already shows it as fulfilled.",
                 details={"error_type": "shopify_already_fulfilled"},
@@ -403,11 +438,22 @@ class OrderService:
                     details={"error_type": "shopify_fulfillment_synced"},
                 )
 
-        # Local import: avoids a module-load-order dependency between
-        # `order_service` and `shiprocket_service` for the one code path
-        # that needs it, matching this codebase's existing convention for
-        # occasional cross-service calls.
+        # Local imports: avoids a module-load-order dependency between
+        # `order_service` and its peer services for the one code path
+        # that needs each, matching this codebase's existing convention
+        # for occasional cross-service calls.
         from app.services.shiprocket_service import ShiprocketOperationsService
+        from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
+
+        try:
+            await ShopifyFulfillmentService(self.session).reverse_confirmation_fulfillment(
+                order_id, actor=actor
+            )
+        except IntegrationError as exc:
+            raise ConflictError(
+                "Shopify fulfillment cancellation failed. The order was not reverted.",
+                details={"error_type": "shopify_fulfillment_cancellation_failed"},
+            ) from exc
 
         shiprocket_ops = ShiprocketOperationsService(self.session)
         for shipment in shipments:

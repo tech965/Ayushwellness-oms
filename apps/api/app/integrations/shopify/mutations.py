@@ -78,3 +78,78 @@ mutation TagsAdd($id: ID!, $tags: [String!]!) {
   }
 }
 """
+
+# The exact inverse of `tagsAdd` -- removing a tag the order doesn't have
+# is documented as a no-op too, so `ShopifyFulfillmentService.
+# reverse_confirmation_fulfillment` can call this unconditionally on every
+# unconfirm/retry with no local "was it tagged" bookkeeping, same as the
+# forward push.
+TAGS_REMOVE_MUTATION = """
+mutation TagsRemove($id: ID!, $tags: [String!]!) {
+  tagsRemove(id: $id, tags: $tags) {
+    node {
+      id
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+"""
+
+# Cancels one specific Fulfillment by id -- never a whole order or a
+# FulfillmentOrder. `ShopifyFulfillmentService.reverse_confirmation_
+# fulfillment` only ever passes the exact `Order.
+# shopify_confirmation_fulfillment_id` this OMS itself recorded at
+# confirm time, so this can never touch a Fulfillment created
+# independently outside the OMS.
+FULFILLMENT_CANCEL_MUTATION = """
+mutation FulfillmentCancel($id: ID!) {
+  fulfillmentCancel(id: $id) {
+    fulfillment {
+      id
+      status
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+"""
+
+# Attaches/updates tracking info on an EXISTING Fulfillment -- used only
+# when Telecaller confirmation already closed the order's one
+# FulfillmentOrder (no `fulfillmentCreate` left to make): real shipping
+# (AWB assignment) then calls this on that same Fulfillment instead of
+# trying to create a second one, so `sync_fulfillment_for_shipment` never
+# silently no-ops just because OMS confirmation got there first. See that
+# method's docstring.
+FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION = """
+mutation FulfillmentTrackingInfoUpdate(
+  $fulfillmentId: ID!
+  $trackingInfoInput: FulfillmentTrackingInput!
+  $notifyCustomer: Boolean
+) {
+  fulfillmentTrackingInfoUpdate(
+    fulfillmentId: $fulfillmentId
+    trackingInfoInput: $trackingInfoInput
+    notifyCustomer: $notifyCustomer
+  ) {
+    fulfillment {
+      id
+      status
+      trackingInfo {
+        number
+        company
+        url
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+"""

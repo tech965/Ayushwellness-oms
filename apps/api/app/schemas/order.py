@@ -107,6 +107,13 @@ class OrderResponse(BaseModel):
     # Shopify sync for an already-paid prepaid order), not a data gap.
     confirmed_by_telecaller_id: uuid.UUID | None = None
     confirmed_at: datetime | None = None
+    # Outbound OMS -> Shopify push for the confirmation event itself (the
+    # Fulfillment marking Shopify's order Fulfilled) -- see `Order.
+    # shopify_confirmation_fulfillment_id` in app/models/order.py.
+    # Deliberately separate from `shopify_sync_status` below
+    # (`OrderListResponse`), which is the most recent SHIPMENT's push.
+    shopify_confirmation_sync_status: str | None = None
+    shopify_confirmation_sync_error: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -50,7 +50,11 @@ def _reset_registry():
 
 
 async def _make_order(
-    session: AsyncSession, *, order_number: str, shopify_order_id: str | None = "900001"
+    session: AsyncSession,
+    *,
+    order_number: str,
+    shopify_order_id: str | None = "900001",
+    shopify_confirmation_fulfillment_id: str | None = None,
 ) -> Order:
     customer = Customer(full_name="Test Customer", phone="9999999999", email="c@example.com")
     session.add(customer)
@@ -79,6 +83,12 @@ async def _make_order(
             "country": "India",
             "pin_code": "400001",
         },
+        # Simulates an order Telecaller confirmation already pushed to
+        # Shopify as a Fulfillment (`sync_confirmation_fulfillment`) --
+        # used by the `sync_fulfillment_for_shipment` fallback tests
+        # below, where real shipping needs to attach tracking to that
+        # SAME Fulfillment instead of creating a second one.
+        shopify_confirmation_fulfillment_id=shopify_confirmation_fulfillment_id,
     )
     session.add(order)
     await session.flush()
@@ -106,6 +116,25 @@ def _fulfillment_create_success(fulfillment_id: str = "gid://shopify/Fulfillment
     return {
         "fulfillmentCreate": {
             "fulfillment": {"id": fulfillment_id, "status": "SUCCESS", "trackingInfo": {}},
+            "userErrors": [],
+        }
+    }
+
+
+def _tags_add_success_response(order_gid: str = "gid://shopify/Order/900001") -> dict:
+    return {"tagsAdd": {"node": {"id": order_gid}, "userErrors": []}}
+
+
+def _tags_remove_success_response(order_gid: str = "gid://shopify/Order/900001") -> dict:
+    return {"tagsRemove": {"node": {"id": order_gid}, "userErrors": []}}
+
+
+def _fulfillment_cancel_success_response(
+    fulfillment_id: str = "gid://shopify/Fulfillment/5001",
+) -> dict:
+    return {
+        "fulfillmentCancel": {
+            "fulfillment": {"id": fulfillment_id, "status": "CANCELLED"},
             "userErrors": [],
         }
     }
@@ -344,4 +373,243 @@ async def test_fulfillment_role_can_retry_shopify_sync(db_session: AsyncSession)
         response = await api_client.post(f"/api/v1/shipments/{shipment.id}/shopify/retry-sync")
         assert response.status_code == 200
         assert response.json()["data"]["shopify_sync_status"] == "synced"
+    app.dependency_overrides.clear()
+
+
+# ----------------------------------------------------------------------
+# Telecaller-confirmation fulfillment push/reversal
+# (`sync_confirmation_fulfillment` / `reverse_confirmation_fulfillment`)
+# and the `sync_fulfillment_for_shipment` fallback for when confirmation
+# already closed the order's one FulfillmentOrder.
+# ----------------------------------------------------------------------
+
+
+async def test_sync_confirmation_fulfillment_creates_a_fulfillment_with_no_tracking(
+    db_session: AsyncSession,
+) -> None:
+    order = await _make_order(db_session, order_number="CONF-FULFILL-OK-1")
+    client = _StubShopifyClient(
+        [_open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
+         _fulfillment_create_success("gid://shopify/Fulfillment/9001")]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+
+    result = await ShopifyFulfillmentService(db_session).sync_confirmation_fulfillment(
+        order.id, actor=None
+    )
+    assert result.shopify_confirmation_sync_status == ShopifySyncStatus.SYNCED
+    assert result.shopify_confirmation_fulfillment_id == "gid://shopify/Fulfillment/9001"
+
+    # No tracking info was sent -- Telecaller confirmation carries no
+    # AWB/courier, unlike the real shipping push.
+    _query, variables = client.calls[1]
+    assert variables["fulfillment"]["lineItemsByFulfillmentOrder"] == [
+        {"fulfillmentOrderId": "gid://shopify/FulfillmentOrder/1"}
+    ]
+    assert "trackingInfo" not in variables["fulfillment"]
+
+
+async def test_sync_confirmation_fulfillment_is_never_pushed_twice(
+    db_session: AsyncSession,
+) -> None:
+    order = await _make_order(db_session, order_number="CONF-FULFILL-IDEMPOTENT-1")
+    client = _StubShopifyClient(
+        [_open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
+         _fulfillment_create_success("gid://shopify/Fulfillment/9002")]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    service = ShopifyFulfillmentService(db_session)
+
+    first = await service.sync_confirmation_fulfillment(order.id, actor=None)
+    assert first.shopify_confirmation_sync_status == ShopifySyncStatus.SYNCED
+    calls_after_first = len(client.calls)
+
+    second = await service.sync_confirmation_fulfillment(order.id, actor=None)
+    assert second.shopify_confirmation_fulfillment_id == first.shopify_confirmation_fulfillment_id
+    assert len(client.calls) == calls_after_first
+
+
+async def test_sync_confirmation_fulfillment_failure_is_retryable_and_never_duplicates(
+    db_session: AsyncSession,
+) -> None:
+    from app.integrations.shopify.errors import ShopifyApiError
+
+    order = await _make_order(db_session, order_number="CONF-FULFILL-RETRY-1")
+    service = ShopifyFulfillmentService(db_session)
+
+    failing_client = _StubShopifyClient(
+        [ShopifyApiError("Shopify request failed.", error_type="http_500")]
+    )
+    register_adapter(ShopifyAdapter(client=failing_client))
+    first = await service.sync_confirmation_fulfillment(order.id, actor=None)
+    assert first.shopify_confirmation_sync_status == ShopifySyncStatus.FAILED
+    assert first.shopify_confirmation_fulfillment_id is None
+
+    recovering_client = _StubShopifyClient(
+        [_open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
+         _fulfillment_create_success("gid://shopify/Fulfillment/9003")]
+    )
+    register_adapter(ShopifyAdapter(client=recovering_client))
+    second = await service.sync_confirmation_fulfillment(order.id, actor=None)
+    assert second.shopify_confirmation_sync_status == ShopifySyncStatus.SYNCED
+    assert second.shopify_confirmation_fulfillment_id == "gid://shopify/Fulfillment/9003"
+
+
+async def test_reverse_confirmation_fulfillment_is_a_noop_when_nothing_to_reverse(
+    db_session: AsyncSession,
+) -> None:
+    """No `shopify_confirmation_fulfillment_id` set (never synced, or a
+    previous reversal already succeeded) -- the tag removal still fires
+    (best-effort, harmless), but `fulfillmentCancel` is never called.
+    """
+    order = await _make_order(db_session, order_number="CONF-REVERSE-NOOP-1")
+    client = _StubShopifyClient([_tags_remove_success_response()])
+    register_adapter(ShopifyAdapter(client=client))
+
+    result = await ShopifyFulfillmentService(db_session).reverse_confirmation_fulfillment(
+        order.id, actor=None
+    )
+    assert result.shopify_confirmation_fulfillment_id is None
+    assert len(client.calls) == 1
+    assert "tagsRemove" in client.calls[0][0]
+
+
+async def test_reverse_confirmation_fulfillment_cancels_exactly_that_fulfillment(
+    db_session: AsyncSession,
+) -> None:
+    order = await _make_order(
+        db_session,
+        order_number="CONF-REVERSE-OK-1",
+        shopify_confirmation_fulfillment_id="gid://shopify/Fulfillment/9004",
+    )
+    client = _StubShopifyClient(
+        [_tags_remove_success_response(), _fulfillment_cancel_success_response()]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+
+    result = await ShopifyFulfillmentService(db_session).reverse_confirmation_fulfillment(
+        order.id, actor=None
+    )
+    assert result.shopify_confirmation_fulfillment_id is None
+    assert result.shopify_confirmation_sync_status == ShopifySyncStatus.NOT_APPLICABLE
+
+    cancel_query, cancel_variables = client.calls[1]
+    assert "fulfillmentCancel" in cancel_query
+    assert cancel_variables == {"id": "gid://shopify/Fulfillment/9004"}
+
+
+async def test_reverse_confirmation_fulfillment_raises_and_preserves_state_on_failure(
+    db_session: AsyncSession,
+) -> None:
+    """Unlike every other method here, a cancellation failure DOES raise
+    -- `OrderService.unconfirm_order` depends on that to abort the whole
+    revert. The failure is recorded (FAILED, retryable) and the
+    Fulfillment id is left in place -- there is still something to retry
+    cancelling.
+    """
+    from app.core.exceptions import IntegrationError
+
+    order = await _make_order(
+        db_session,
+        order_number="CONF-REVERSE-FAIL-1",
+        shopify_confirmation_fulfillment_id="gid://shopify/Fulfillment/9005",
+    )
+    client = _StubShopifyClient(
+        [
+            _tags_remove_success_response(),
+            IntegrationError("Shopify rejected the cancellation.", details={}),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+
+    with pytest.raises(IntegrationError):
+        await ShopifyFulfillmentService(db_session).reverse_confirmation_fulfillment(
+            order.id, actor=None
+        )
+
+    await db_session.refresh(order)
+    assert order.shopify_confirmation_fulfillment_id == "gid://shopify/Fulfillment/9005"
+    assert order.shopify_confirmation_sync_status == ShopifySyncStatus.FAILED
+
+
+async def test_awb_assignment_attaches_tracking_to_the_confirmation_fulfillment(
+    db_session: AsyncSession,
+) -> None:
+    """The critical interaction test: when Telecaller confirmation already
+    closed the order's one FulfillmentOrder, real shipping (AWB
+    assignment) must not silently no-op -- it attaches tracking to that
+    SAME Fulfillment via `fulfillmentTrackingInfoUpdate`, never a second
+    `fulfillmentCreate` (there's nothing left to create).
+    """
+    order = await _make_order(
+        db_session,
+        order_number="CONF-TRACKING-FALLBACK-1",
+        shopify_confirmation_fulfillment_id="gid://shopify/Fulfillment/9006",
+    )
+    shipment = await _make_shipment(db_session, order_id=order.id, awb="AWB777")
+    client = _StubShopifyClient(
+        [
+            _open_fulfillment_orders_response(None),  # closed -- nothing OPEN left
+            {
+                "fulfillmentTrackingInfoUpdate": {
+                    "fulfillment": {
+                        "id": "gid://shopify/Fulfillment/9006",
+                        "status": "SUCCESS",
+                        "trackingInfo": {"number": "AWB777", "company": None, "url": None},
+                    },
+                    "userErrors": [],
+                }
+            },
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+
+    result = await ShopifyFulfillmentService(db_session).sync_fulfillment_for_shipment(
+        shipment.id, actor=None
+    )
+    assert result.shopify_sync_status == ShopifySyncStatus.SYNCED
+    assert result.shopify_fulfillment_id == "gid://shopify/Fulfillment/9006"
+
+    update_query, update_variables = client.calls[1]
+    assert "fulfillmentTrackingInfoUpdate" in update_query
+    assert update_variables["fulfillmentId"] == "gid://shopify/Fulfillment/9006"
+    assert update_variables["trackingInfoInput"]["number"] == "AWB777"
+
+
+async def test_telecaller_cannot_retry_shopify_confirmation_sync_via_orders_endpoint(
+    db_session: AsyncSession,
+) -> None:
+    role = await make_role(
+        db_session, name="TELECALLER", permission_codes=["calls.manage", "orders.confirm"]
+    )
+    user = await make_user(db_session, email="tc-confirm-sync@example.com", role=role)
+    order = await _make_order(db_session, order_number="SHOPIFY-RBAC-3")
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.post(f"/api/v1/orders/{order.id}/shopify/retry-confirmation-sync")
+        assert response.status_code == 403
+    app.dependency_overrides.clear()
+
+
+async def test_operations_role_can_retry_shopify_confirmation_sync(
+    db_session: AsyncSession,
+) -> None:
+    role = await make_role(db_session, name="OPERATIONS", permission_codes=["orders.update"])
+    user = await make_user(db_session, email="ops-confirm-sync@example.com", role=role)
+    order = await _make_order(db_session, order_number="SHOPIFY-RBAC-4")
+    client = _StubShopifyClient(
+        [
+            _tags_add_success_response(),
+            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
+            _fulfillment_create_success("gid://shopify/Fulfillment/9007"),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+
+    async with bearer_client(app, get_db, db_session, user.id) as api_client:
+        response = await api_client.post(
+            f"/api/v1/orders/{order.id}/shopify/retry-confirmation-sync"
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["shopify_confirmation_sync_status"] == "synced"
     app.dependency_overrides.clear()

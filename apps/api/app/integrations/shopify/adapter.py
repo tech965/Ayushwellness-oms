@@ -16,9 +16,12 @@ from app.integrations.shopify.client import ShopifyClient
 from app.integrations.shopify.config import ShopifyConfig
 from app.integrations.shopify.errors import ShopifyApiError
 from app.integrations.shopify.mutations import (
+    FULFILLMENT_CANCEL_MUTATION,
     FULFILLMENT_CREATE_MUTATION,
+    FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
     OPEN_FULFILLMENT_ORDERS_QUERY,
     TAGS_ADD_MUTATION,
+    TAGS_REMOVE_MUTATION,
 )
 from app.integrations.shopify.normalizer import ENTITY_NORMALIZERS
 from app.integrations.shopify.queries import ENTITY_QUERIES, SHOP_PING_QUERY, updated_since_filter
@@ -266,6 +269,112 @@ class ShopifyAdapter(IntegrationAdapter):
                 f"Shopify rejected the tag update: {message}",
                 details={"error_type": "validation_error"},
             )
+
+    async def remove_order_tags(self, shopify_order_gid: str, tags: list[str]) -> None:
+        """The exact inverse of `add_order_tags` -- `tagsRemove` is a
+        documented no-op for a tag the order doesn't have, so this is
+        equally safe to call unconditionally on every unconfirm/retry.
+        """
+        client = self._get_client()
+        try:
+            data = await client.execute(
+                TAGS_REMOVE_MUTATION, {"id": shopify_order_gid, "tags": tags}
+            )
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+        result = data.get("tagsRemove") or {}
+        user_errors = result.get("userErrors") or []
+        if user_errors:
+            message = "; ".join(
+                f"{','.join(e.get('field') or [])}: {e.get('message')}" for e in user_errors
+            )
+            raise IntegrationError(
+                f"Shopify rejected the tag removal: {message}",
+                details={"error_type": "validation_error"},
+            )
+
+    async def cancel_fulfillment(self, fulfillment_id: str) -> dict[str, Any]:
+        """Cancels exactly one Fulfillment by id -- used only to reverse a
+        Fulfillment this OMS itself created (the Telecaller-confirmation
+        push), never a generic "cancel whatever is open" call.
+        """
+        client = self._get_client()
+        try:
+            data = await client.execute(FULFILLMENT_CANCEL_MUTATION, {"id": fulfillment_id})
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+        result = data.get("fulfillmentCancel") or {}
+        user_errors = result.get("userErrors") or []
+        if user_errors:
+            message = "; ".join(
+                f"{','.join(e.get('field') or [])}: {e.get('message')}" for e in user_errors
+            )
+            raise IntegrationError(
+                f"Shopify rejected the fulfillment cancellation: {message}",
+                details={"error_type": "validation_error"},
+            )
+
+        fulfillment = result.get("fulfillment")
+        if fulfillment is None:
+            raise IntegrationError(
+                "Shopify fulfillmentCancel response had no fulfillment and no userErrors.",
+                details={"error_type": "validation_error"},
+            )
+        return fulfillment
+
+    async def update_fulfillment_tracking(
+        self,
+        *,
+        fulfillment_id: str,
+        tracking_number: str | None,
+        tracking_company: str | None,
+        tracking_url: str | None,
+        notify_customer: bool = False,
+    ) -> dict[str, Any]:
+        """Attaches tracking info to an EXISTING Fulfillment -- the real-
+        shipping counterpart to `create_fulfillment` for the one case
+        where there's no remaining open FulfillmentOrder to fulfill
+        because Telecaller confirmation already closed it (see
+        `ShopifyFulfillmentService.sync_fulfillment_for_shipment`).
+        """
+        client = self._get_client()
+        try:
+            data = await client.execute(
+                FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
+                {
+                    "fulfillmentId": fulfillment_id,
+                    "trackingInfoInput": {
+                        "number": tracking_number,
+                        "company": tracking_company,
+                        "url": tracking_url,
+                    },
+                    "notifyCustomer": notify_customer,
+                },
+            )
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+        result = data.get("fulfillmentTrackingInfoUpdate") or {}
+        user_errors = result.get("userErrors") or []
+        if user_errors:
+            message = "; ".join(
+                f"{','.join(e.get('field') or [])}: {e.get('message')}" for e in user_errors
+            )
+            raise IntegrationError(
+                f"Shopify rejected the tracking update: {message}",
+                details={"error_type": "validation_error"},
+            )
+
+        fulfillment = result.get("fulfillment")
+        if fulfillment is None:
+            raise IntegrationError(
+                "Shopify fulfillmentTrackingInfoUpdate response had no fulfillment and no "
+                "userErrors.",
+                details={"error_type": "validation_error"},
+            )
+        return fulfillment
 
     def normalize(self, entity_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         normalizer = ENTITY_NORMALIZERS.get(entity_type)

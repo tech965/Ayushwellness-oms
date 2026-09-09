@@ -47,6 +47,7 @@ from app.schemas.shipment import (
 from app.schemas.shiprocket import ShiprocketShipRequest
 from app.services.order_service import OrderService
 from app.services.shiprocket_service import ShiprocketOperationsService
+from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 router = APIRouter()
 
@@ -273,6 +274,39 @@ async def add_order_event(
         order_id, actor=current_user, **payload.model_dump()
     )
     return ApiResponse(data=OrderEventResponse.model_validate(event), message="Event recorded.")
+
+
+@router.post(
+    "/{order_id}/shopify/retry-confirmation-sync", response_model=ApiResponse[OrderDetailResponse]
+)
+async def retry_shopify_confirmation_sync(
+    order_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("orders.update")),
+) -> ApiResponse[OrderDetailResponse]:
+    """Manually retries the outbound Shopify push for a Telecaller
+    confirmation -- the tag and the confirmation Fulfillment, independent
+    of each other so a retry never redoes whichever half already
+    succeeded (`ShopifyFulfillmentService.sync_confirmation_tag`/
+    `sync_confirmation_fulfillment`). Mirrors `POST /shipments/{id}/
+    shopify/retry-sync`'s contract: safe to call whenever, a no-op for
+    whichever half is already synced, and never raises on a Shopify-side
+    failure -- the response is always 200 with the order's current
+    `shopify_confirmation_sync_status`, which the frontend reads to show
+    success/still-failed.
+    """
+    shopify_sync = ShopifyFulfillmentService(session)
+    await shopify_sync.sync_confirmation_tag(order_id, actor=current_user)
+    await shopify_sync.sync_confirmation_fulfillment(order_id, actor=current_user)
+    # Re-fetched via `OrderService.get_order` (not the plain, unrelated-
+    # loaded row `sync_confirmation_fulfillment` returns) -- `_to_detail_
+    # response` needs `items`/`customer`/`confirmed_by_telecaller` eager-
+    # loaded, same reason every other route in this file re-fetches
+    # through it after a mutation.
+    order = await OrderService(session).get_order(order_id)
+    return ApiResponse(
+        data=_to_detail_response(order), message="Shopify confirmation sync retried."
+    )
 
 
 @router.post("/bulk-ship/validate", response_model=ApiResponse[list[BulkShipValidationResult]])
