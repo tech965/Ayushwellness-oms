@@ -144,6 +144,11 @@ class OrderListResponse(OrderResponse):
     shipment_status: str | None = None
     courier_name: str | None = None
     tracking_number: str | None = None
+    # See `OrderDetailResponse.confirmed_by_telecaller_name` -- same
+    # denormalization, backs the "Confirmed By" column on both the
+    # general Orders table and the "Confirmed by Telecaller" page
+    # (`GET /orders?confirmed_only=true`).
+    confirmed_by_telecaller_name: str | None = None
 
 
 class OrderEventResponse(BaseModel):

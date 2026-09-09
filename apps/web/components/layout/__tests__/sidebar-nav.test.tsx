@@ -119,6 +119,7 @@ describe("SidebarNav role-based navigation", () => {
     renderWithProviders(<SidebarNav />)
     expect(screen.getByText("Fulfillment Dashboard")).toBeInTheDocument()
     expect(screen.getByText("Orders Need Shipment")).toBeInTheDocument()
+    expect(screen.getByText("Confirmed by Telecaller")).toBeInTheDocument()
     expect(screen.getByText("Shipments")).toBeInTheDocument()
     expect(screen.queryByText("Orders")).not.toBeInTheDocument()
     expect(screen.queryByText("Users")).not.toBeInTheDocument()

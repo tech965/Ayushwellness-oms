@@ -65,6 +65,17 @@ def _order_filters(
     customer_id: uuid.UUID | None = Query(default=None),
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
+    confirmed_only: bool = Query(
+        default=False,
+        description=(
+            "Only orders with confirmed_by_telecaller_id IS NOT NULL -- backs the "
+            "'Confirmed by Telecaller' page. Unlike the shipment queue, this applies no "
+            "restriction on current order/fulfillment/shipment status."
+        ),
+    ),
+    telecaller_id: uuid.UUID | None = Query(default=None),
+    confirmed_date_from: datetime | None = Query(default=None),
+    confirmed_date_to: datetime | None = Query(default=None),
 ) -> dict:
     """Shared filter set for `list_orders` and `export_orders` so the two
     routes can never drift apart on which query params they accept.
@@ -92,6 +103,10 @@ def _order_filters(
         "customer_id": customer_id,
         "date_from": date_from,
         "date_to": date_to,
+        "confirmed_only": confirmed_only,
+        "telecaller_id": telecaller_id,
+        "confirmed_date_from": confirmed_date_from,
+        "confirmed_date_to": confirmed_date_to,
     }
 
 
@@ -149,6 +164,9 @@ def _to_list_response(order: Order) -> OrderListResponse:
         shipment_status=shipment.current_status.value if shipment else None,
         courier_name=shipment.courier.name if shipment and shipment.courier else None,
         tracking_number=shipment.awb if shipment else None,
+        confirmed_by_telecaller_name=(
+            order.confirmed_by_telecaller.name if order.confirmed_by_telecaller else None
+        ),
     )
 
 

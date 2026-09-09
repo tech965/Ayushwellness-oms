@@ -76,6 +76,10 @@ class OrderService:
         customer_id: uuid.UUID | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        confirmed_only: bool = False,
+        telecaller_id: uuid.UUID | None = None,
+        confirmed_date_from: datetime | None = None,
+        confirmed_date_to: datetime | None = None,
     ) -> tuple[list[Order], int]:
         query = self.orders.search_query(
             q=q,
@@ -92,6 +96,10 @@ class OrderService:
             customer_id=customer_id,
             date_from=date_from,
             date_to=date_to,
+            confirmed_only=confirmed_only,
+            telecaller_id=telecaller_id,
+            confirmed_date_from=confirmed_date_from,
+            confirmed_date_to=confirmed_date_to,
         )
         items, total = await self.orders.list(
             page_params=page_params, sort_params=sort_params, query=query

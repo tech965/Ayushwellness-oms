@@ -33,6 +33,10 @@ function toOrderQueryParams(params: OrderListFilters) {
     amount_max: params.amount_max || undefined,
     date_from: params.date_from,
     date_to: params.date_to,
+    confirmed_only: params.confirmed_only || undefined,
+    telecaller_id: params.telecaller_id || undefined,
+    confirmed_date_from: params.confirmed_date_from || undefined,
+    confirmed_date_to: params.confirmed_date_to || undefined,
   }
 }
 
@@ -81,6 +85,24 @@ export function useOrders(params: ListParams) {
     queryKey: ["orders", params],
     queryFn: () => fetchOrders(params),
     placeholderData: (previous) => previous,
+  })
+}
+
+/** "Confirmed by Telecaller" -- a history/operational view of every order
+ * `confirmed_by_telecaller_id IS NOT NULL` has ever been set on, with NO
+ * restriction on current order/fulfillment/shipment status (unlike
+ * `useShipmentQueue`'s "needs shipment now" business rule -- a shipped or
+ * delivered order stays visible here). Thin wrapper over the same
+ * `fetchOrders`/`GET /orders` `useOrders` already uses -- `confirmed_only`
+ * is just pinned `true`, nothing duplicated. A distinct query key keeps
+ * this cached separately from the general Orders list.
+ */
+export function useTelecallerConfirmedOrders(params: Omit<ListParams, "confirmed_only">) {
+  return useQuery({
+    queryKey: ["orders", "confirmed-by-telecaller", params],
+    queryFn: () => fetchOrders({ ...params, confirmed_only: true }),
+    placeholderData: (previous) => previous,
+    refetchOnWindowFocus: true,
   })
 }
 

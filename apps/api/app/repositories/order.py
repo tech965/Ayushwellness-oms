@@ -79,7 +79,21 @@ class OrderRepository(BaseRepository[Order]):
         customer_id: uuid.UUID | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        confirmed_only: bool = False,
+        telecaller_id: uuid.UUID | None = None,
+        confirmed_date_from: datetime | None = None,
+        confirmed_date_to: datetime | None = None,
     ):
+        """`confirmed_only`/`telecaller_id`/`confirmed_date_from`/
+        `confirmed_date_to` back the "Confirmed by Telecaller" page
+        (`GET /orders?confirmed_only=true`) — a history/audit view of
+        every order a Telecaller has ever confirmed, deliberately with
+        NO restriction on current order/fulfillment/shipment status
+        (unlike `shipment_queue_query`'s "needs shipment now" business
+        rule, which this does not touch or duplicate). All four default
+        to their existing no-op values, so every current caller of
+        `search_query`/`GET /orders` is unaffected.
+        """
         stmt = self._base_query()
         if q:
             like = f"%{q}%"
@@ -125,6 +139,14 @@ class OrderRepository(BaseRepository[Order]):
             stmt = stmt.where(Order.order_datetime >= date_from)
         if date_to:
             stmt = stmt.where(Order.order_datetime <= date_to)
+        if confirmed_only:
+            stmt = stmt.where(Order.confirmed_by_telecaller_id.is_not(None))
+        if telecaller_id:
+            stmt = stmt.where(Order.confirmed_by_telecaller_id == telecaller_id)
+        if confirmed_date_from:
+            stmt = stmt.where(Order.confirmed_at >= confirmed_date_from)
+        if confirmed_date_to:
+            stmt = stmt.where(Order.confirmed_at <= confirmed_date_to)
         if amount_min is not None:
             stmt = stmt.where(Order.total_amount >= amount_min)
         if amount_max is not None:
@@ -166,8 +188,22 @@ class OrderRepository(BaseRepository[Order]):
         stmt = stmt.options(
             selectinload(Order.customer),
             selectinload(Order.items),
+            selectinload(Order.confirmed_by_telecaller),
             selectinload(Order.shipments).selectinload(Shipment.courier),
         )
+        # `populate_existing`: without it, `selectinload` only populates a
+        # relationship that isn't already marked loaded on a given Order
+        # instance -- for one already in this session's identity map (e.g.
+        # touched earlier in the very same request/session, before
+        # `confirmed_by_telecaller_id` was set, the way `OrderService.
+        # confirm_order`'s own state-transition path can), it would keep
+        # showing a stale empty value instead of the just-committed
+        # relationship. Same fix, same reasoning, as `UserRepository.
+        # get_with_permissions`. A pure safety net in production (every
+        # request already gets its own fresh session/identity map, so this
+        # never changes real results there) that only matters for a
+        # same-session multi-query sequence.
+        stmt = stmt.execution_options(populate_existing=True)
         return stmt
 
     def for_customer_query(self, customer_id: uuid.UUID):

@@ -66,6 +66,11 @@ export const navGroups: NavGroup[] = [
     items: [
       { label: "Fulfillment Dashboard", href: "/fulfillment/dashboard", icon: Gauge },
       { label: "Orders Need Shipment", href: "/fulfillment/orders", icon: ListChecks },
+      {
+        label: "Confirmed by Telecaller",
+        href: "/fulfillment/confirmed-orders",
+        icon: PhoneCall,
+      },
       { label: "Shipments", href: "/shipments", icon: Truck },
       { label: "NDR", href: "/ndr", icon: PackageX },
       { label: "RTO", href: "/rto", icon: RotateCcw },
@@ -159,6 +164,11 @@ export const fulfillmentNavGroups: NavGroup[] = [
     items: [
       { label: "Fulfillment Dashboard", href: "/fulfillment/dashboard", icon: Gauge },
       { label: "Orders Need Shipment", href: "/fulfillment/orders", icon: ListChecks },
+      // A distinct history/audit view -- every order Telecalling has ever
+      // confirmed, regardless of current status -- deliberately a
+      // separate page/query from "Orders Need Shipment" above (see
+      // `components/fulfillment/confirmed-by-telecaller.tsx`'s docstring).
+      { label: "Confirmed by Telecaller", href: "/fulfillment/confirmed-orders", icon: PhoneCall },
       { label: "Shipments", href: "/fulfillment/shipments", icon: Truck },
       { label: "NDR", href: "/ndr", icon: PackageX, permission: "ndr.read" },
       { label: "RTO", href: "/rto", icon: RotateCcw, permission: "rto.read" },

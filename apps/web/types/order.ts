@@ -87,6 +87,10 @@ export interface Order {
   shipment_status?: string | null
   courier_name?: string | null
   tracking_number?: string | null
+  // See `confirmed_by_telecaller_id` above -- resolved name, present on
+  // `GET /orders` rows (`OrderListResponse`). `null`/absent whenever the
+  // id itself is `null`, never a fabricated value.
+  confirmed_by_telecaller_name?: string | null
 }
 
 export interface OrderAddress {
@@ -135,6 +139,12 @@ export interface OrderListFilters {
   amount_max?: string
   date_from?: string
   date_to?: string
+  // Backs the "Confirmed by Telecaller" page (`GET /orders?confirmed_only=true`)
+  // -- see `OrderRepository.search_query`'s docstring for these four params.
+  confirmed_only?: boolean
+  telecaller_id?: string
+  confirmed_date_from?: string
+  confirmed_date_to?: string
 }
 
 export const PAYMENT_TYPE_OPTIONS: { label: string; value: PaymentType }[] = [

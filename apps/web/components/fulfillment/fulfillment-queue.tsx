@@ -239,8 +239,8 @@ function FulfillmentQueueContent() {
         title="Orders Need Shipment"
         description={
           query.data
-            ? `${query.data.meta.total_items} orders confirmed by Telecalling and ready for shipment.`
-            : "Orders confirmed by Telecalling and ready for shipment."
+            ? `${query.data.meta.total_items} confirmed orders ready for shipment.`
+            : "Confirmed orders ready for shipment."
         }
         actions={
           selectedIds.size > 0 ? (
