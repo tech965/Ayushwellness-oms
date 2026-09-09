@@ -47,17 +47,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select  # type: ignore[reportMissingImports]
+from sqlalchemy.exc import IntegrityError  # type: ignore[reportMissingImports]
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.models.auth import User
 from app.models.enums import InventoryMovementType, StockStatus
 from app.models.inventory import InventoryMovement
-from app.models.product import Product, ProductVariant
+from app.models.product import CatalogVariant, Product, ProductVariant
 from app.models.settings import AppSettings
 from app.repositories.inventory import (
     InventoryMovementRepository,
@@ -65,12 +65,28 @@ from app.repositories.inventory import (
     InventoryStockRepository,
 )
 from app.repositories.order import OrderItemRepository
-from app.repositories.product import ProductVariantRepository
+from app.repositories.product import CatalogVariantRepository, ProductVariantRepository
 from app.schemas.common import PageParams, SortParams
 from app.schemas.settings import AppSettingsData
 from app.services.audit_service import AuditService
 
 logger = get_logger(__name__)
+
+
+class OmsVariantGroup(NamedTuple):
+    """One OMS-visible variant: either a real `CatalogVariant`
+    (`catalog_variant_id` set) grouping >=1 underlying Shopify
+    `ProductVariant` rows, or -- for a `ProductVariant` not yet grouped --
+    an implicit single-member group (`catalog_variant_id` None). Never
+    holds a synthetic/fabricated stock number; callers aggregate
+    `variants[*].available_quantity` themselves.
+    """
+
+    catalog_variant_id: uuid.UUID | None
+    name: str
+    display_order: int
+    is_active: bool
+    variants: list[ProductVariant]
 
 
 def _ceil_div(numerator: int, denominator: int) -> int:
@@ -86,6 +102,7 @@ class InventoryService:
         self.products = InventoryProductRepository(session)
         self.stock = InventoryStockRepository(session)
         self.variants = ProductVariantRepository(session)
+        self.catalog_variants = CatalogVariantRepository(session)
         self.movements = InventoryMovementRepository(session)
         self.order_items = OrderItemRepository(session)
         self.audit = AuditService(session)
@@ -128,6 +145,93 @@ class InventoryService:
         variants = await self.variants.list_for_product(product_id)
         return product, variants
 
+    async def get_oms_variants_for_product(
+        self, product_id: uuid.UUID
+    ) -> tuple[Product, list[OmsVariantGroup]]:
+        """Resolve a product's OMS-visible variants -- the ONLY variant
+        view the Inventory UI shows.
+
+        Each declared `CatalogVariant` becomes one OMS variant grouping
+        the underlying `ProductVariant` rows mapped to it (shown even
+        when it has zero members yet). Any `ProductVariant` that is not
+        mapped to a listed `CatalogVariant` (`catalog_variant_id` NULL,
+        or -- defensively -- a dangling id) is surfaced as its own
+        implicit single-member OMS variant, so a product that has not
+        been grouped yet behaves exactly as before this layer existed.
+
+        Underlying `ProductVariant` rows are never merged, renamed, or
+        dropped -- they are only bucketed for display.
+        """
+        product = await self.session.get(Product, product_id)
+        if product is None:
+            raise NotFoundError("Product not found.")
+
+        variants = await self.variants.list_for_product(product_id)
+        catalog = await self.catalog_variants.list_for_product(product_id)
+
+        members: dict[uuid.UUID | None, list[ProductVariant]] = {}
+        for variant in variants:
+            members.setdefault(variant.catalog_variant_id, []).append(variant)
+
+        groups: list[OmsVariantGroup] = [
+            OmsVariantGroup(
+                catalog_variant_id=cv.id,
+                name=cv.name,
+                display_order=cv.display_order,
+                is_active=cv.is_active,
+                variants=members.pop(cv.id, []),
+            )
+            for cv in catalog
+        ]
+
+        leftover = sorted(
+            (v for bucket in members.values() for v in bucket),
+            key=lambda v: (v.title_override or v.title or v.sku).lower(),
+        )
+        for offset, variant in enumerate(leftover):
+            groups.append(
+                OmsVariantGroup(
+                    catalog_variant_id=None,
+                    name=variant.title_override or variant.title or variant.sku,
+                    display_order=10_000 + offset,
+                    is_active=True,
+                    variants=[variant],
+                )
+            )
+
+        groups.sort(key=lambda g: (g.display_order, g.name.lower()))
+        return product, groups
+
+    async def set_catalog_variant_name(
+        self, catalog_variant_id: uuid.UUID, *, name: str, actor: User | None
+    ) -> CatalogVariant:
+        """Rename an OMS-visible `CatalogVariant`. Presentation only: no
+        `ProductVariant`, stock, SKU, or ledger row is touched. Shopify
+        sync never reads or writes this name.
+        """
+        cv = await self.session.get(CatalogVariant, catalog_variant_id)
+        if cv is None:
+            raise NotFoundError("Catalog variant not found.")
+
+        normalized = name.strip()
+        if not normalized:
+            raise ValidationError("Name cannot be empty.")
+        previous = cv.name
+        if previous == normalized:
+            return cv
+
+        await self.catalog_variants.update(cv, name=normalized)
+        await self.audit.record(
+            user=actor,
+            action="inventory.catalog_variant_name_updated",
+            entity_type="catalog_variant",
+            entity_id=str(cv.id),
+            previous_value={"name": previous},
+            new_value={"name": normalized},
+        )
+        await self.session.commit()
+        return cv
+
     async def get_variant_stock(self, variant_id: uuid.UUID) -> ProductVariant:
         variant = await self.stock.get_by_id_with_product(variant_id)
         if variant is None:
@@ -141,6 +245,7 @@ class InventoryService:
         sort_params: SortParams,
         product_variant_id: uuid.UUID | None = None,
         product_id: uuid.UUID | None = None,
+        catalog_variant_id: uuid.UUID | None = None,
         order_id: uuid.UUID | None = None,
         movement_type: str | None = None,
         date_from: datetime | None = None,
@@ -149,6 +254,7 @@ class InventoryService:
         query = self.movements.search_query(
             product_variant_id=product_variant_id,
             product_id=product_id,
+            catalog_variant_id=catalog_variant_id,
             order_id=order_id,
             movement_type=movement_type,
             date_from=date_from,

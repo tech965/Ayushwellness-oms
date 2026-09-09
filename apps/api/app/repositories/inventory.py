@@ -90,6 +90,7 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
         *,
         product_variant_id: uuid.UUID | None = None,
         product_id: uuid.UUID | None = None,
+        catalog_variant_id: uuid.UUID | None = None,
         order_id: uuid.UUID | None = None,
         movement_type: str | None = None,
         date_from: datetime | None = None,
@@ -101,10 +102,18 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
         )
         if product_variant_id:
             stmt = stmt.where(InventoryMovement.product_variant_id == product_variant_id)
-        if product_id:
+        # `product_id` and `catalog_variant_id` both filter via ProductVariant;
+        # join it once so passing both (or either) never double-joins.
+        if product_id is not None or catalog_variant_id is not None:
             stmt = stmt.join(
                 ProductVariant, ProductVariant.id == InventoryMovement.product_variant_id
-            ).where(ProductVariant.product_id == product_id)
+            )
+            if product_id is not None:
+                stmt = stmt.where(ProductVariant.product_id == product_id)
+            if catalog_variant_id is not None:
+                # OMS-visible variant history spans EVERY underlying Shopify
+                # ProductVariant grouped under it -- no ledger row is rewritten.
+                stmt = stmt.where(ProductVariant.catalog_variant_id == catalog_variant_id)
         if order_id:
             stmt = stmt.where(InventoryMovement.order_id == order_id)
         if movement_type:
@@ -144,7 +153,9 @@ class InventoryProductRepository(BaseRepository[Product]):
     model = Product
 
     def search_query(self, *, q: str | None = None):
-        stmt = self._base_query().options(selectinload(Product.variants))
+        stmt = self._base_query().options(
+            selectinload(Product.variants), selectinload(Product.catalog_variants)
+        )
         if q:
             like = f"%{q}%"
             stmt = stmt.where(

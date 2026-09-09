@@ -43,6 +43,9 @@ class InventoryProductSummaryResponse(BaseModel):
     title_override: str | None
     display_title: str
     vendor: str | None
+    # Number of OMS-VISIBLE catalog variants (not the raw Shopify
+    # ProductVariant count): declared `CatalogVariant`s + any variant not
+    # yet grouped (each of those counts as its own implicit OMS variant).
     variant_count: int
     total_available_boxes: int
     total_packets: int
@@ -76,15 +79,45 @@ class ProductVariantStockLine(BaseModel):
     stock_status: StockStatus
 
 
+class OmsCatalogVariantResponse(BaseModel):
+    """One OMS-visible variant on the product detail page. It groups one
+    or more underlying Shopify `ProductVariant` rows.
+
+    `available_boxes = SUM(underlying.available_quantity)`.
+    `total_packets  = SUM(underlying.available_quantity *
+                          underlying.packets_per_box)`.
+    `packets_per_box_uniform` is False when the grouped variants disagree
+    on pack size -- the UI shows "mixed pack sizes"; NO single conversion
+    ratio is fabricated. Stock is never stored here; it is recomputed
+    from the live underlying rows on every read.
+
+    `catalog_variant_id` is None for an implicit OMS variant (a
+    `ProductVariant` not yet grouped -- 1:1 with its single underlying
+    row); a real UUID for a declared `CatalogVariant`.
+    """
+
+    catalog_variant_id: uuid.UUID | None
+    name: str
+    display_order: int
+    is_active: bool
+    available_boxes: int
+    total_packets: int
+    stock_status: StockStatus
+    packets_per_box_uniform: bool
+    underlying_variant_count: int
+    underlying_variants: list[ProductVariantStockLine]
+
+
 class InventoryProductStockResponse(BaseModel):
-    """Product-level Inventory card -- ONE per product, aggregated from the
-    product's underlying `ProductVariant` rows (never a separate stored
-    record). `available_boxes` is `sum(variant.available_quantity)` (boxes
-    are the common unit for every variant); `total_packets` is
-    `sum(variant.available_quantity * variant.packets_per_box)` (each term
-    uses that variant's own factor). `packets_per_box_uniform` is False
-    when the variants disagree on pack size -- the UI shows "mixed pack
-    sizes" rather than implying a single conversion.
+    """Product detail payload. `oms_variants` is the ONLY variant view the
+    UI shows -- e.g. Aayush Herbal Masala returns exactly 3 (one per
+    flavour); every other product returns exactly 1 once grouped. The raw
+    Shopify `ProductVariant` rows are preserved and reachable only inside
+    each OMS variant's `underlying_variants`.
+
+    Product-level `available_boxes` / `total_packets` are the sum across
+    every underlying `ProductVariant`, same formula as the OMS-variant
+    aggregates.
     """
 
     product_id: uuid.UUID
@@ -94,10 +127,10 @@ class InventoryProductStockResponse(BaseModel):
     available_boxes: int
     total_packets: int
     stock_status: StockStatus
-    variant_count: int
     packets_per_box_uniform: bool
-    variant_ids: list[uuid.UUID]
-    variants: list[ProductVariantStockLine]
+    oms_variant_count: int
+    underlying_variant_count: int
+    oms_variants: list[OmsCatalogVariantResponse]
 
 
 class ProductStockAdjustmentRequest(BaseModel):
@@ -139,6 +172,16 @@ class VariantNameUpdateRequest(BaseModel):
     _normalize = field_validator("name")(_normalize_display_name)
 
 
+class CatalogVariantNameUpdateRequest(BaseModel):
+    """Rename an OMS-visible `CatalogVariant`. `max_length` matches
+    `catalog_variants.name` (`String(255)`).
+    """
+
+    name: str = Field(min_length=1, max_length=255)
+
+    _normalize = field_validator("name")(_normalize_display_name)
+
+
 class CatalogNameResponse(BaseModel):
     """Returned by the Edit-Name / Reset-Name endpoints so the client can
     update the shown name immediately without reshaping a list row.
@@ -159,6 +202,10 @@ class InventoryMovementResponse(BaseModel):
     # Resolved name for display -- variant `title_override` if set, else
     # the Shopify title, else the SKU.
     variant_display_title: str | None
+    # The OMS-visible variant this movement's `ProductVariant` is grouped
+    # under, if any -- lets the UI show that a CatalogVariant's history
+    # spans several underlying Shopify SKUs. Null == not grouped.
+    catalog_variant_id: uuid.UUID | None
     sku: str | None
     movement_type: InventoryMovementType
     quantity_delta: int

@@ -5,7 +5,7 @@ import uuid
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
-from app.models.product import Product, ProductVariant
+from app.models.product import CatalogVariant, Product, ProductVariant
 from app.repositories.base import BaseRepository
 
 
@@ -36,5 +36,23 @@ class ProductVariantRepository(BaseRepository[ProductVariant]):
 
     async def list_for_product(self, product_id: uuid.UUID) -> list[ProductVariant]:
         stmt = select(ProductVariant).where(ProductVariant.product_id == product_id)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+
+class CatalogVariantRepository(BaseRepository[CatalogVariant]):
+    """OMS-visible catalog variants -- the presentation/grouping layer.
+    Read-heavy; grouping *assignment* is a deliberate reviewed data op,
+    not routine CRUD, so only list/get/name-update live here.
+    """
+
+    model = CatalogVariant
+
+    async def list_for_product(self, product_id: uuid.UUID) -> list[CatalogVariant]:
+        stmt = (
+            select(CatalogVariant)
+            .where(CatalogVariant.product_id == product_id)
+            .order_by(CatalogVariant.display_order.asc(), CatalogVariant.name.asc())
+        )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())

@@ -7,16 +7,20 @@ import InventoryProductPage, {
   EditNameDialog,
 } from "@/app/(dashboard)/inventory/[productId]/page"
 import {
-  useAdjustProductStock,
   useAdjustVariantStock,
   useInventoryMovements,
   useInventoryProductStock,
+  useSetCatalogVariantName,
   useSetProductName,
   useSetVariantName,
   useUpdatePacketsPerBox,
 } from "@/services/inventory"
 import { useAuth } from "@/lib/auth-context"
-import type { InventoryProductStock } from "@/types/inventory"
+import type {
+  InventoryProductStock,
+  OmsCatalogVariant,
+  ProductVariantStockLine,
+} from "@/types/inventory"
 
 const toastSuccess = vi.fn()
 const toastError = vi.fn()
@@ -36,8 +40,8 @@ vi.mock("@/services/inventory", () => ({
   useInventoryMovements: vi.fn(),
   useSetProductName: vi.fn(),
   useSetVariantName: vi.fn(),
+  useSetCatalogVariantName: vi.fn(),
   useUpdatePacketsPerBox: vi.fn(),
-  useAdjustProductStock: vi.fn(),
   useAdjustVariantStock: vi.fn(),
 }))
 
@@ -47,14 +51,11 @@ const mockedUseProductStock = vi.mocked(useInventoryProductStock)
 const mockedUseMovements = vi.mocked(useInventoryMovements)
 const mockedUseSetProductName = vi.mocked(useSetProductName)
 const mockedUseSetVariantName = vi.mocked(useSetVariantName)
+const mockedUseSetCatalogVariantName = vi.mocked(useSetCatalogVariantName)
 const mockedUseUpdatePacketsPerBox = vi.mocked(useUpdatePacketsPerBox)
-const mockedUseAdjustProductStock = vi.mocked(useAdjustProductStock)
 const mockedUseAdjustVariantStock = vi.mocked(useAdjustVariantStock)
 const mockedUseAuth = vi.mocked(useAuth)
 
-/** `useMutation`-shaped stub: `mutate(value, { onSuccess, onError })` for
- * the name/packets dialogs, `mutateAsync(input)` for the stock dialogs.
- */
 function mutationStub(behaviour: "success" | "error" = "success") {
   const mutate = vi.fn(
     (
@@ -75,77 +76,173 @@ function mutationStub(behaviour: "success" | "error" = "success") {
   >
 }
 
-const SINGLE_VARIANT: InventoryProductStock = {
-  product_id: "prod-1",
-  product_name: "Vajrashakti",
-  title: "Vajrashakti",
-  title_override: null,
-  available_boxes: 993,
-  total_packets: 993,
-  stock_status: "in_stock",
-  variant_count: 1,
-  packets_per_box_uniform: true,
-  variant_ids: ["v-1"],
-  variants: [
-    {
-      id: "v-1",
-      sku: "VJR-SKT-30",
-      variant_title: "Pack of 1",
-      variant_title_override: null,
-      display_title: "Pack of 1",
-      available_boxes: 993,
-      packets_per_box: 1,
-      total_packets: 993,
-      stock_status: "in_stock",
-    },
-  ],
+function line(
+  over: Partial<ProductVariantStockLine> & { id: string; sku: string }
+): ProductVariantStockLine {
+  return {
+    variant_title: over.sku,
+    variant_title_override: null,
+    display_title: over.sku,
+    available_boxes: 100,
+    packets_per_box: 1,
+    total_packets: 100,
+    stock_status: "in_stock",
+    ...over,
+  }
 }
 
-const MULTI_VARIANT: InventoryProductStock = {
+function omsVariant(
+  over: Partial<OmsCatalogVariant> & { name: string }
+): OmsCatalogVariant {
+  const underlying = over.underlying_variants ?? []
+  return {
+    catalog_variant_id: "cv-1",
+    display_order: 0,
+    is_active: true,
+    available_boxes: underlying.reduce((s, u) => s + u.available_boxes, 0),
+    total_packets: underlying.reduce(
+      (s, u) => s + u.available_boxes * u.packets_per_box,
+      0
+    ),
+    stock_status: "in_stock",
+    packets_per_box_uniform: new Set(underlying.map((u) => u.packets_per_box)).size <= 1,
+    underlying_variant_count: underlying.length,
+    ...over,
+    underlying_variants: underlying,
+  }
+}
+
+// Aayush Herbal Masala: 3 OMS flavour variants, each grouping a 60- and a 120-pack SKU.
+const HERBAL_MASALA: InventoryProductStock = {
   product_id: "prod-1",
   product_name: "Aayush Wellness Herbal Masala",
   title: "आयुष हर्बल मसाला",
   title_override: "Aayush Wellness Herbal Masala",
-  available_boxes: 6000,
-  total_packets: 6000,
+  available_boxes: 630,
+  total_packets: 630,
   stock_status: "in_stock",
-  variant_count: 3,
+  packets_per_box_uniform: false,
+  oms_variant_count: 3,
+  underlying_variant_count: 6,
+  oms_variants: [
+    omsVariant({
+      catalog_variant_id: "cv-royal",
+      name: "Royal Tobacco Flavour",
+      display_order: 0,
+      underlying_variants: [
+        line({
+          id: "v-rg60",
+          sku: "AW-HM-RG-60",
+          available_boxes: 10,
+          packets_per_box: 60,
+        }),
+        line({
+          id: "v-rg120",
+          sku: "AW-HM-RG-120",
+          available_boxes: 3,
+          packets_per_box: 120,
+        }),
+      ],
+    }),
+    omsVariant({
+      catalog_variant_id: "cv-gutka",
+      name: "Ghutka Flavour",
+      display_order: 1,
+      underlying_variants: [
+        line({
+          id: "v-gu60",
+          sku: "AW-HM-CR-60",
+          available_boxes: 100,
+          packets_per_box: 60,
+        }),
+        line({
+          id: "v-gu120",
+          sku: "AW-HM-CR-120",
+          available_boxes: 40,
+          packets_per_box: 120,
+        }),
+      ],
+    }),
+    omsVariant({
+      catalog_variant_id: "cv-paan",
+      name: "Paan Masala Flavour",
+      display_order: 2,
+      underlying_variants: [
+        line({
+          id: "v-pn60",
+          sku: "AW-HM-PN-60",
+          available_boxes: 200,
+          packets_per_box: 60,
+        }),
+        line({
+          id: "v-pn120",
+          sku: "AW-HM-PN-120",
+          available_boxes: 55,
+          packets_per_box: 120,
+        }),
+      ],
+    }),
+  ],
+}
+
+// A non-Herbal-Masala product: ONE OMS variant grouping 3 pack SKUs.
+const VAJRASHAKTI: InventoryProductStock = {
+  product_id: "prod-1",
+  product_name: "Vajrashakti",
+  title: "Vajrashakti",
+  title_override: null,
+  available_boxes: 900,
+  total_packets: 900,
+  stock_status: "in_stock",
   packets_per_box_uniform: true,
-  variant_ids: ["v-1", "v-2", "v-3"],
-  variants: [
-    {
-      id: "v-1",
-      sku: "AW-HM-PN-60",
-      variant_title: "पान मसाला स्वाद",
-      variant_title_override: "Paan Masala Flavour",
-      display_title: "Paan Masala Flavour",
-      available_boxes: 2000,
-      packets_per_box: 1,
-      total_packets: 2000,
-      stock_status: "in_stock",
-    },
-    {
-      id: "v-2",
-      sku: "AW-HM-CR-60",
-      variant_title: "गुटका स्वाद",
-      variant_title_override: "Gutka Flavour",
-      display_title: "Gutka Flavour",
-      available_boxes: 2000,
-      packets_per_box: 1,
-      total_packets: 2000,
-      stock_status: "in_stock",
-    },
-    {
-      id: "v-3",
-      sku: "AW-HM-RG-60",
-      variant_title: "रॉयल तंबाकू स्वाद",
-      variant_title_override: "Royal Tobacco Flavour",
-      display_title: "Royal Tobacco Flavour",
-      available_boxes: 2000,
-      packets_per_box: 1,
-      total_packets: 2000,
-      stock_status: "in_stock",
-    },
+  oms_variant_count: 1,
+  underlying_variant_count: 3,
+  oms_variants: [
+    omsVariant({
+      catalog_variant_id: "cv-vjr",
+      name: "Vajrashakti",
+      underlying_variants: [
+        line({
+          id: "v-1",
+          sku: "VJR-30",
+          display_title: "Pack of 1",
+          available_boxes: 300,
+        }),
+        line({
+          id: "v-2",
+          sku: "VJR-60",
+          display_title: "Pack of 2",
+          available_boxes: 400,
+        }),
+        line({
+          id: "v-3",
+          sku: "VJR-90",
+          display_title: "Pack of 3",
+          available_boxes: 200,
+        }),
+      ],
+    }),
+  ],
+}
+
+// An implicit (ungrouped) OMS variant -- catalog_variant_id null, 1 underlying row.
+const IMPLICIT: InventoryProductStock = {
+  product_id: "prod-1",
+  product_name: "Ungrouped Product",
+  title: "Ungrouped Product",
+  title_override: null,
+  available_boxes: 5,
+  total_packets: 5,
+  stock_status: "low_stock",
+  packets_per_box_uniform: true,
+  oms_variant_count: 1,
+  underlying_variant_count: 1,
+  oms_variants: [
+    omsVariant({
+      catalog_variant_id: null,
+      name: "Default Title",
+      underlying_variants: [line({ id: "v-only", sku: "SKU-ONLY", available_boxes: 5 })],
+    }),
   ],
 }
 
@@ -164,8 +261,8 @@ beforeEach(() => {
   toastError.mockClear()
   mockedUseSetProductName.mockReturnValue(mutationStub())
   mockedUseSetVariantName.mockReturnValue(mutationStub())
+  mockedUseSetCatalogVariantName.mockReturnValue(mutationStub() as never)
   mockedUseUpdatePacketsPerBox.mockReturnValue(mutationStub() as never)
-  mockedUseAdjustProductStock.mockReturnValue(mutationStub() as never)
   mockedUseAdjustVariantStock.mockReturnValue(mutationStub() as never)
   mockedUseAuth.mockReturnValue({
     hasPermission: () => true,
@@ -177,198 +274,206 @@ beforeEach(() => {
     error: null,
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useInventoryMovements>)
-  setProduct(MULTI_VARIANT)
+  setProduct(HERBAL_MASALA)
 })
 
-describe("InventoryProductPage — one card per product", () => {
-  it("renders exactly ONE product inventory card with aggregated totals", () => {
+describe("InventoryProductPage — OMS-visible variants only", () => {
+  it("Aayush Herbal Masala shows exactly 3 OMS-visible variant cards (the flavours)", () => {
     renderWithProviders(<InventoryProductPage />)
 
+    for (const name of [
+      "Royal Tobacco Flavour",
+      "Ghutka Flavour",
+      "Paan Masala Flavour",
+    ]) {
+      expect(screen.getByText(name)).toBeInTheDocument()
+    }
+    expect(screen.getAllByRole("button", { name: "Edit Stock" })).toHaveLength(3)
+  })
+
+  it("does NOT show Pack-size / 60-120 pouch SKUs as OMS-visible variant headings", () => {
+    renderWithProviders(<InventoryProductPage />)
     expect(
-      screen.getByRole("heading", { name: "Aayush Wellness Herbal Masala" })
-    ).toBeInTheDocument()
-    // aggregated, not per-variant
-    expect(screen.getByText("6,000 boxes")).toBeInTheDocument()
-    expect(screen.getByText("3 variants · 1 packets/box")).toBeInTheDocument()
-    // one Edit Stock button = one card
-    expect(screen.getAllByRole("button", { name: "Edit Stock" })).toHaveLength(1)
+      screen.queryByRole("heading", { name: /60 - Pouches|AW-HM-CR-60|Pack of 1/ })
+    ).toBeNull()
+    expect(screen.queryByRole("heading", { name: /Pack of 2|Pack of 3/ })).toBeNull()
   })
 
-  it("does NOT render Pack of 1 / Pack of 2 / Pack of 3 (or flavours) as separate cards", () => {
-    setProduct(SINGLE_VARIANT)
-    renderWithProviders(<InventoryProductPage />)
-
-    // "Pack of 1" is the sole variant; it must not be a heading/card of its own
-    expect(screen.queryByRole("heading", { name: "Pack of 1" })).not.toBeInTheDocument()
-    expect(screen.getByRole("heading", { name: "Vajrashakti" })).toBeInTheDocument()
-    expect(screen.getAllByRole("heading", { level: 2 }).length).toBeLessThanOrEqual(1) // only "Movement History"
-  })
-
-  it("flavour variants live only inside the collapsible Underlying variants list", async () => {
+  it("underlying Shopify SKUs appear only inside the collapsible section", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
 
-    // not a heading anywhere
-    expect(
-      screen.queryByRole("heading", { name: "Gutka Flavour" })
-    ).not.toBeInTheDocument()
-
-    await user.click(screen.getByText(/Underlying variants \(3\)/))
-    expect(screen.getByText("Paan Masala Flavour")).toBeInTheDocument()
-    expect(screen.getByText("Gutka Flavour")).toBeInTheDocument()
-    expect(screen.getByText("Royal Tobacco Flavour")).toBeInTheDocument()
+    // collapsed by default: the SKU text is present in the DOM but not as a heading
+    expect(screen.queryByRole("heading", { name: /AW-HM-CR-60/ })).toBeNull()
+    const summaries = screen.getAllByText(/Underlying Shopify variants \(2\)/)
+    expect(summaries).toHaveLength(3)
+    await user.click(summaries[1]) // Ghutka
+    expect(screen.getByText(/SKU AW-HM-CR-60/)).toBeInTheDocument()
+    expect(screen.getByText(/SKU AW-HM-CR-120/)).toBeInTheDocument()
   })
 
-  it("shows 'mixed pack sizes' when variants disagree on packets_per_box", () => {
-    setProduct({
-      ...MULTI_VARIANT,
-      packets_per_box_uniform: false,
-      variants: MULTI_VARIANT.variants.map((v, i) => ({ ...v, packets_per_box: i + 1 })),
-    })
+  it("a non-Herbal-Masala product shows exactly ONE OMS-visible variant", () => {
+    setProduct(VAJRASHAKTI)
     renderWithProviders(<InventoryProductPage />)
-    expect(screen.getByText("3 variants · mixed pack sizes")).toBeInTheDocument()
+    expect(screen.getAllByRole("button", { name: "Edit Stock" })).toHaveLength(1)
+    expect(screen.getByRole("heading", { name: "Vajrashakti" })).toBeInTheDocument()
   })
 
-  it("uses the English display name (title_override), never the Hindi source title", () => {
+  it("shows aggregated boxes/packets per OMS variant and 'mixed pack sizes'", () => {
     renderWithProviders(<InventoryProductPage />)
-    expect(
-      screen.getByRole("heading", { name: "Aayush Wellness Herbal Masala" })
-    ).toBeInTheDocument()
+    // Ghutka = 100 + 40 boxes
+    expect(screen.getByText("140 boxes")).toBeInTheDocument()
+    // each flavour groups a 60- and a 120-pack -> mixed
+    expect(screen.getAllByText(/mixed pack sizes/).length).toBeGreaterThanOrEqual(3)
+  })
+
+  it("uses the English OMS display name, never the Hindi source title", () => {
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.getByText("Ghutka Flavour")).toBeInTheDocument()
     expect(screen.queryByText("आयुष हर्बल मसाला")).not.toBeInTheDocument()
   })
 })
 
-describe("InventoryProductPage — Edit Stock", () => {
-  it("single-variant product: one field, saves via the product-level endpoint", async () => {
+describe("InventoryProductPage — Edit Stock (per underlying SKU, never distributed)", () => {
+  it("a grouped OMS variant gets one row per underlying SKU; one call per changed row", async () => {
     const user = userEvent.setup()
     const adjust = mutationStub("success")
-    mockedUseAdjustProductStock.mockReturnValue(adjust as never)
-    setProduct(SINGLE_VARIANT)
+    mockedUseAdjustVariantStock.mockReturnValue(adjust as never)
+    renderWithProviders(<InventoryProductPage />)
+
+    // open Ghutka's Edit Stock (2nd card)
+    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
+    const dialog = screen.getByRole("dialog")
+    expect(within(dialog).getByText("Edit Stock — Ghutka Flavour")).toBeInTheDocument()
+    const inputs = within(dialog).getAllByLabelText("New")
+    expect(inputs).toHaveLength(2) // one row per underlying Shopify SKU
+
+    await user.clear(inputs[0])
+    await user.type(inputs[0], "150")
+    await user.type(within(dialog).getByLabelText("Reason"), "stocktake")
+    await user.click(within(dialog).getByRole("button", { name: "Save" }))
+
+    expect(adjust.mutateAsync).toHaveBeenCalledTimes(1)
+    expect(adjust.mutateAsync).toHaveBeenCalledWith({
+      variantId: "v-gu60",
+      target_boxes: 150,
+      reason: "stocktake",
+    })
+  })
+
+  it("a single-underlying OMS variant gets one field and still edits that SKU directly", async () => {
+    const user = userEvent.setup()
+    const adjust = mutationStub("success")
+    mockedUseAdjustVariantStock.mockReturnValue(adjust as never)
+    setProduct(IMPLICIT)
     renderWithProviders(<InventoryProductPage />)
 
     await user.click(screen.getByRole("button", { name: "Edit Stock" }))
     const dialog = screen.getByRole("dialog")
-    const input = within(dialog).getByLabelText("New")
-    await user.clear(input)
-    await user.type(input, "1000")
-    await user.type(within(dialog).getByLabelText("Reason"), "New stock received")
+    const inputs = within(dialog).getAllByLabelText("New")
+    expect(inputs).toHaveLength(1)
+    await user.clear(inputs[0])
+    await user.type(inputs[0], "9")
+    await user.type(within(dialog).getByLabelText("Reason"), "count")
     await user.click(within(dialog).getByRole("button", { name: "Save" }))
 
     expect(adjust.mutateAsync).toHaveBeenCalledWith({
-      target_boxes: 1000,
-      reason: "New stock received",
-    })
-    expect(toastSuccess).toHaveBeenCalled()
-  })
-
-  it("multi-variant product: one row per variant, one call per changed row", async () => {
-    const user = userEvent.setup()
-    const adjustVariant = mutationStub("success")
-    mockedUseAdjustVariantStock.mockReturnValue(adjustVariant as never)
-    renderWithProviders(<InventoryProductPage />)
-
-    await user.click(screen.getByRole("button", { name: "Edit Stock" }))
-    const dialog = screen.getByRole("dialog")
-    const inputs = within(dialog).getAllByLabelText("New")
-    expect(inputs).toHaveLength(3) // one row per underlying variant
-
-    await user.clear(inputs[0])
-    await user.type(inputs[0], "2100")
-    await user.clear(inputs[2])
-    await user.type(inputs[2], "1900")
-    await user.type(within(dialog).getByLabelText("Reason"), "Stocktake correction")
-    await user.click(within(dialog).getByRole("button", { name: "Save" }))
-
-    expect(adjustVariant.mutateAsync).toHaveBeenCalledTimes(2)
-    expect(adjustVariant.mutateAsync).toHaveBeenCalledWith({
-      variantId: "v-1",
-      target_boxes: 2100,
-      reason: "Stocktake correction",
-    })
-    expect(adjustVariant.mutateAsync).toHaveBeenCalledWith({
-      variantId: "v-3",
-      target_boxes: 1900,
-      reason: "Stocktake correction",
+      variantId: "v-only",
+      target_boxes: 9,
+      reason: "count",
     })
   })
 
-  it("Save is disabled without a reason or without any changed row", async () => {
+  it("Save is disabled without a reason or a changed row; min=0 on inputs; delta preview", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
-    await user.click(screen.getByRole("button", { name: "Edit Stock" }))
+    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
     const dialog = screen.getByRole("dialog")
-
-    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled() // nothing changed
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled()
     const inputs = within(dialog).getAllByLabelText("New")
+    expect(inputs[0]).toHaveAttribute("min", "0")
     await user.clear(inputs[0])
-    await user.type(inputs[0], "2100")
+    await user.type(inputs[0], "150")
+    expect(within(dialog).getByText("+50 boxes")).toBeInTheDocument()
     expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled() // still no reason
     await user.type(within(dialog).getByLabelText("Reason"), "x")
     expect(within(dialog).getByRole("button", { name: "Save" })).toBeEnabled()
   })
 
-  it("rejects a negative target at the input (min=0) and shows the delta preview", async () => {
-    const user = userEvent.setup()
-    renderWithProviders(<InventoryProductPage />)
-    await user.click(screen.getByRole("button", { name: "Edit Stock" }))
-    const dialog = screen.getByRole("dialog")
-    const inputs = within(dialog).getAllByLabelText("New")
-    expect(inputs[0]).toHaveAttribute("min", "0")
-
-    await user.clear(inputs[0])
-    await user.type(inputs[0], "2500")
-    expect(within(dialog).getByText("+500 boxes")).toBeInTheDocument()
-  })
-
-  it("keeps the dialog open and shows the API error when a save fails", async () => {
+  it("keeps the dialog open and shows the API error on a failed save", async () => {
     const user = userEvent.setup()
     mockedUseAdjustVariantStock.mockReturnValue(mutationStub("error") as never)
     renderWithProviders(<InventoryProductPage />)
-
-    await user.click(screen.getByRole("button", { name: "Edit Stock" }))
+    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
     const dialog = screen.getByRole("dialog")
     const inputs = within(dialog).getAllByLabelText("New")
     await user.clear(inputs[0])
-    await user.type(inputs[0], "2100")
+    await user.type(inputs[0], "150")
     await user.type(within(dialog).getByLabelText("Reason"), "oops")
     await user.click(within(dialog).getByRole("button", { name: "Save" }))
-
     expect(toastError).toHaveBeenCalledWith("Server said no")
     expect(screen.getByRole("dialog")).toBeInTheDocument()
   })
 })
 
 describe("InventoryProductPage — Edit Name & History", () => {
-  it("shows Edit Stock / Edit Name for inventory.manage and hides them for read-only", () => {
-    const { unmount } = renderWithProviders(<InventoryProductPage />)
-    expect(
-      screen.getAllByRole("button", { name: "Edit Name" }).length
-    ).toBeGreaterThanOrEqual(1)
-    expect(screen.getByRole("button", { name: "Edit Stock" })).toBeInTheDocument()
-    unmount()
+  it("Edit Name on a grouped OMS variant renames the CatalogVariant", async () => {
+    const user = userEvent.setup()
+    const rename = mutationStub("success")
+    mockedUseSetCatalogVariantName.mockReturnValue(rename as never)
+    renderWithProviders(<InventoryProductPage />)
 
+    // scope to Ghutka's own action row -- its "Underlying Shopify variants"
+    // rows also render "Edit Name" buttons, so an unscoped query is ambiguous.
+    const ghutkaActions = screen.getByTestId("oms-variant-actions-cv-gutka")
+    await user.click(within(ghutkaActions).getByRole("button", { name: "Edit Name" }))
+    const dialog = screen.getByRole("dialog")
+    const input = within(dialog).getByLabelText("Display name")
+    await user.clear(input)
+    await user.type(input, "  Gutka Flavour  ")
+    await user.click(within(dialog).getByRole("button", { name: "Save" }))
+
+    expect(rename.mutate).toHaveBeenCalledWith("Gutka Flavour", expect.anything())
+  })
+
+  it("Edit Name on an implicit OMS variant edits the underlying variant title override", async () => {
+    const user = userEvent.setup()
+    const setVariant = mutationStub("success")
+    mockedUseSetVariantName.mockReturnValue(setVariant)
+    setProduct(IMPLICIT)
+    renderWithProviders(<InventoryProductPage />)
+
+    const actions = screen.getByTestId("oms-variant-actions-v-only")
+    await user.click(within(actions).getByRole("button", { name: "Edit Name" }))
+    const dialog = screen.getByRole("dialog")
+    const input = within(dialog).getByLabelText("Display name")
+    await user.clear(input)
+    await user.type(input, "Nice Name")
+    await user.click(within(dialog).getByRole("button", { name: "Save" }))
+    expect(setVariant.mutate).toHaveBeenCalledWith("Nice Name", expect.anything())
+  })
+
+  it("hides Edit Stock / Edit Name for a read-only user", () => {
     mockedUseAuth.mockReturnValue({
       hasPermission: (code: string) => code !== "inventory.manage",
     } as unknown as ReturnType<typeof useAuth>)
     renderWithProviders(<InventoryProductPage />)
     expect(screen.queryByRole("button", { name: "Edit Stock" })).not.toBeInTheDocument()
     expect(screen.queryByRole("button", { name: "Edit Name" })).not.toBeInTheDocument()
+    // still shows the 3 flavour cards read-only
+    expect(screen.getByText("Ghutka Flavour")).toBeInTheDocument()
   })
 
-  it("renders the product-level Movement History and toggles it", async () => {
+  it("History per OMS variant toggles and notes it spans multiple Shopify SKUs", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
 
-    expect(
-      screen.getByRole("heading", {
-        name: "Movement History — Aayush Wellness Herbal Masala",
-      })
-    ).toBeInTheDocument()
-
-    await user.click(screen.getByRole("button", { name: "Hide History" }))
-    expect(
-      screen.queryByRole("heading", { name: /Movement History/ })
-    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/Movement History — Ghutka Flavour/)).toBeNull()
+    await user.click(screen.getAllByRole("button", { name: "History" })[1])
+    expect(screen.getByText(/Movement History — Ghutka Flavour/)).toBeInTheDocument()
+    expect(screen.getByText(/spans 2 Shopify SKUs/)).toBeInTheDocument()
+    await user.click(screen.getAllByRole("button", { name: "Hide History" })[0])
+    expect(screen.queryByText(/Movement History — Ghutka Flavour/)).toBeNull()
   })
 })
 
@@ -386,7 +491,6 @@ describe("EditNameDialog", () => {
         mutation={mutation}
       />
     )
-
     await user.click(screen.getByRole("button", { name: "Edit Name" }))
     const dialog = screen.getByRole("dialog")
     expect(within(dialog).getByText("Edit Product Name")).toBeInTheDocument()
@@ -396,7 +500,6 @@ describe("EditNameDialog", () => {
     await user.clear(input)
     await user.type(input, "  New Name  ")
     await user.click(within(dialog).getByRole("button", { name: "Save" }))
-
     expect(mutation.mutate).toHaveBeenCalledWith("New Name", expect.anything())
     expect(toastSuccess).toHaveBeenCalledWith("Product name updated.")
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
@@ -446,25 +549,6 @@ describe("EditNameDialog", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument()
   })
 
-  it("Cancel closes without calling the mutation", async () => {
-    const user = userEvent.setup()
-    const mutation = mutationStub()
-    renderWithProviders(
-      <EditNameDialog
-        kind="product"
-        currentDisplayName="Old"
-        shopifyName="Old"
-        hasOverride={false}
-        maxLength={500}
-        mutation={mutation}
-      />
-    )
-    await user.click(screen.getByRole("button", { name: "Edit Name" }))
-    await user.click(screen.getByRole("button", { name: "Cancel" }))
-    expect(mutation.mutate).not.toHaveBeenCalled()
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
-  })
-
   it("Reset to Shopify Name shows only with an override and clears it", async () => {
     const user = userEvent.setup()
     const mutation = mutationStub("success")
@@ -483,7 +567,6 @@ describe("EditNameDialog", () => {
       screen.queryByRole("button", { name: "Reset to Shopify Name" })
     ).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Cancel" }))
-
     rerender(
       <EditNameDialog
         kind="product"

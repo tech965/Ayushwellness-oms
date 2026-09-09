@@ -11,6 +11,7 @@ import type {
   InventoryProductVariants,
   InventoryStockFilters,
   InventoryVariant,
+  OmsCatalogVariant,
 } from "@/types/inventory"
 
 interface ProductListParams extends InventoryStockFilters {
@@ -91,6 +92,7 @@ async function fetchMovements(
         page_size: params.pageSize,
         product_variant_id: params.product_variant_id,
         product_id: params.product_id,
+        catalog_variant_id: params.catalog_variant_id,
         order_id: params.order_id,
         movement_type: params.movement_type,
       },
@@ -216,6 +218,24 @@ export function useSetVariantName(variantId: string) {
         name === null
           ? await apiClient.delete<ApiResponse<CatalogName>>(url)
           : await apiClient.patch<ApiResponse<CatalogName>>(url, { name })
+      return response.data.data
+    },
+    onSuccess: () => invalidateInventory(queryClient),
+  })
+}
+
+/** Rename an OMS-visible catalog variant (e.g. "Ghutka Flavour"). No
+ * underlying ProductVariant, stock, or ledger row is touched; Shopify
+ * sync never reads or writes this name. Non-empty only (no reset).
+ */
+export function useSetCatalogVariantName(catalogVariantId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (name: string) => {
+      const response = await apiClient.patch<ApiResponse<OmsCatalogVariant>>(
+        `/inventory/catalog-variants/${catalogVariantId}/name`,
+        { name }
+      )
       return response.data.data
     },
     onSuccess: () => invalidateInventory(queryClient),
