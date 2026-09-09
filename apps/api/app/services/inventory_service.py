@@ -49,8 +49,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select  # type: ignore[reportMissingImports]
-from sqlalchemy.exc import IntegrityError  # type: ignore[reportMissingImports]
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
