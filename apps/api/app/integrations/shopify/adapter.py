@@ -18,6 +18,7 @@ from app.integrations.shopify.errors import ShopifyApiError
 from app.integrations.shopify.mutations import (
     FULFILLMENT_CREATE_MUTATION,
     OPEN_FULFILLMENT_ORDERS_QUERY,
+    TAGS_ADD_MUTATION,
 )
 from app.integrations.shopify.normalizer import ENTITY_NORMALIZERS
 from app.integrations.shopify.queries import ENTITY_QUERIES, SHOP_PING_QUERY, updated_since_filter
@@ -242,6 +243,29 @@ class ShopifyAdapter(IntegrationAdapter):
                 details={"error_type": "validation_error"},
             )
         return fulfillment
+
+    async def add_order_tags(self, shopify_order_gid: str, tags: list[str]) -> None:
+        """Adds `tags` to an order via `tagsAdd` -- a set-union on
+        Shopify's side, so re-adding a tag the order already has is a
+        documented no-op, never a duplicate. Used for the OMS-confirmation
+        marker (Part: telecaller confirm push), never for fulfillment.
+        """
+        client = self._get_client()
+        try:
+            data = await client.execute(TAGS_ADD_MUTATION, {"id": shopify_order_gid, "tags": tags})
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+        result = data.get("tagsAdd") or {}
+        user_errors = result.get("userErrors") or []
+        if user_errors:
+            message = "; ".join(
+                f"{','.join(e.get('field') or [])}: {e.get('message')}" for e in user_errors
+            )
+            raise IntegrationError(
+                f"Shopify rejected the tag update: {message}",
+                details={"error_type": "validation_error"},
+            )
 
     def normalize(self, entity_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         normalizer = ENTITY_NORMALIZERS.get(entity_type)

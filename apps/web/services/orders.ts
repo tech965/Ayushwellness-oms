@@ -162,7 +162,14 @@ export function useShipOrderViaShiprocket(id: string) {
       return response.data.data
     },
     onSuccess: () => {
+      // A new shipment also changes what "Orders Need Shipment"/
+      // "Confirmed by Telecaller"/"Shipments" show for this order --
+      // invalidate all of them, not just this order's own shipment list,
+      // so those pages are correct on return without a manual reload.
       void queryClient.invalidateQueries({ queryKey: ["shipments", "order", id] })
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments"] })
+      void queryClient.invalidateQueries({ queryKey: ["orders"] })
     },
   })
 }

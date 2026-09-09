@@ -4,7 +4,13 @@ import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import ShipmentQueuePage from "@/app/(dashboard)/shipment-queue/page"
-import { useBulkShipOrders, useShipmentQueue, useShipOrderFromQueue } from "@/services/shipment-queue"
+import {
+  useBulkShipOrders,
+  useShipmentQueue,
+  useShipOrderFromQueue,
+  useValidateBulkShip,
+} from "@/services/shipment-queue"
+import { useRetryShopifySync } from "@/services/shipments"
 import { useTeamTelecallers } from "@/services/team"
 
 const mockPush = vi.fn()
@@ -23,6 +29,11 @@ vi.mock("@/services/shipment-queue", () => ({
   useShipmentQueue: vi.fn(),
   useShipOrderFromQueue: vi.fn(),
   useBulkShipOrders: vi.fn(),
+  useValidateBulkShip: vi.fn(),
+}))
+
+vi.mock("@/services/shipments", () => ({
+  useRetryShopifySync: vi.fn(),
 }))
 
 vi.mock("@/services/team", () => ({
@@ -33,6 +44,8 @@ const mockedUseShipmentQueue = vi.mocked(useShipmentQueue)
 const mockedUseTeamTelecallers = vi.mocked(useTeamTelecallers)
 const mockedUseShipOrderFromQueue = vi.mocked(useShipOrderFromQueue)
 const mockedUseBulkShipOrders = vi.mocked(useBulkShipOrders)
+const mockedUseValidateBulkShip = vi.mocked(useValidateBulkShip)
+const mockedUseRetryShopifySync = vi.mocked(useRetryShopifySync)
 
 const ROW = {
   order_id: "order-1",
@@ -50,6 +63,7 @@ const ROW = {
   confirmed_by_telecaller_name: "Sourabh",
   shipment_id: null,
   shipment_status: null,
+  shopify_sync_status: null,
   awb: null,
   courier_name: null,
 }
@@ -64,6 +78,15 @@ function mockShipHooks() {
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useBulkShipOrders>)
+  mockedUseValidateBulkShip.mockReturnValue({
+    mutate: vi.fn(),
+    data: undefined,
+    isPending: false,
+  } as unknown as ReturnType<typeof useValidateBulkShip>)
+  mockedUseRetryShopifySync.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useRetryShopifySync>)
 }
 
 describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {

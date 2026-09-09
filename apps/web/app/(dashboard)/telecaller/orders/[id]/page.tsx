@@ -312,8 +312,9 @@ export default function TelecallerOrderDetailPage() {
                       Revert to Pending
                     </Button>
                     <p className="text-muted-foreground mt-1.5 text-xs">
-                      Confirmed and ready for shipment. Only revertible if fulfillment hasn&apos;t
-                      created a shipment for it yet.
+                      Confirmed and ready for shipment. Only revertible before the shipment has
+                      actually started moving — a pending shipment is cancelled automatically;
+                      one already picked up, in transit, or delivered can&apos;t be reverted here.
                     </p>
                   </CardContent>
                 )}

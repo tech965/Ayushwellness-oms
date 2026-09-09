@@ -1,10 +1,21 @@
 "use client"
 
+import * as React from "react"
 import type { ReactNode } from "react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
 import { toast } from "sonner"
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
@@ -23,10 +34,23 @@ import {
   useShipmentTimeline,
 } from "@/services/shipments"
 
+// A shipment Shiprocket hasn't picked up yet is the only state this OMS
+// can safely offer to reverse -- once picked up, Shiprocket itself
+// generally won't accept a cancellation, and the shipment may already be
+// physically moving. Never offer a button that would just fail; see the
+// "cannot be automatically reversed" message below instead. This is a
+// client-side UX guess at Shiprocket's own real policy, not the actual
+// authority -- the backend (`ShiprocketOperationsService.cancel_shipment`)
+// only ever marks OMS state CANCELLED after Shiprocket's own API call
+// actually succeeds, so this gate can only ever hide a button too early,
+// never let through an unsafe write.
+const CANCELLABLE_STATUSES = new Set(["pending"])
+
 export default function ShipmentDetailPage() {
   const params = useParams<{ id: string }>()
   const shipmentId = params.id
   const { hasPermission } = useAuth()
+  const [cancelConfirmOpen, setCancelConfirmOpen] = React.useState(false)
 
   const shipmentQuery = useShipment(shipmentId)
   const timelineQuery = useShipmentTimeline(shipmentId)
@@ -88,16 +112,22 @@ export default function ShipmentDetailPage() {
               >
                 Refresh Tracking
               </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                disabled={anyActionPending}
-                onClick={() =>
-                  cancelShipment.mutate(undefined, mutationOpts("Shipment cancelled."))
-                }
-              >
-                Cancel Shipment
-              </Button>
+              {shipmentQuery.data && shipmentQuery.data.current_status !== "cancelled" && (
+                CANCELLABLE_STATUSES.has(shipmentQuery.data.current_status) ? (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={anyActionPending}
+                    onClick={() => setCancelConfirmOpen(true)}
+                  >
+                    Cancel Shipment
+                  </Button>
+                ) : (
+                  <span className="text-muted-foreground self-center text-xs">
+                    Shipment cannot be automatically reversed at this stage. Contact Admin.
+                  </span>
+                )
+              )}
               {shipmentQuery.data?.shopify_sync_status === "failed" && (
                 <Button
                   size="sm"
@@ -252,6 +282,40 @@ export default function ShipmentDetailPage() {
           </div>
         )}
       </QueryStates>
+
+      <AlertDialog open={cancelConfirmOpen} onOpenChange={setCancelConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Are you sure you want to cancel this shipment?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will cancel the shipment in OMS and, where supported and still cancellable,
+              cancel the corresponding Shiprocket shipment. The shipment record and its tracking
+              history are kept — nothing is deleted, and this action is logged. If Shiprocket
+              rejects the cancellation (e.g. it has already progressed), nothing changes and
+              you&apos;ll see the reason.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep Shipment</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={cancelShipment.isPending}
+              onClick={(e) => {
+                e.preventDefault()
+                cancelShipment.mutate(undefined, {
+                  onSuccess: () => {
+                    toast.success("Shipment cancelled.")
+                    setCancelConfirmOpen(false)
+                  },
+                  onError: (error) => toast.error(getApiErrorMessage(error)),
+                })
+              }}
+            >
+              {cancelShipment.isPending ? "Cancelling..." : "Cancel Shipment"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }

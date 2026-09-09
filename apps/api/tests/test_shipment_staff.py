@@ -347,6 +347,12 @@ async def test_case_g_shipment_lifecycle_stays_scoped_at_every_stage(
     )
 
     ctx = await _setup(db_session)
+    # `_check_shippable` now also requires a shipping address on file --
+    # `_setup`'s orders never set one (only telecaller confirmation is
+    # exercised there); set it directly here since this is the one test
+    # that actually ships.
+    ctx["order_a"].shipping_address = {"line1": "123 Test St", "city": "Mumbai", "pin_code": "400001"}
+    await db_session.commit()
     async with bearer_client(app, get_db, db_session, ctx["staff_a"].id) as client:
         ship = await client.post(f"/api/v1/shipment-staff/orders/{ctx['order_a'].id}/ship", json={})
         assert ship.status_code == 201
@@ -398,6 +404,8 @@ async def test_ship_via_shipment_staff_never_creates_a_duplicate_shipment(
     )
 
     ctx = await _setup(db_session)
+    ctx["order_a"].shipping_address = {"line1": "123 Test St", "city": "Mumbai", "pin_code": "400001"}
+    await db_session.commit()
     async with bearer_client(app, get_db, db_session, ctx["staff_a"].id) as client:
         first = await client.post(
             f"/api/v1/shipment-staff/orders/{ctx['order_a'].id}/ship", json={}

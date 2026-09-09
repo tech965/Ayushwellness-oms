@@ -2,7 +2,10 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
+import { toast } from "sonner"
 
+import { BulkShipDialog } from "@/components/fulfillment/bulk-ship-dialog"
+import { ShipmentActionCell } from "@/components/fulfillment/shipment-action-cell"
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import type { DateRangeValue } from "@/components/shared/date-range-picker"
 import { FilterBar } from "@/components/shared/filter-bar"
@@ -18,9 +21,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useTelecallerConfirmedOrders } from "@/services/orders"
+import { useShipOrderFromQueue } from "@/services/shipment-queue"
 import { useTeamTelecallers } from "@/services/team"
 import {
   ORDER_STATUS_OPTIONS,
@@ -63,6 +68,38 @@ function ConfirmedByTelecallerContent() {
   const router = useRouter()
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
   const telecallersQuery = useTeamTelecallers()
+  const shipOrder = useShipOrderFromQueue()
+
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
+  const [bulkShipOpen, setBulkShipOpen] = React.useState(false)
+
+  function toggleOne(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleAllOnPage(ids: string[]) {
+    setSelectedIds((prev) => {
+      const allSelected = ids.every((id) => prev.has(id))
+      const next = new Set(prev)
+      for (const id of ids) {
+        if (allSelected) next.delete(id)
+        else next.add(id)
+      }
+      return next
+    })
+  }
+
+  function handleShipOrder(orderId: string) {
+    shipOrder.mutate(orderId, {
+      onSuccess: () => toast.success("Shipment created via Shiprocket."),
+      onError: (error) => toast.error(getApiErrorMessage(error)),
+    })
+  }
 
   const confirmedDateRange: DateRangeValue = {
     from: filters.confirmed_date_from ? new Date(filters.confirmed_date_from) : undefined,
@@ -167,16 +204,16 @@ function ConfirmedByTelecallerContent() {
       id: "actions",
       header: "",
       cell: (r) => (
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={(e) => {
-            e.stopPropagation()
-            router.push(`/orders/${r.id}`)
-          }}
-        >
-          View
-        </Button>
+        <ShipmentActionCell
+          orderId={r.id}
+          shipmentId={r.shipment_id}
+          shipmentStatus={r.shipment_status}
+          shopifySyncStatus={r.shopify_sync_status}
+          orderStatus={r.status}
+          fulfillmentStatus={r.fulfillment_status}
+          onShip={handleShipOrder}
+          shipPending={shipOrder.isPending && shipOrder.variables === r.id}
+        />
       ),
     },
   ]
@@ -282,6 +319,20 @@ function ConfirmedByTelecallerContent() {
           </Button>
         )}
 
+        {selectedIds.size > 0 && (
+          <div className="bg-muted/50 border-border flex items-center justify-between rounded-lg border px-4 py-2 text-sm">
+            <span className="font-medium">Selected {selectedIds.size} orders</span>
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={() => setBulkShipOpen(true)}>
+                Create Shipments
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
+                Clear Selection
+              </Button>
+            </div>
+          </div>
+        )}
+
         <QueryStates
           isLoading={query.isLoading}
           isError={query.isError}
@@ -299,12 +350,30 @@ function ConfirmedByTelecallerContent() {
                 data={data.data}
                 rowKey={(r) => r.id}
                 onRowClick={(r) => router.push(`/orders/${r.id}`)}
+                selection={{
+                  selectedIds,
+                  onToggle: toggleOne,
+                  onToggleAll: toggleAllOnPage,
+                }}
               />
               <PaginationBar
                 meta={data.meta}
                 onPageChange={(page) => setFilters({ page })}
                 pageSizeOptions={[10, 20, 50, 100]}
                 onPageSizeChange={(page_size) => setFilters({ page_size, page: 1 })}
+              />
+              <BulkShipDialog
+                open={bulkShipOpen}
+                onOpenChange={setBulkShipOpen}
+                rows={data.data
+                  .filter((r) => selectedIds.has(r.id))
+                  .map((r) => ({
+                    id: r.id,
+                    order_number: r.order_number,
+                    payment_type: r.payment_type,
+                    total_amount: r.total_amount,
+                  }))}
+                onDone={() => setSelectedIds(new Set())}
               />
             </>
           )}

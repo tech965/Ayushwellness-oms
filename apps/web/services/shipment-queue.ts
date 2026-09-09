@@ -100,6 +100,22 @@ export function useShipmentAnalytics(params: ShipmentAnalyticsParams = {}) {
  * in `services/orders.ts` (the order-detail page's single bound-id hook) --
  * same underlying endpoint, different call shape for a different caller.
  */
+/** A brand-new shipment moves an order between all three fulfillment
+ * views at once: it leaves "Orders Need Shipment" (`shipment-queue`),
+ * appears/updates in "Shipments" (`shipments`), and its status changes
+ * in "Confirmed by Telecaller" (`orders`, incl. the `confirmed-by-
+ * telecaller` query -- query-key prefix matching invalidates that too).
+ * Refreshing all three here (rather than each page invalidating only
+ * its own key) is what makes "ship from the Confirmed-by-Telecaller
+ * table" and "ship from the queue" both keep every other open view
+ * correct without a manual page reload.
+ */
+function invalidateAfterShipmentChange(queryClient: ReturnType<typeof useQueryClient>) {
+  void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+  void queryClient.invalidateQueries({ queryKey: ["shipments"] })
+  void queryClient.invalidateQueries({ queryKey: ["orders"] })
+}
+
 export function useShipOrderFromQueue() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -107,10 +123,24 @@ export function useShipOrderFromQueue() {
       const response = await apiClient.post<ApiResponse<Shipment>>(`/orders/${orderId}/ship`, {})
       return response.data.data
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
-      void queryClient.invalidateQueries({ queryKey: ["shipments", "summary"] })
-      void queryClient.invalidateQueries({ queryKey: ["shipments", "analytics"] })
+    onSuccess: () => invalidateAfterShipmentChange(queryClient),
+  })
+}
+
+/** Read-only dry run for the bulk-ship confirmation screen -- classifies
+ * every selected order as ready/not-ready with a reason, WITHOUT
+ * creating anything (`POST /orders/bulk-ship/validate`). Not a mutation
+ * despite the POST verb (no server-side write happens); modeled as one
+ * anyway so the confirmation dialog gets `isPending` for free, same as
+ * every other async action in this codebase.
+ */
+export function useValidateBulkShip() {
+  return useMutation({
+    mutationFn: async (orderIds: string[]) => {
+      const response = await apiClient.post<
+        ApiResponse<{ order_id: string; ready: boolean; reason: string | null }[]>
+      >("/orders/bulk-ship/validate", { order_ids: orderIds })
+      return response.data.data ?? []
     },
   })
 }
@@ -130,10 +160,6 @@ export function useBulkShipOrders() {
       if (!response.data.data) throw new Error("Bulk ship did not return a result.")
       return response.data.data
     },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
-      void queryClient.invalidateQueries({ queryKey: ["shipments", "summary"] })
-      void queryClient.invalidateQueries({ queryKey: ["shipments", "analytics"] })
-    },
+    onSuccess: () => invalidateAfterShipmentChange(queryClient),
   })
 }

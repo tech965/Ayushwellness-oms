@@ -144,6 +144,12 @@ class OrderListResponse(OrderResponse):
     shipment_status: str | None = None
     courier_name: str | None = None
     tracking_number: str | None = None
+    # The most recent shipment's id/outbound-Shopify-push status -- lets
+    # the frontend link straight to `/shipments/{id}` (e.g. to retry a
+    # failed Shopify sync) without a second lookup. Both `None` exactly
+    # when `shipment_status` is `None` (no shipment yet).
+    shipment_id: uuid.UUID | None = None
+    shopify_sync_status: str | None = None
     # See `OrderDetailResponse.confirmed_by_telecaller_name` -- same
     # denormalization, backs the "Confirmed By" column on both the
     # general Orders table and the "Confirmed by Telecaller" page

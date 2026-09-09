@@ -15,9 +15,15 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, IntegrationError, NotFoundError
 from app.models.auth import User
-from app.models.enums import OrderStatus, PaymentStatus
+from app.models.enums import (
+    FulfillmentStatus,
+    OrderStatus,
+    PaymentStatus,
+    ShipmentStatus,
+    ShopifySyncStatus,
+)
 from app.models.order import Order, OrderEvent
 from app.repositories.customer import CustomerRepository
 from app.repositories.order import OrderEventRepository, OrderItemRepository, OrderRepository
@@ -34,14 +40,47 @@ ORDER_STATUS_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     # CONFIRMED -> PENDING is the telecaller "undo a mistaken confirmation"
     # path (`unconfirm_order` below) — the only reverse transition in this
     # table. `unconfirm_order` adds its own business-rule guard on top
-    # (blocked once a Shipment exists); this table only says the
-    # transition is structurally possible.
+    # (blocked once shipping has actually progressed — see
+    # `_SHIPMENT_PROGRESS_BLOCK_MESSAGES` — never merely "a Shipment row
+    # exists"); this table only says the transition is structurally
+    # possible.
     OrderStatus.CONFIRMED: {OrderStatus.PROCESSING, OrderStatus.CANCELLED, OrderStatus.PENDING},
     OrderStatus.PROCESSING: {OrderStatus.PACKED, OrderStatus.CANCELLED},
     OrderStatus.PACKED: {OrderStatus.SHIPPED, OrderStatus.CANCELLED},
     OrderStatus.SHIPPED: {OrderStatus.DELIVERED},
     OrderStatus.DELIVERED: set(),
     OrderStatus.CANCELLED: set(),
+}
+
+# `unconfirm_order`'s per-status reasons once a shipment has progressed
+# past PENDING -- deliberately specific (never the old generic "a shipment
+# already exists for this order", which was true for every CONFIRMED order
+# that had ever even started shipping and gave the caller no way to tell a
+# genuinely-blocked revert from a bug). PENDING and CANCELLED are absent on
+# purpose: `unconfirm_order` never blocks on either of those.
+_SHIPMENT_PROGRESS_BLOCK_MESSAGES: dict[ShipmentStatus, str] = {
+    ShipmentStatus.PICKED_UP: (
+        "Cannot revert this order because the shipment has already been picked up."
+    ),
+    ShipmentStatus.IN_TRANSIT: (
+        "Cannot revert this order because the shipment is already in transit."
+    ),
+    ShipmentStatus.OUT_FOR_DELIVERY: (
+        "Cannot revert this order because the shipment is already out for delivery."
+    ),
+    ShipmentStatus.DELIVERED: (
+        "Cannot revert this order because the shipment has already been delivered."
+    ),
+    ShipmentStatus.NDR: (
+        "Cannot revert this order because the shipment has an active delivery "
+        "exception (NDR)."
+    ),
+    ShipmentStatus.RTO_INITIATED: (
+        "Cannot revert this order because the shipment is already in an RTO (return) flow."
+    ),
+    ShipmentStatus.RTO_DELIVERED: (
+        "Cannot revert this order because the shipment is already in an RTO (return) flow."
+    ),
 }
 
 
@@ -259,6 +298,15 @@ class OrderService:
         `transition_status` never touches them again on any later
         transition (PROCESSING/PACKED/...), so they survive the rest of
         the order's lifecycle untouched.
+
+        Also pushes the `CONFIRMATION_TAG` marker to the Shopify order
+        (`ShopifyFulfillmentService.sync_confirmation_tag`) once the OMS
+        side above has fully committed -- proof the OMS, not Shopify, is
+        driving confirmation, without ever marking the order Fulfilled or
+        touching Shiprocket (a shipment is only ever created by an
+        explicit Ship Order/Bulk Ship action, never by confirming). Best
+        effort: a Shopify failure here never undoes or fails the
+        confirmation that already succeeded.
         """
         order = await self.transition_status(
             order_id,
@@ -270,6 +318,15 @@ class OrderService:
             order, confirmed_by_telecaller_id=actor.id, confirmed_at=datetime.now(UTC)
         )
         await self.session.commit()
+
+        # Local import: avoids a module-load-order dependency between
+        # `order_service` and `shopify_fulfillment_service` for the one
+        # code path that needs it, matching this codebase's existing
+        # convention for occasional cross-service calls (see the same
+        # pattern in `unconfirm_order` for `shiprocket_service`).
+        from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
+
+        await ShopifyFulfillmentService(self.session).sync_confirmation_tag(order_id, actor=actor)
         return await self.get_order(order_id)
 
     async def unconfirm_order(self, order_id: uuid.UUID, *, actor: User) -> Order:
@@ -279,23 +336,116 @@ class OrderService:
         does its own ownership check first, same separation `confirm_order`
         already has from its caller.
 
-        Blocked (`ConflictError`, 409) once any `Shipment` row exists for
-        this order, even one still `PENDING` — fulfillment may already be
-        working the order at that point, so the only safe undo window is
-        before a shipment is ever created; `transition_status` itself
-        blocks reverting anything that isn't currently CONFIRMED (not in
+        The gate is on shipment PROGRESS, never on mere row existence:
+
+          - No `Shipment` row at all -- including one that never got
+            created because Shiprocket rejected the attempt (see
+            `ShiprocketOperationsService.create_shipment_for_order`,
+            which never persists a row on failure) -- reverts freely.
+          - A row still `PENDING` (created, but Shiprocket hasn't picked
+            it up) or already `CANCELLED` -- also reverts freely, but a
+            `PENDING` one is cancelled first (reusing
+            `ShiprocketOperationsService.cancel_shipment`, the same
+            operation the shipment detail page's own "Cancel Shipment"
+            button calls -- never a second, local-only copy of that
+            Shiprocket call) so Shiprocket is never left holding a live
+            shipment for an order the OMS now calls unconfirmed/PENDING.
+          - Anything that has actually progressed (`PICKED_UP` or later
+            -- in transit, out for delivery, delivered, NDR, RTO) blocks
+            the revert outright (`ConflictError`, 409, with the specific
+            `_SHIPMENT_PROGRESS_BLOCK_MESSAGES` reason): fulfillment may
+            already be physically handling the order, and Shiprocket
+            itself will not accept a cancellation at that point either.
+          - A `shopify_sync_status` of `SYNCED` on any shipment -- a real
+            Shopify `Fulfillment` object already exists for this order --
+            also blocks outright, regardless of that shipment's Shiprocket
+            state: `ShopifyFulfillmentService` (the only Shopify
+            integration this OMS has) has no fulfillment-cancellation
+            capability, so there is no existing, safe way to undo it. Same
+            for `Order.fulfillment_status == FULFILLED`, Shopify's own
+            inbound summary -- covers an order fulfilled directly through
+            Shopify with no local `Shipment` row at all to inspect.
+
+        Both blocks above are checked for every shipment BEFORE any
+        Shiprocket cancellation is attempted for any of them, so an order
+        with more than one `Shipment` row never ends up with one
+        successfully cancelled while a sibling then blocks the actual
+        revert -- either the whole thing proceeds, or nothing does.
+
+        `transition_status` still independently blocks reverting anything
+        that isn't currently CONFIRMED (not in
         `ORDER_STATUS_TRANSITIONS[order.status]`).
 
         Clears `confirmed_by_telecaller_id`/`confirmed_at` back to `None`
         so the order stops showing as telecaller-confirmed anywhere (the
         Fulfillment Queue, the confirmation analytics) — the permanent
-        record of "confirmed, then reverted" still lives in the
-        append-only `OrderEvent` timeline `transition_status` writes.
+        record of "confirmed, then reverted" (and, when applicable, the
+        Shiprocket cancellation just above) still lives in the
+        append-only `OrderEvent` timeline / audit log; nothing is deleted.
         """
-        if await self.shipments.list_for_order(order_id):
+        order = await self.get_order(order_id)
+        if order.fulfillment_status == FulfillmentStatus.FULFILLED:
             raise ConflictError(
-                "Cannot revert to pending — a shipment already exists for this order."
+                "Cannot revert this order because Shopify already shows it as fulfilled.",
+                details={"error_type": "shopify_already_fulfilled"},
             )
+
+        shipments = await self.shipments.list_for_order(order_id)
+
+        for shipment in shipments:
+            block_message = _SHIPMENT_PROGRESS_BLOCK_MESSAGES.get(shipment.current_status)
+            if block_message:
+                raise ConflictError(block_message, details={"error_type": "shipment_progressed"})
+            if shipment.shopify_sync_status == ShopifySyncStatus.SYNCED:
+                raise ConflictError(
+                    "Cannot revert this order because a Shopify fulfillment has already "
+                    "been created for its shipment and cannot be safely cancelled.",
+                    details={"error_type": "shopify_fulfillment_synced"},
+                )
+
+        # Local import: avoids a module-load-order dependency between
+        # `order_service` and `shiprocket_service` for the one code path
+        # that needs it, matching this codebase's existing convention for
+        # occasional cross-service calls.
+        from app.services.shiprocket_service import ShiprocketOperationsService
+
+        shiprocket_ops = ShiprocketOperationsService(self.session)
+        for shipment in shipments:
+            if shipment.current_status != ShipmentStatus.PENDING:
+                continue  # already CANCELLED -- nothing to do
+            if shipment.shiprocket_shipment_id:
+                # Real external cancellation first; only ever proceeds to
+                # the PENDING transition below once this has actually
+                # succeeded (a failure here is re-raised below as a plain
+                # `ConflictError` and the order stays CONFIRMED, exactly
+                # as if this method were never called -- never leaves
+                # Shiprocket with a live shipment while OMS silently
+                # reverts underneath it).
+                try:
+                    await shiprocket_ops.cancel_shipment(shipment.id, actor=actor)
+                except IntegrationError as exc:
+                    raise ConflictError(
+                        "Shiprocket cancellation failed. The order was not reverted.",
+                        details={"error_type": "shiprocket_cancellation_failed"},
+                    ) from exc
+            else:
+                # A shipment row that was never actually registered with
+                # Shiprocket (e.g. created manually, `POST /shipments`) --
+                # nothing external to cancel; mark it CANCELLED directly
+                # so it never counts as "active" again, and keep the
+                # ledger record rather than deleting the row.
+                previous_status = shipment.current_status
+                await self.shipments.update(shipment, current_status=ShipmentStatus.CANCELLED)
+                await self.audit.record(
+                    user=actor,
+                    action="shipment.cancelled_for_unconfirm",
+                    entity_type="shipment",
+                    entity_id=str(shipment.id),
+                    previous_value={"status": previous_status.value},
+                    new_value={"status": ShipmentStatus.CANCELLED.value},
+                )
+                await self.session.commit()
+
         order = await self.transition_status(
             order_id,
             new_status=OrderStatus.PENDING,

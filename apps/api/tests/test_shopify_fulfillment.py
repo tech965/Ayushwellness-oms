@@ -19,7 +19,7 @@ from app.integrations.registry import clear_adapters, register_adapter
 from app.integrations.shopify.adapter import ShopifyAdapter
 from app.main import app
 from app.models.customer import Customer
-from app.models.enums import PaymentStatus, PaymentType, ShopifySyncStatus
+from app.models.enums import OrderStatus, PaymentStatus, PaymentType, ShopifySyncStatus
 from app.models.order import Order
 from app.models.shipment import Shipment
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
@@ -65,6 +65,20 @@ async def _make_order(
         total_amount=Decimal("499.00"),
         payment_type=PaymentType.PREPAID,
         payment_status=PaymentStatus.PAID,
+        # CONFIRMED + a shipping address -- the minimum
+        # `ShiprocketOperationsService._check_shippable` requires, needed
+        # by this file's one `create_shipment_for_order` E2E case; every
+        # other test here exercises `ShopifyFulfillmentService` directly
+        # via `_make_shipment` and never touches order state, so this is
+        # harmless for those.
+        status=OrderStatus.CONFIRMED,
+        shipping_address={
+            "line1": "123 Test St",
+            "city": "Mumbai",
+            "state": "MH",
+            "country": "India",
+            "pin_code": "400001",
+        },
     )
     session.add(order)
     await session.flush()

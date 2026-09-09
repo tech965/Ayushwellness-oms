@@ -54,7 +54,11 @@ class _StubClient:
 
 
 async def _make_order(session: AsyncSession, order_number: str):
-    return await OrderService(session).create_order(
+    """Confirmed, with a shipping address -- see the matching helper's
+    docstring in `test_shiprocket_operations.py` for why both are needed
+    now that `_check_shippable` enforces them.
+    """
+    order = await OrderService(session).create_order(
         actor=None,
         order_number=order_number,
         customer_id=None,
@@ -69,6 +73,17 @@ async def _make_order(session: AsyncSession, order_number: str):
             )
         ],
     )
+    order.status = OrderStatus.CONFIRMED
+    order.shipping_address = {
+        "line1": "123 Test St",
+        "city": "Mumbai",
+        "state": "MH",
+        "country": "India",
+        "pin_code": "400001",
+    }
+    await session.commit()
+    await session.refresh(order)
+    return order
 
 
 def _create_order_response(shipment_id: str, shiprocket_order_id: str) -> dict:
@@ -161,9 +176,6 @@ async def test_confirmed_order_is_removed_from_queue_once_shipped_in_bulk(
     `test_shipment_queue.py`'s single-ship equivalent).
     """
     order = await _make_order(db_session, "BULKSHIP-QUEUE-1")
-    order = await OrderService(db_session).transition_status(
-        order.id, new_status=OrderStatus.CONFIRMED, actor=None, description="test setup"
-    )
     user = await _fulfillment_user(db_session)
 
     client = _StubClient([_create_order_response("7001", "7101")])

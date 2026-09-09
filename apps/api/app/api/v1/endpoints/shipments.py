@@ -57,6 +57,7 @@ def _to_shipment_queue_row(order: Order, shipment: Shipment | None) -> ShipmentQ
         ),
         shipment_id=shipment.id if shipment else None,
         shipment_status=shipment.current_status if shipment else None,
+        shopify_sync_status=shipment.shopify_sync_status if shipment else None,
         awb=shipment.awb if shipment else None,
         courier_name=shipment.courier.name if shipment and shipment.courier else None,
     )

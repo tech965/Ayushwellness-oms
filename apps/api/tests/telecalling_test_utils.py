@@ -115,10 +115,12 @@ async def make_order(
     total_amount: Decimal = Decimal("999.00"),
     order_datetime: datetime | None = None,
     status: OrderStatus = OrderStatus.CONFIRMED,
+    shopify_order_id: str | None = None,
 ) -> Order:
     order = Order(
         order_number=order_number,
         customer_id=customer.id if customer else None,
+        shopify_order_id=shopify_order_id,
         order_datetime=order_datetime or (datetime.now(UTC) - timedelta(days=1)),
         currency="INR",
         subtotal=total_amount,
