@@ -4,6 +4,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 
 import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAuth } from "@/lib/auth-context"
 import { cn } from "@/lib/utils"
@@ -15,9 +16,40 @@ import {
   telecallerNavGroups,
 } from "@/lib/navigation"
 
+/** Rendered instead of any real nav while the current user's roles
+ * haven't resolved yet (`useAuth().isLoading`, or `user` still `null`
+ * for any other reason). The role branching below defaults to the full
+ * Admin `navGroups` whenever none of TELECALLER/TEAM_LEADER/FULFILLMENT/
+ * SHIPMENT_STAFF match `hasRole` -- which is also exactly what
+ * `hasRole` returns for EVERY role while `user` is still `null`
+ * (`query.data?.roles?.includes(role) ?? false`). Without this guard, a
+ * Fulfillment/Telecaller/Team Leader user would see a flash of the full
+ * Admin navigation on every load until their real role arrives -- never
+ * safe to show, even briefly. Neutral loading bars, not a specific
+ * role's shape, so this never itself leaks which nav is about to render.
+ */
+function SidebarNavSkeleton({ collapsed }: { collapsed: boolean }) {
+  return (
+    <nav className="flex flex-col gap-1 px-3 py-4" aria-busy="true" aria-label="Loading navigation">
+      {!collapsed && <Skeleton className="mx-3 mb-1 h-3 w-16" />}
+      {Array.from({ length: 4 }).map((_, i) => (
+        <Skeleton key={i} className={cn("mx-3 h-7 rounded-md", collapsed && "mx-0 size-7")} />
+      ))}
+    </nav>
+  )
+}
+
 export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
   const pathname = usePathname()
-  const { hasRole, hasPermission } = useAuth()
+  const { hasRole, hasPermission, isLoading, user } = useAuth()
+
+  // Never fall through to the role-branching below (whose final `else`
+  // is the full Admin `navGroups`) before the current user's real roles
+  // have loaded -- see `SidebarNavSkeleton` above for why that fallback
+  // is unsafe to reach during loading, not just once resolved.
+  if (isLoading || !user) {
+    return <SidebarNavSkeleton collapsed={collapsed} />
+  }
 
   // A Telecaller/Team Leader gets the minimal role-specific nav instead
   // of the full Admin OMS menu (spec: "Do not show the full Admin OMS

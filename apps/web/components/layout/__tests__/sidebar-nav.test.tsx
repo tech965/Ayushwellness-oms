@@ -37,6 +37,40 @@ function authWithRoles(roles: string[], permissionCodes: string[] = []) {
   }
 }
 
+function authLoading() {
+  return {
+    user: null,
+    permissions: new Set<string>(),
+    isLoading: true,
+    hasPermission: () => false,
+    hasRole: () => false,
+    logout: vi.fn(),
+  }
+}
+
+describe("SidebarNav loading state", () => {
+  it("never renders the full Admin nav (or any role nav) while auth is still loading", () => {
+    mockedUseAuth.mockReturnValue(authLoading())
+    renderWithProviders(<SidebarNav />)
+    // None of the full-nav-only, Fulfillment-only, or Telecaller-only
+    // items may appear -- a stale/default fallthrough to `navGroups`
+    // here would flash the full Admin navigation before the real role
+    // loads, which is exactly the bug this guards against.
+    expect(screen.queryByText("Orders")).not.toBeInTheDocument()
+    expect(screen.queryByText("Integrations")).not.toBeInTheDocument()
+    expect(screen.queryByText("Fulfillment Dashboard")).not.toBeInTheDocument()
+    expect(screen.queryByText("My Assigned Orders")).not.toBeInTheDocument()
+    expect(screen.getByLabelText("Loading navigation")).toBeInTheDocument()
+  })
+
+  it("never renders the full Admin nav while `user` is still null even if isLoading has settled", () => {
+    mockedUseAuth.mockReturnValue({ ...authLoading(), isLoading: false, user: null })
+    renderWithProviders(<SidebarNav />)
+    expect(screen.queryByText("Orders")).not.toBeInTheDocument()
+    expect(screen.getByLabelText("Loading navigation")).toBeInTheDocument()
+  })
+})
+
 describe("SidebarNav role-based navigation", () => {
   it("renders the full Admin nav for a user with no special role", () => {
     mockedUseAuth.mockReturnValue(authWithRoles(["ADMIN"]))

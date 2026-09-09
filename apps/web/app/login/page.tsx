@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useForm } from "react-hook-form"
 
@@ -29,6 +29,7 @@ import { login } from "@/services/auth"
 
 export default function LoginPage() {
   const router = useRouter()
+  const queryClient = useQueryClient()
 
   React.useEffect(() => {
     if (getStoredAccessToken()) {
@@ -43,7 +44,21 @@ export default function LoginPage() {
 
   const mutation = useMutation({
     mutationFn: login,
-    onSuccess: () => router.push("/dashboard"),
+    // Root cause of a previous user's role/nav briefly (or persistently,
+    // within the `["auth", "me"]` query's `staleTime`) rendering after a
+    // DIFFERENT user logs in in the same tab: the `QueryClient` is a
+    // single long-lived instance for the whole app, and this is the one
+    // place a fresh login re-enables that query -- without clearing it
+    // first, React Query happily serves the previous session's cached
+    // response (Admin's roles/permissions, an old user's order list,
+    // etc.) until it naturally goes stale. `logout()` (`lib/auth-
+    // context.tsx`) already does this same `queryClient.clear()`; this
+    // mirrors it on the other side of the same handoff so neither
+    // direction can leak stale cross-user data.
+    onSuccess: () => {
+      queryClient.clear()
+      router.push("/dashboard")
+    },
   })
 
   function onSubmit(values: LoginInput) {
