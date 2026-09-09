@@ -52,6 +52,12 @@ logger = get_logger(__name__)
 # the UI it backs (Part 13).
 _MAX_ERROR_MESSAGE_LENGTH = 2000
 
+# Pushed to the Shopify order on Telecaller confirmation (`OrderService.
+# confirm_order`) -- purely informational; never mark the Shopify order
+# Fulfilled here (that stays gated on a real Shiprocket shipment/AWB, see
+# `sync_fulfillment_for_shipment`).
+CONFIRMATION_TAG = "OMS Confirmed"
+
 
 class ShopifyFulfillmentService:
     def __init__(self, session: AsyncSession) -> None:
@@ -181,6 +187,57 @@ class ShopifyFulfillmentService:
             order_id=str(order.id),
         )
         return shipment
+
+    async def sync_confirmation_tag(self, order_id: uuid.UUID, *, actor: User | None) -> None:
+        """Best-effort outbound push of `CONFIRMATION_TAG` to the Shopify
+        order once a Telecaller confirms it in the OMS -- a purely
+        informational marker proving the OMS is driving the workflow,
+        never a fulfillment signal (`Order.fulfillment_status`/Shopify's
+        own fulfillment state are untouched here, and must stay
+        UNFULFILLED until a real shipment exists).
+
+        Skipped entirely for a non-Shopify order (`shopify_order_id` is
+        `None`, e.g. a manually-created OMS order) -- nothing to tag.
+        Idempotent on Shopify's side (`tagsAdd` is a set-union; re-adding
+        an existing tag is a no-op), so a re-confirm/retry never creates a
+        duplicate tag and needs no local "already tagged" bookkeeping of
+        its own.
+
+        Never raises: same failure-isolation contract as
+        `sync_fulfillment_for_shipment` -- confirming an order in the OMS
+        must never be blocked, delayed, or rolled back by a Shopify-side
+        failure. A failure here is logged only; there is no per-shipment
+        "Retry" affordance for this the way there is for fulfillment sync,
+        since the next successful confirm/resync naturally retries it.
+        """
+        order = await self.orders.get_by_id(order_id)
+        if order is None or not order.shopify_order_id:
+            return
+
+        adapter = self._get_adapter()
+        order_gid = f"gid://shopify/Order/{order.shopify_order_id}"
+        try:
+            await adapter.add_order_tags(order_gid, [CONFIRMATION_TAG])
+        except IntegrationError as exc:
+            logger.warning(
+                "shopify_confirmation_tag_sync_failed", order_id=str(order_id), error=exc.message
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - never let an unexpected error block confirmation
+            logger.warning(
+                "shopify_confirmation_tag_sync_failed", order_id=str(order_id), error=str(exc)
+            )
+            return
+
+        await self.audit.record(
+            user=actor,
+            action="order.shopify_confirmation_tag_synced",
+            entity_type="order",
+            entity_id=str(order_id),
+            new_value={"tag": CONFIRMATION_TAG},
+        )
+        await self.session.commit()
+        logger.info("shopify_confirmation_tag_synced", order_id=str(order_id))
 
     async def _record_failure(
         self, shipment: Shipment, *, actor: User | None, message: str

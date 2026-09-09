@@ -766,3 +766,212 @@ async def test_unconfirm_blocked_when_shopify_already_shows_order_fulfilled(
 
         order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
         assert order_view.json()["data"]["status"] == "confirmed"
+
+
+class _StubShopifyClient:
+    """Matches `ShopifyClient.execute`'s interface -- see
+    `test_shopify_fulfillment.py` for the identical pattern used against
+    the outbound fulfillment push; this one only ever sees `tagsAdd`
+    calls (order confirmation never touches fulfillment).
+    """
+
+    def __init__(self, responses: list) -> None:
+        self._responses = list(responses)
+        self.calls: list[tuple[str, dict | None]] = []
+
+    async def execute(self, query: str, variables: dict | None = None) -> dict:
+        self.calls.append((query, variables))
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _tags_add_success(order_gid: str = "gid://shopify/Order/900001") -> dict:
+    return {"tagsAdd": {"node": {"id": order_gid}, "userErrors": []}}
+
+
+async def test_confirm_keeps_shopify_order_unfulfilled(db_session: AsyncSession) -> None:
+    """Confirming an order in the OMS is not fulfillment -- `OrderService.
+    confirm_order` never touches `Order.fulfillment_status`, and never
+    calls Shiprocket or the Shopify fulfillment push at all (only the
+    confirmation-tag push, covered separately below).
+    """
+    from app.integrations.registry import clear_adapters, register_adapter
+    from app.integrations.shopify.adapter import ShopifyAdapter
+    from app.models.enums import FulfillmentStatus
+    from app.models.shipment import Shipment
+    from sqlalchemy import select
+
+    client = _StubShopifyClient([_tags_add_success()])
+    register_adapter(ShopifyAdapter(client=client))
+    try:
+        leader, telecaller, _other, customer = await _setup(db_session)
+        order = await make_order(
+            db_session,
+            order_number="UNCONF-SHOPIFY-A",
+            customer=customer,
+            status=OrderStatus.PENDING,
+            fulfillment_status=FulfillmentStatus.UNFULFILLED,
+            shopify_order_id="900001",
+        )
+        async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+            await _assign(leader_client, str(order.id), str(telecaller.id))
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+            assert response.status_code == 200
+            data = response.json()["data"]
+            assert data["status"] == "confirmed"
+            # Shopify's own fulfillment status is untouched -- still
+            # UNFULFILLED, never fast-forwarded to FULFILLED by a mere OMS
+            # confirmation.
+            assert data["fulfillment_status"] == "unfulfilled"
+
+        # No Shiprocket shipment was created just because the order was
+        # confirmed -- shipping is a separate, explicit action.
+        shipments = (
+            await db_session.execute(select(Shipment).where(Shipment.order_id == order.id))
+        ).scalars().all()
+        assert shipments == []
+    finally:
+        clear_adapters()
+
+
+async def test_confirm_pushes_the_oms_confirmed_tag_to_shopify(db_session: AsyncSession) -> None:
+    """The confirmation marker is a real outbound `tagsAdd` call against
+    the actual Shopify order, not a local-only flag.
+    """
+    from app.integrations.registry import clear_adapters, register_adapter
+    from app.integrations.shopify.adapter import ShopifyAdapter
+    from app.services.shopify_fulfillment_service import CONFIRMATION_TAG
+
+    client = _StubShopifyClient([_tags_add_success()])
+    register_adapter(ShopifyAdapter(client=client))
+    try:
+        leader, telecaller, _other, customer = await _setup(db_session)
+        order = await make_order(
+            db_session,
+            order_number="UNCONF-SHOPIFY-B",
+            customer=customer,
+            status=OrderStatus.PENDING,
+            shopify_order_id="900002",
+        )
+        async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+            await _assign(leader_client, str(order.id), str(telecaller.id))
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+            assert response.status_code == 200
+
+        assert len(client.calls) == 1
+        _query, variables = client.calls[0]
+        assert variables == {"id": "gid://shopify/Order/900002", "tags": [CONFIRMATION_TAG]}
+    finally:
+        clear_adapters()
+
+
+async def test_confirm_skips_shopify_push_for_a_manual_order(db_session: AsyncSession) -> None:
+    """An order with no `shopify_order_id` (created directly in the OMS)
+    has nothing to tag -- confirming it never calls Shopify at all.
+    """
+    from app.integrations.registry import clear_adapters, register_adapter
+    from app.integrations.shopify.adapter import ShopifyAdapter
+
+    client = _StubShopifyClient([])
+    register_adapter(ShopifyAdapter(client=client))
+    try:
+        leader, telecaller, _other, customer = await _setup(db_session)
+        order = await make_order(
+            db_session,
+            order_number="UNCONF-SHOPIFY-C",
+            customer=customer,
+            status=OrderStatus.PENDING,
+            shopify_order_id=None,
+        )
+        async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+            await _assign(leader_client, str(order.id), str(telecaller.id))
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+            assert response.status_code == 200
+
+        assert client.calls == []
+    finally:
+        clear_adapters()
+
+
+async def test_confirm_succeeds_even_when_the_shopify_tag_push_fails(
+    db_session: AsyncSession,
+) -> None:
+    """OMS confirmation is authoritative -- a Shopify-side failure while
+    pushing the confirmation tag must never block, delay, or roll back an
+    already-successful OMS confirmation.
+    """
+    from app.core.exceptions import IntegrationError
+    from app.integrations.registry import clear_adapters, register_adapter
+    from app.integrations.shopify.adapter import ShopifyAdapter
+
+    client = _StubShopifyClient([IntegrationError("Shopify is down.")])
+    register_adapter(ShopifyAdapter(client=client))
+    try:
+        leader, telecaller, _other, customer = await _setup(db_session)
+        order = await make_order(
+            db_session,
+            order_number="UNCONF-SHOPIFY-D",
+            customer=customer,
+            status=OrderStatus.PENDING,
+            shopify_order_id="900004",
+        )
+        async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+            await _assign(leader_client, str(order.id), str(telecaller.id))
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+            assert response.status_code == 200
+            assert response.json()["data"]["status"] == "confirmed"
+    finally:
+        clear_adapters()
+
+
+async def test_repeated_confirm_retries_never_duplicate_the_shopify_tag(
+    db_session: AsyncSession,
+) -> None:
+    """Re-confirming after an unconfirm (or a bulk-confirm retry hitting
+    an already-confirmed order via the real endpoint) pushes the tag
+    again -- safe because `tagsAdd` is a Shopify-side set-union, so a
+    second identical call is a no-op, never a duplicate tag. This test
+    proves the OMS side issues the call again on every confirm without
+    needing any local "already tagged" bookkeeping.
+    """
+    from app.integrations.registry import clear_adapters, register_adapter
+    from app.integrations.shopify.adapter import ShopifyAdapter
+    from app.services.shopify_fulfillment_service import CONFIRMATION_TAG
+
+    client = _StubShopifyClient([_tags_add_success(), _tags_add_success()])
+    register_adapter(ShopifyAdapter(client=client))
+    try:
+        leader, telecaller, _other, customer = await _setup(db_session)
+        order = await make_order(
+            db_session,
+            order_number="UNCONF-SHOPIFY-E",
+            customer=customer,
+            status=OrderStatus.PENDING,
+            shopify_order_id="900005",
+        )
+        async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+            await _assign(leader_client, str(order.id), str(telecaller.id))
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            first = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+            assert first.status_code == 200
+            unconfirm = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+            assert unconfirm.status_code == 200
+            second = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+            assert second.status_code == 200
+
+        assert len(client.calls) == 2
+        for _query, variables in client.calls:
+            assert variables == {"id": "gid://shopify/Order/900005", "tags": [CONFIRMATION_TAG]}
+    finally:
+        clear_adapters()

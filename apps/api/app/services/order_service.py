@@ -298,6 +298,15 @@ class OrderService:
         `transition_status` never touches them again on any later
         transition (PROCESSING/PACKED/...), so they survive the rest of
         the order's lifecycle untouched.
+
+        Also pushes the `CONFIRMATION_TAG` marker to the Shopify order
+        (`ShopifyFulfillmentService.sync_confirmation_tag`) once the OMS
+        side above has fully committed -- proof the OMS, not Shopify, is
+        driving confirmation, without ever marking the order Fulfilled or
+        touching Shiprocket (a shipment is only ever created by an
+        explicit Ship Order/Bulk Ship action, never by confirming). Best
+        effort: a Shopify failure here never undoes or fails the
+        confirmation that already succeeded.
         """
         order = await self.transition_status(
             order_id,
@@ -309,6 +318,15 @@ class OrderService:
             order, confirmed_by_telecaller_id=actor.id, confirmed_at=datetime.now(UTC)
         )
         await self.session.commit()
+
+        # Local import: avoids a module-load-order dependency between
+        # `order_service` and `shopify_fulfillment_service` for the one
+        # code path that needs it, matching this codebase's existing
+        # convention for occasional cross-service calls (see the same
+        # pattern in `unconfirm_order` for `shiprocket_service`).
+        from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
+
+        await ShopifyFulfillmentService(self.session).sync_confirmation_tag(order_id, actor=actor)
         return await self.get_order(order_id)
 
     async def unconfirm_order(self, order_id: uuid.UUID, *, actor: User) -> Order:

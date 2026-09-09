@@ -60,3 +60,21 @@ mutation FulfillmentCreate($fulfillment: FulfillmentInput!) {
   }
 }
 """
+
+# `tagsAdd` is a set-union on Shopify's side -- adding a tag the order
+# already has is a documented no-op, never a duplicate. That's what makes
+# `ShopifyFulfillmentService.sync_confirmation_tag` safe to call on every
+# confirm/retry with no local "already tagged" bookkeeping of its own.
+TAGS_ADD_MUTATION = """
+mutation TagsAdd($id: ID!, $tags: [String!]!) {
+  tagsAdd(id: $id, tags: $tags) {
+    node {
+      id
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+"""
