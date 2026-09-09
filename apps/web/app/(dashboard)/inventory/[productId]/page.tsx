@@ -27,10 +27,10 @@ import { formatDateTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { usePaginationState } from "@/lib/use-pagination"
 import {
-  useAdjustProductStock,
   useAdjustVariantStock,
   useInventoryMovements,
   useInventoryProductStock,
+  useSetCatalogVariantName,
   useSetProductName,
   useSetVariantName,
   useUpdatePacketsPerBox,
@@ -42,6 +42,7 @@ import {
   type InventoryMovement,
   type InventoryMovementType,
   type InventoryProductStock,
+  type OmsCatalogVariant,
   type ProductVariantStockLine,
   type StockStatus,
 } from "@/types/inventory"
@@ -60,13 +61,11 @@ function StockStatusBadge({ status }: { status: StockStatus }) {
   )
 }
 
-/** Manual "Edit Name" -- sets a custom display name the Inventory UI shows
- * instead of the Shopify name. Presentational only: the backend never
- * touches the real Shopify title, stock, or the movement ledger, and a
- * later Shopify product sync does not overwrite the custom name.
+/** Manual "Edit Name" for a PRODUCT or an underlying Shopify VARIANT --
+ * sets a custom display name (title override). Presentational only: the
+ * backend never touches the real Shopify title, stock, or the movement
+ * ledger, and a later Shopify sync does not overwrite the custom name.
  * "Reset to Shopify Name" (shown only when a custom name is set) clears it.
- * `mutation` is `useSetProductName(id)` / `useSetVariantName(id)` -- same
- * shape; pass `null` to reset, a trimmed string to set.
  */
 export function EditNameDialog({
   kind,
@@ -207,32 +206,108 @@ function VariantNameEditor({ variant }: { variant: ProductVariantStockLine }) {
   )
 }
 
-/** Product-level "Edit Stock". Absolute target, never a raw +/- delta.
- * One product = ONE card, but the underlying variant records are edited
- * directly: a single-variant product gets one "New stock" field (backend
- * forwards to that variant); a multi-variant product gets one row per
- * underlying variant -- no product-level distribution rule is invented.
- * The backend computes the delta / new balance and writes one
- * `InventoryMovement` per changed variant.
+/** Rename an OMS-visible catalog variant (e.g. "Ghutka Flavour"). For an
+ * *implicit* OMS variant (`catalog_variant_id === null`, 1:1 with its
+ * single underlying Shopify row) this falls back to editing that row's
+ * title override instead.
  */
-function EditStockDialog({ product }: { product: InventoryProductStock }) {
-  const single = product.variant_count === 1
-  const adjustProduct = useAdjustProductStock(product.product_id)
-  const adjustVariant = useAdjustVariantStock()
+function OmsVariantNameEditor({ group }: { group: OmsCatalogVariant }) {
+  if (group.catalog_variant_id === null) {
+    const only = group.underlying_variants[0]
+    return only ? <VariantNameEditor variant={only} /> : null
+  }
+  return (
+    <CatalogVariantNameDialog id={group.catalog_variant_id} currentName={group.name} />
+  )
+}
 
+function CatalogVariantNameDialog({
+  id,
+  currentName,
+}: {
+  id: string
+  currentName: string
+}) {
+  const mutation = useSetCatalogVariantName(id)
+  const [open, setOpen] = React.useState(false)
+  const [value, setValue] = React.useState(currentName)
+
+  function openDialog() {
+    setValue(currentName)
+    setOpen(true)
+  }
+
+  const trimmed = value.trim()
+  const isEmpty = trimmed.length === 0
+  const canSave = !isEmpty && trimmed.length <= 255 && trimmed !== currentName
+
+  function save() {
+    mutation.mutate(trimmed, {
+      onSuccess: () => {
+        toast.success("Catalog variant renamed.")
+        setOpen(false)
+      },
+      onError: (error) => toast.error(getApiErrorMessage(error)),
+    })
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Button variant="ghost" size="sm" onClick={openDialog}>
+        Edit Name
+      </Button>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit Variant Name</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="cv-name">Display name</Label>
+          <Input
+            id="cv-name"
+            value={value}
+            maxLength={255}
+            onChange={(e) => setValue(e.target.value)}
+            autoFocus
+          />
+          {isEmpty && <p className="text-sm text-red-600">Name cannot be empty.</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button disabled={!canSave || mutation.isPending} onClick={save}>
+            {mutation.isPending ? "Saving..." : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** "Edit Stock" for ONE OMS-visible variant. Absolute target, never a
+ * raw +/- delta, and NEVER a single aggregate number distributed across
+ * the group: one editable row per underlying Shopify `ProductVariant`
+ * (one row when the OMS variant maps 1:1). Each changed row is its own
+ * `POST /inventory/stock/{id}/adjust` -> one `InventoryMovement`.
+ */
+function OmsEditStockDialog({ group }: { group: OmsCatalogVariant }) {
+  const adjust = useAdjustVariantStock()
   const [open, setOpen] = React.useState(false)
   const [reason, setReason] = React.useState("")
   const [targets, setTargets] = React.useState<Record<string, string>>({})
+  const multi = group.underlying_variant_count > 1
 
   function openDialog() {
     setReason("")
     setTargets(
-      Object.fromEntries(product.variants.map((v) => [v.id, String(v.available_boxes)]))
+      Object.fromEntries(
+        group.underlying_variants.map((v) => [v.id, String(v.available_boxes)])
+      )
     )
     setOpen(true)
   }
 
-  const rows = product.variants.map((v) => {
+  const rows = group.underlying_variants.map((v) => {
     const raw = targets[v.id] ?? String(v.available_boxes)
     const parsed = Number(raw)
     const valid = raw !== "" && Number.isInteger(parsed) && parsed >= 0
@@ -249,28 +324,20 @@ function EditStockDialog({ product }: { product: InventoryProductStock }) {
   const anyInvalid = rows.some((r) => !r.valid)
   const changedRows = rows.filter((r) => r.changed)
   const canSave = !anyInvalid && changedRows.length > 0 && reason.trim().length > 0
-  const pending = adjustProduct.isPending || adjustVariant.isPending
 
   async function save() {
     try {
-      if (single) {
-        await adjustProduct.mutateAsync({
-          target_boxes: changedRows[0].parsed,
+      for (const r of changedRows) {
+        await adjust.mutateAsync({
+          variantId: r.v.id,
+          target_boxes: r.parsed,
           reason: reason.trim(),
         })
-      } else {
-        for (const r of changedRows) {
-          await adjustVariant.mutateAsync({
-            variantId: r.v.id,
-            target_boxes: r.parsed,
-            reason: reason.trim(),
-          })
-        }
       }
       toast.success(
         changedRows.length === 1
           ? "Stock adjusted."
-          : `Stock adjusted for ${changedRows.length} variants.`
+          : `Stock adjusted for ${changedRows.length} SKUs.`
       )
       setOpen(false)
     } catch (error) {
@@ -285,19 +352,20 @@ function EditStockDialog({ product }: { product: InventoryProductStock }) {
       </Button>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Edit Stock — {product.product_name}</DialogTitle>
+          <DialogTitle>Edit Stock — {group.name}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          {!single && (
+          {multi && (
             <p className="text-muted-foreground text-sm">
-              Enter the new box count for each variant you want to change. Each edit is
-              recorded as its own inventory movement.
+              This OMS variant covers several Shopify pack SKUs. Enter the new box count
+              for each SKU you want to change — each edit is recorded as its own inventory
+              movement. Nothing is auto-distributed.
             </p>
           )}
           <div className="flex flex-col gap-3">
             {rows.map(({ v, raw, valid, delta }) => (
               <div key={v.id} className="flex flex-col gap-1.5">
-                {!single && (
+                {multi && (
                   <div className="text-sm font-medium">
                     {v.display_title}
                     <span className="text-muted-foreground font-normal">
@@ -361,8 +429,8 @@ function EditStockDialog({ product }: { product: InventoryProductStock }) {
           <Button variant="outline" onClick={() => setOpen(false)}>
             Cancel
           </Button>
-          <Button disabled={!canSave || pending} onClick={save}>
-            {pending ? "Saving..." : "Save"}
+          <Button disabled={!canSave || adjust.isPending} onClick={save}>
+            {adjust.isPending ? "Saving..." : "Save"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -370,9 +438,9 @@ function EditStockDialog({ product }: { product: InventoryProductStock }) {
   )
 }
 
-/** Packets-per-box configuration for one underlying variant -- changes
- * only the packets<->boxes conversion/display, never `available_boxes`
- * itself, and never rewrites historical movement quantities.
+/** Packets-per-box configuration for one underlying Shopify variant --
+ * changes only the packets<->boxes conversion/display, never
+ * `available_boxes` itself, and never rewrites historical movements.
  */
 function PacketsPerBoxDialog({ variant }: { variant: ProductVariantStockLine }) {
   const [open, setOpen] = React.useState(false)
@@ -435,24 +503,31 @@ function PacketsPerBoxDialog({ variant }: { variant: ProductVariantStockLine }) 
   )
 }
 
-/** The underlying variant records, kept intact but folded into the ONE
- * product card as a collapsible list (rows, not separate cards). Lets an
- * admin still rename a variant or set its packets-per-box.
+/** The underlying Shopify variant rows for ONE OMS variant -- kept intact
+ * and shown only inside a clearly secondary, collapsible section (rows,
+ * never OMS-visible cards).
  */
-function UnderlyingVariants({
-  product,
+function UnderlyingShopifyVariants({
+  group,
   canManage,
 }: {
-  product: InventoryProductStock
+  group: OmsCatalogVariant
   canManage: boolean
 }) {
+  if (group.underlying_variant_count === 0) {
+    return (
+      <p className="text-muted-foreground mt-3 text-sm">
+        No Shopify variants are grouped under this OMS variant yet.
+      </p>
+    )
+  }
   return (
-    <details className="mt-4">
+    <details className="mt-3">
       <summary className="text-muted-foreground cursor-pointer text-sm select-none">
-        Underlying variants ({product.variant_count})
+        Underlying Shopify variants ({group.underlying_variant_count})
       </summary>
       <div className="mt-2 flex flex-col divide-y rounded-md border">
-        {product.variants.map((v) => (
+        {group.underlying_variants.map((v) => (
           <div
             key={v.id}
             className="flex flex-wrap items-center justify-between gap-2 p-2 text-sm"
@@ -477,83 +552,22 @@ function UnderlyingVariants({
   )
 }
 
-function ProductStockCard({
-  product,
-  historyShown,
-  onToggleHistory,
-}: {
-  product: InventoryProductStock
-  historyShown: boolean
-  onToggleHistory: () => void
-}) {
-  const { hasPermission } = useAuth()
-  const canManage = hasPermission("inventory.manage")
-  const packSize =
-    product.packets_per_box_uniform && product.variants[0]
-      ? `${product.variants[0].packets_per_box} packets/box`
-      : "mixed pack sizes"
-
-  return (
-    <Card>
-      <CardHeader className="flex-row items-start justify-between">
-        <div>
-          <CardTitle>{product.product_name}</CardTitle>
-          <p className="text-muted-foreground text-sm">
-            {product.variant_count} variant{product.variant_count === 1 ? "" : "s"} ·{" "}
-            {packSize}
-          </p>
-        </div>
-        <StockStatusBadge status={product.stock_status} />
-      </CardHeader>
-      <CardContent>
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
-          <div>
-            <dt className="text-muted-foreground">Available stock</dt>
-            <dd className="font-medium">
-              {product.available_boxes.toLocaleString()} boxes
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Total packets</dt>
-            <dd className="font-medium">{product.total_packets.toLocaleString()}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Status</dt>
-            <dd className="font-medium">{STOCK_STATUS_LABELS[product.stock_status]}</dd>
-          </div>
-        </dl>
-        <div className="mt-4 flex flex-wrap gap-2">
-          {canManage && <EditStockDialog product={product} />}
-          {canManage && (
-            <ProductNameEditor
-              productId={product.product_id}
-              displayName={product.product_name}
-              shopifyName={product.title}
-              hasOverride={product.title_override !== null}
-            />
-          )}
-          <Button variant="ghost" size="sm" onClick={onToggleHistory}>
-            {historyShown ? "Hide History" : "History"}
-          </Button>
-        </div>
-        <UnderlyingVariants product={product} canManage={canManage} />
-      </CardContent>
-    </Card>
-  )
-}
-
 function movementTypeLabel(type: InventoryMovement["movement_type"]): string {
   return (
     INVENTORY_MOVEMENT_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type
   )
 }
 
-function MovementHistorySection({
-  productId,
-  productName,
+/** Movement history for ONE OMS variant -- spans every underlying Shopify
+ * SKU grouped under it (via `catalog_variant_id`), or the single row for
+ * an implicit OMS variant. No `InventoryMovement` row is rewritten.
+ */
+function OmsVariantHistory({
+  group,
+  spansMultipleSkus,
 }: {
-  productId: string
-  productName: string
+  group: OmsCatalogVariant
+  spansMultipleSkus: boolean
 }) {
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const [movementType, setMovementType] = React.useState<
@@ -562,18 +576,19 @@ function MovementHistorySection({
   const query = useInventoryMovements({
     page,
     pageSize,
-    product_id: productId,
+    catalog_variant_id: group.catalog_variant_id ?? undefined,
+    product_variant_id:
+      group.catalog_variant_id === null ? group.underlying_variants[0]?.id : undefined,
     movement_type: movementType,
   })
 
   const columns: DataTableColumn<InventoryMovement>[] = [
     { id: "when", header: "Date/time", cell: (row) => formatDateTime(row.created_at) },
     {
-      id: "variant",
-      header: "Variant",
-      cell: (row) => row.variant_display_title ?? row.variant_title ?? row.sku ?? "—",
+      id: "sku",
+      header: "Shopify SKU",
+      cell: (row) => row.sku ?? "—",
     },
-    { id: "sku", header: "SKU", cell: (row) => row.sku ?? "—" },
     {
       id: "type",
       header: "Movement",
@@ -607,8 +622,16 @@ function MovementHistorySection({
   ]
 
   return (
-    <div className="flex flex-col gap-3">
-      <h2 className="text-lg font-semibold">Movement History — {productName}</h2>
+    <div className="mt-3 flex flex-col gap-2 border-t pt-3">
+      <div className="text-sm font-semibold">
+        Movement History — {group.name}
+        {spansMultipleSkus && (
+          <span className="text-muted-foreground font-normal">
+            {" "}
+            (spans {group.underlying_variant_count} Shopify SKUs)
+          </span>
+        )}
+      </div>
       <FilterBar
         statusValue={movementType}
         onStatusChange={(value) => {
@@ -639,49 +662,131 @@ function MovementHistorySection({
   )
 }
 
+function OmsVariantCard({ group }: { group: OmsCatalogVariant }) {
+  const { hasPermission } = useAuth()
+  const canManage = hasPermission("inventory.manage")
+  const [showHistory, setShowHistory] = React.useState(false)
+  const spansMultipleSkus = group.underlying_variant_count > 1
+
+  return (
+    <Card>
+      <CardHeader className="flex-row items-start justify-between">
+        <div>
+          <CardTitle>{group.name}</CardTitle>
+          <p className="text-muted-foreground text-sm">
+            {group.underlying_variant_count} Shopify SKU
+            {group.underlying_variant_count === 1 ? "" : "s"}
+            {" · "}
+            {group.packets_per_box_uniform && group.underlying_variants[0]
+              ? `${group.underlying_variants[0].packets_per_box} packets/box`
+              : "mixed pack sizes"}
+          </p>
+        </div>
+        <StockStatusBadge status={group.stock_status} />
+      </CardHeader>
+      <CardContent>
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
+          <div>
+            <dt className="text-muted-foreground">Available stock</dt>
+            <dd className="font-medium">
+              {group.available_boxes.toLocaleString()} boxes
+            </dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Total packets</dt>
+            <dd className="font-medium">{group.total_packets.toLocaleString()}</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Status</dt>
+            <dd className="font-medium">{STOCK_STATUS_LABELS[group.stock_status]}</dd>
+          </div>
+        </dl>
+        <div
+          className="mt-4 flex flex-wrap gap-2"
+          data-testid={`oms-variant-actions-${group.catalog_variant_id ?? group.underlying_variants[0]?.id ?? group.name}`}
+        >
+          {canManage && group.underlying_variant_count > 0 && (
+            <OmsEditStockDialog group={group} />
+          )}
+          {canManage && <OmsVariantNameEditor group={group} />}
+          <Button variant="ghost" size="sm" onClick={() => setShowHistory((s) => !s)}>
+            {showHistory ? "Hide History" : "History"}
+          </Button>
+        </div>
+        <UnderlyingShopifyVariants group={group} canManage={canManage} />
+        {showHistory && (
+          <OmsVariantHistory group={group} spansMultipleSkus={spansMultipleSkus} />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function ProductInventory({ product }: { product: InventoryProductStock }) {
+  const { hasPermission } = useAuth()
+  const canManage = hasPermission("inventory.manage")
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="bg-muted/40 flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm">
+        <div>
+          <span className="text-muted-foreground">Product total: </span>
+          <span className="font-semibold">
+            {product.available_boxes.toLocaleString()} boxes
+          </span>
+          <span className="text-muted-foreground">
+            {" "}
+            · {product.total_packets.toLocaleString()} packets ·{" "}
+            {product.oms_variant_count} OMS variant
+            {product.oms_variant_count === 1 ? "" : "s"} ·{" "}
+            {product.underlying_variant_count} Shopify SKUs
+          </span>
+        </div>
+        {canManage && (
+          <ProductNameEditor
+            productId={product.product_id}
+            displayName={product.product_name}
+            shopifyName={product.title}
+            hasOverride={product.title_override !== null}
+          />
+        )}
+      </div>
+
+      {product.oms_variants.map((group) => (
+        <OmsVariantCard
+          key={group.catalog_variant_id ?? group.underlying_variants[0]?.id ?? group.name}
+          group={group}
+        />
+      ))}
+    </div>
+  )
+}
+
 export default function InventoryProductPage() {
   const params = useParams<{ productId: string }>()
   const productId = params.productId
   const query = useInventoryProductStock(productId)
-  const [showHistory, setShowHistory] = React.useState(true)
-
-  const product = query.data
 
   return (
     <>
       <PageHeader
-        title={product?.product_name ?? "Product inventory"}
-        description="One inventory card per product. Stock is in boxes, owned by the OMS and moved only by manual edits and Shiprocket dispatch/RTO events — never by Shopify."
+        title={query.data?.product_name ?? "Product inventory"}
+        description="OMS-visible variants only. Stock is in boxes, owned by the OMS and moved only by manual edits and Shiprocket dispatch/RTO events — never by Shopify."
         backHref="/inventory"
         backLabel="Back to Inventory"
       />
-      <div className="flex flex-col gap-8">
-        <QueryStates
-          isLoading={query.isLoading}
-          isError={query.isError}
-          error={query.error}
-          data={query.data}
-          isEmpty={(data) => data.variant_count === 0}
-          onRetry={() => void query.refetch()}
-          emptyTitle="No stock records"
-          emptyDescription="This product has no variants yet."
-        >
-          {(data) => (
-            <ProductStockCard
-              product={data}
-              historyShown={showHistory}
-              onToggleHistory={() => setShowHistory((s) => !s)}
-            />
-          )}
-        </QueryStates>
-
-        {showHistory && product && (
-          <MovementHistorySection
-            productId={productId}
-            productName={product.product_name}
-          />
-        )}
-      </div>
+      <QueryStates
+        isLoading={query.isLoading}
+        isError={query.isError}
+        error={query.error}
+        data={query.data}
+        isEmpty={(data) => data.oms_variants.length === 0}
+        onRetry={() => void query.refetch()}
+        emptyTitle="No stock records"
+        emptyDescription="This product has no variants yet."
+      >
+        {(data) => <ProductInventory product={data} />}
+      </QueryStates>
     </>
   )
 }

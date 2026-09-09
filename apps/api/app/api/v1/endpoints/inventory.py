@@ -24,12 +24,14 @@ from app.models.enums import InventoryMovementType
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.inventory import (
     CatalogNameResponse,
+    CatalogVariantNameUpdateRequest,
     InventoryAdjustmentRequest,
     InventoryMovementResponse,
     InventoryProductStockResponse,
     InventoryProductSummaryResponse,
     InventoryProductVariantsResponse,
     InventoryVariantResponse,
+    OmsCatalogVariantResponse,
     PacketsPerBoxUpdateRequest,
     ProductNameUpdateRequest,
     ProductStockAdjustmentRequest,
@@ -37,7 +39,7 @@ from app.schemas.inventory import (
     VariantNameUpdateRequest,
 )
 from app.schemas.response import ApiResponse, PaginatedResponse
-from app.services.inventory_service import InventoryService
+from app.services.inventory_service import InventoryService, OmsVariantGroup
 
 router = APIRouter()
 
@@ -72,18 +74,58 @@ def _variant_response(variant, *, threshold: int) -> InventoryVariantResponse:  
     )
 
 
-def _product_stock_response(  # noqa: ANN001
-    product, variants, *, threshold: int
-) -> InventoryProductStockResponse:
-    """Aggregate a product's underlying `ProductVariant` rows into the ONE
-    product-level Inventory card. Boxes are the common unit for every
-    variant, so `available_boxes` is a plain sum; `total_packets` sums
-    each variant's own `boxes * packets_per_box`. Never a stored record --
-    recomputed from live variant rows on every read.
+def _variant_stock_line(variant, *, threshold: int) -> ProductVariantStockLine:  # noqa: ANN001
+    return ProductVariantStockLine(
+        id=variant.id,
+        sku=variant.sku,
+        variant_title=variant.title,
+        variant_title_override=variant.title_override,
+        display_title=_variant_display_title(variant),
+        available_boxes=variant.available_quantity,
+        packets_per_box=variant.packets_per_box,
+        total_packets=variant.available_quantity * variant.packets_per_box,
+        stock_status=InventoryService.compute_stock_status(variant.available_quantity, threshold),
+    )
+
+
+def _oms_variant_response(group: OmsVariantGroup, *, threshold: int) -> OmsCatalogVariantResponse:
+    """Aggregate ONE OMS-visible variant from its underlying Shopify
+    `ProductVariant` rows. `available_boxes` is a plain SUM of boxes (the
+    common unit); `total_packets` sums each row's own
+    `boxes * packets_per_box`; `packets_per_box_uniform` is False when the
+    grouped rows disagree -- NO single conversion ratio is invented.
     """
-    available_boxes = sum(v.available_quantity for v in variants)
-    total_packets = sum(v.available_quantity * v.packets_per_box for v in variants)
-    pack_sizes = {v.packets_per_box for v in variants}
+    members = group.variants
+    available_boxes = sum(v.available_quantity for v in members)
+    total_packets = sum(v.available_quantity * v.packets_per_box for v in members)
+    pack_sizes = {v.packets_per_box for v in members}
+    return OmsCatalogVariantResponse(
+        catalog_variant_id=group.catalog_variant_id,
+        name=group.name,
+        display_order=group.display_order,
+        is_active=group.is_active,
+        available_boxes=available_boxes,
+        total_packets=total_packets,
+        stock_status=InventoryService.compute_stock_status(available_boxes, threshold),
+        packets_per_box_uniform=len(pack_sizes) <= 1,
+        underlying_variant_count=len(members),
+        underlying_variants=[_variant_stock_line(v, threshold=threshold) for v in members],
+    )
+
+
+def _product_stock_response(  # noqa: ANN001
+    product, oms_groups, *, threshold: int
+) -> InventoryProductStockResponse:
+    """Product detail payload. `oms_variants` is the only variant view the
+    UI shows (3 for Aayush Herbal Masala, 1 for every other grouped
+    product). Product totals sum across EVERY underlying `ProductVariant`,
+    same formula as each OMS-variant aggregate. Nothing is stored --
+    recomputed from live rows on every read.
+    """
+    all_underlying = [v for g in oms_groups for v in g.variants]
+    available_boxes = sum(v.available_quantity for v in all_underlying)
+    total_packets = sum(v.available_quantity * v.packets_per_box for v in all_underlying)
+    pack_sizes = {v.packets_per_box for v in all_underlying}
     return InventoryProductStockResponse(
         product_id=product.id,
         product_name=_product_display_title(product),
@@ -92,23 +134,10 @@ def _product_stock_response(  # noqa: ANN001
         available_boxes=available_boxes,
         total_packets=total_packets,
         stock_status=InventoryService.compute_stock_status(available_boxes, threshold),
-        variant_count=len(variants),
         packets_per_box_uniform=len(pack_sizes) <= 1,
-        variant_ids=[v.id for v in variants],
-        variants=[
-            ProductVariantStockLine(
-                id=v.id,
-                sku=v.sku,
-                variant_title=v.title,
-                variant_title_override=v.title_override,
-                display_title=_variant_display_title(v),
-                available_boxes=v.available_quantity,
-                packets_per_box=v.packets_per_box,
-                total_packets=v.available_quantity * v.packets_per_box,
-                stock_status=InventoryService.compute_stock_status(v.available_quantity, threshold),
-            )
-            for v in variants
-        ],
+        oms_variant_count=len(oms_groups),
+        underlying_variant_count=len(all_underlying),
+        oms_variants=[_oms_variant_response(g, threshold=threshold) for g in oms_groups],
     )
 
 
@@ -144,6 +173,7 @@ def _movement_response(movement) -> InventoryMovementResponse:  # noqa: ANN001
         product_title=product.title if product else None,
         variant_title=variant.title if variant else None,
         variant_display_title=_variant_display_title(variant) if variant else None,
+        catalog_variant_id=variant.catalog_variant_id if variant else None,
         sku=variant.sku if variant else None,
         movement_type=movement.movement_type,
         quantity_delta=movement.quantity_delta,
@@ -184,6 +214,13 @@ async def list_product_stock(
         total_boxes = sum(v.available_quantity for v in variants)
         total_packets = sum(v.available_quantity * v.packets_per_box for v in variants)
         worst_status = InventoryService.compute_stock_status(total_boxes, threshold)
+        # OMS-visible variant count = declared CatalogVariants + every
+        # ProductVariant not yet grouped (each of those is its own
+        # implicit OMS variant). Relationships eager-loaded by
+        # `InventoryProductRepository.search_query`.
+        oms_variant_count = len(product.catalog_variants) + sum(
+            1 for v in variants if v.catalog_variant_id is None
+        )
         data.append(
             InventoryProductSummaryResponse(
                 id=product.id,
@@ -191,7 +228,7 @@ async def list_product_stock(
                 title_override=product.title_override,
                 display_title=_product_display_title(product),
                 vendor=product.vendor,
-                variant_count=len(variants),
+                variant_count=oms_variant_count,
                 total_available_boxes=total_boxes,
                 total_packets=total_packets,
                 stock_status=worst_status,
@@ -234,14 +271,15 @@ async def get_product_stock(
     session: Any = Depends(get_db),
     _: User = Depends(require_permission("inventory.read")),
 ) -> ApiResponse[InventoryProductStockResponse]:
-    """The ONE product-level Inventory card: the product's total OMS stock,
-    aggregated live from its underlying `ProductVariant` rows (which are
-    kept intact and still carry their own SKU / packets_per_box / ledger).
+    """Product detail: the OMS-visible variants only (3 for Aayush Herbal
+    Masala, 1 for every other grouped product), each aggregating its
+    underlying Shopify `ProductVariant` rows -- which stay intact and
+    keep their own SKU / packets_per_box / movement ledger.
     """
     service = InventoryService(session)
     threshold = await service.get_low_stock_threshold()
-    product, variants = await service.list_variants_for_product(product_id)
-    return ApiResponse(data=_product_stock_response(product, variants, threshold=threshold))
+    product, oms_groups = await service.get_oms_variants_for_product(product_id)
+    return ApiResponse(data=_product_stock_response(product, oms_groups, threshold=threshold))
 
 
 @router.get("/stock/{variant_id}", response_model=ApiResponse[InventoryVariantResponse])
@@ -260,6 +298,10 @@ async def get_stock(
 async def list_movements(
     product_variant_id: uuid.UUID | None = Query(default=None),
     product_id: uuid.UUID | None = Query(default=None),
+    catalog_variant_id: uuid.UUID | None = Query(
+        default=None,
+        description="OMS-visible variant: movements across all its underlying Shopify SKUs.",
+    ),
     order_id: uuid.UUID | None = Query(default=None),
     movement_type: str | None = Query(default=None),
     page_params: PageParams = Depends(pagination_params),
@@ -272,6 +314,7 @@ async def list_movements(
         sort_params=sort_params,
         product_variant_id=product_variant_id,
         product_id=product_id,
+        catalog_variant_id=catalog_variant_id,
         order_id=order_id,
         movement_type=movement_type,
     )
@@ -397,3 +440,29 @@ async def reset_variant_name(
         variant_id, name=None, actor=current_user
     )
     return ApiResponse(data=_catalog_name_response(variant), message="Reset to Shopify name.")
+
+
+@router.patch(
+    "/catalog-variants/{catalog_variant_id}/name",
+    response_model=ApiResponse[OmsCatalogVariantResponse],
+)
+async def set_catalog_variant_name(
+    catalog_variant_id: uuid.UUID,
+    payload: CatalogVariantNameUpdateRequest,
+    session: Any = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory.manage")),
+) -> ApiResponse[OmsCatalogVariantResponse]:
+    """Rename an OMS-visible catalog variant (e.g. "Ghutka Flavour").
+    Presentation only -- no `ProductVariant`, stock, or ledger row is
+    touched, and Shopify sync never reads or writes this name.
+    """
+    service = InventoryService(session)
+    cv = await service.set_catalog_variant_name(
+        catalog_variant_id, name=payload.name, actor=current_user
+    )
+    threshold = await service.get_low_stock_threshold()
+    _product, oms_groups = await service.get_oms_variants_for_product(cv.product_id)
+    group = next(g for g in oms_groups if g.catalog_variant_id == cv.id)
+    return ApiResponse(
+        data=_oms_variant_response(group, threshold=threshold), message="Catalog variant renamed."
+    )

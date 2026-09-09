@@ -20,7 +20,7 @@ from app.models.inventory import InventoryMovement
 from app.models.ndr import NDR
 from app.models.order import Order, OrderEvent, OrderItem
 from app.models.payment import Payment, PaymentTransaction
-from app.models.product import Product, ProductVariant
+from app.models.product import CatalogVariant, Product, ProductVariant
 from app.models.rbac import Permission, Role, RolePermission, UserRole
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.models.refund import Refund
@@ -56,6 +56,7 @@ __all__ = [
     "OrderItem",
     "Payment",
     "PaymentTransaction",
+    "CatalogVariant",
     "Product",
     "ProductVariant",
     "Permission",

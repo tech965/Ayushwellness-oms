@@ -1012,12 +1012,13 @@ async def _make_product_with_variants(
     return product, made
 
 
-async def test_product_stock_endpoint_returns_one_aggregate_not_per_variant(
+async def test_product_stock_endpoint_ungrouped_falls_back_to_implicit_oms_variants(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
-    """A product with 3 'Pack of N' variants resolves to ONE product-level
-    stock response -- not three -- with the boxes summed and every
-    underlying variant still listed (records preserved, not merged away).
+    """Before any CatalogVariant grouping is assigned, each ungrouped
+    ProductVariant is its own implicit OMS-visible variant -- behaviour is
+    unchanged from before the grouping layer. Product totals sum across
+    every underlying row; records are preserved, never merged.
     """
     product, variants = await _make_product_with_variants(
         db_session,
@@ -1039,24 +1040,27 @@ async def test_product_stock_endpoint_returns_one_aggregate_not_per_variant(
         assert body["product_id"] == str(product.id)
         assert body["available_boxes"] == 993  # 300 + 400 + 293, not hardcoded
         assert body["total_packets"] == 993  # Σ boxes * packets_per_box (all 1)
-        assert body["variant_count"] == 3
         assert body["packets_per_box_uniform"] is True
-        assert set(body["variant_ids"]) == {str(v.id) for v in variants}
-        assert len(body["variants"]) == 3  # underlying rows preserved
-        assert {v["sku"] for v in body["variants"]} == {"PK-1", "PK-2", "PK-3"}
+        assert body["oms_variant_count"] == 3  # 3 ungrouped -> 3 implicit OMS variants
+        assert body["underlying_variant_count"] == 3
+        assert all(g["catalog_variant_id"] is None for g in body["oms_variants"])
+        underlying = [u for g in body["oms_variants"] for u in g["underlying_variants"]]
+        assert {u["sku"] for u in underlying} == {"PK-1", "PK-2", "PK-3"}
         assert body["stock_status"] == "in_stock"
 
 
-async def test_product_stock_endpoint_flags_mixed_pack_sizes_without_merging_units(
+async def test_grouped_oms_variant_flags_mixed_pack_sizes_without_merging_units(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
-    """Variants with different `packets_per_box` are NOT collapsed to a
-    single fabricated ratio: `available_boxes` is still a plain box sum
-    (boxes are the common unit), `total_packets` is the sum of each
-    variant's own boxes*packets_per_box, and `packets_per_box_uniform`
-    is False so the UI can say 'mixed pack sizes'.
+    """An OMS variant grouping rows with different `packets_per_box` does
+    NOT collapse them to a fabricated ratio: `available_boxes` is a plain
+    box sum, `total_packets` sums each row's own boxes*packets_per_box,
+    and `packets_per_box_uniform` is False so the UI can say 'mixed pack
+    sizes'.
     """
-    product, _ = await _make_product_with_variants(
+    from app.models.product import CatalogVariant
+
+    product, variants = await _make_product_with_variants(
         db_session,
         key="MIX1",
         variants=[
@@ -1065,6 +1069,12 @@ async def test_product_stock_endpoint_flags_mixed_pack_sizes_without_merging_uni
             {"sku": "MIX-90", "available_quantity": 2, "packets_per_box": 90},
         ],
     )
+    cv = CatalogVariant(product_id=product.id, name="Herbal Masala", display_order=0)
+    db_session.add(cv)
+    await db_session.flush()
+    for v in variants:
+        v.catalog_variant_id = cv.id
+    await db_session.commit()
 
     async with await make_authenticated_client(
         db_session, permission_codes=["inventory.read"]
@@ -1073,10 +1083,14 @@ async def test_product_stock_endpoint_flags_mixed_pack_sizes_without_merging_uni
             await client.get(f"/api/v1/inventory/products/{product.id}/stock")
         ).json()["data"]
 
-    assert body["available_boxes"] == 17  # 10 + 5 + 2 boxes
-    assert body["total_packets"] == 10 * 30 + 5 * 60 + 2 * 90  # 780, per-variant factors
-    assert body["packets_per_box_uniform"] is False
-    per_variant = {v["sku"]: v for v in body["variants"]}
+    assert body["oms_variant_count"] == 1
+    assert body["underlying_variant_count"] == 3
+    group = body["oms_variants"][0]
+    assert group["available_boxes"] == 17  # 10 + 5 + 2 boxes
+    assert group["total_packets"] == 10 * 30 + 5 * 60 + 2 * 90  # 780
+    assert group["packets_per_box_uniform"] is False
+    assert "packets_per_box" not in group  # no single ratio invented for the group
+    per_variant = {u["sku"]: u for u in group["underlying_variants"]}
     assert per_variant["MIX-30"]["packets_per_box"] == 30
     assert per_variant["MIX-60"]["packets_per_box"] == 60
 

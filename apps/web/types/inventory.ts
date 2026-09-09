@@ -53,7 +53,7 @@ export interface InventoryProductVariants {
   variants: InventoryVariant[]
 }
 
-/** One underlying variant row inside the product-level Inventory card. */
+/** One underlying Shopify variant row inside an OMS-visible variant. */
 export interface ProductVariantStockLine {
   id: string
   sku: string
@@ -66,8 +66,28 @@ export interface ProductVariantStockLine {
   stock_status: StockStatus
 }
 
-/** The ONE product-level Inventory card -- aggregated from the product's
- * underlying variant rows (which are kept intact server-side).
+/** ONE OMS-visible variant on the product detail page. Groups one or more
+ * underlying Shopify `ProductVariant` rows. `catalog_variant_id` is null
+ * for an implicit (not-yet-grouped) OMS variant that maps 1:1 to its
+ * single underlying row.
+ */
+export interface OmsCatalogVariant {
+  catalog_variant_id: string | null
+  name: string
+  display_order: number
+  is_active: boolean
+  available_boxes: number
+  total_packets: number
+  stock_status: StockStatus
+  packets_per_box_uniform: boolean
+  underlying_variant_count: number
+  underlying_variants: ProductVariantStockLine[]
+}
+
+/** Product detail payload. `oms_variants` is the ONLY variant view shown
+ * (3 for Aayush Herbal Masala, 1 for every other grouped product). The
+ * raw Shopify rows live only inside each OMS variant's
+ * `underlying_variants`.
  */
 export interface InventoryProductStock {
   product_id: string
@@ -77,10 +97,10 @@ export interface InventoryProductStock {
   available_boxes: number
   total_packets: number
   stock_status: StockStatus
-  variant_count: number
   packets_per_box_uniform: boolean
-  variant_ids: string[]
-  variants: ProductVariantStockLine[]
+  oms_variant_count: number
+  underlying_variant_count: number
+  oms_variants: OmsCatalogVariant[]
 }
 
 export interface CatalogName {
@@ -97,6 +117,8 @@ export interface InventoryMovement {
   product_title: string | null
   variant_title: string | null
   variant_display_title: string | null
+  /** OMS-visible variant this movement's Shopify SKU is grouped under. */
+  catalog_variant_id: string | null
   sku: string | null
   movement_type: InventoryMovementType
   quantity_delta: number
@@ -119,6 +141,7 @@ export interface InventoryStockFilters {
 export interface InventoryMovementFilters {
   product_variant_id?: string
   product_id?: string
+  catalog_variant_id?: string
   order_id?: string
   movement_type?: InventoryMovementType
 }

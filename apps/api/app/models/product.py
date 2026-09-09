@@ -10,7 +10,17 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, JSONType, TimestampMixin, UUIDPrimaryKeyMixin
@@ -45,6 +55,56 @@ class Product(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     variants: Mapped[list[ProductVariant]] = relationship(
         back_populates="product", cascade="all, delete-orphan"
     )
+    catalog_variants: Mapped[list[CatalogVariant]] = relationship(
+        back_populates="product",
+        cascade="all, delete-orphan",
+        order_by="CatalogVariant.display_order, CatalogVariant.name",
+    )
+
+
+class CatalogVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """OMS-visible catalog variant -- a presentation/grouping layer over
+    one or more underlying Shopify `ProductVariant` rows.
+
+    The OMS UI shows CatalogVariants, NOT raw Shopify variants: "Aayush
+    Herbal Masala" has 3 CatalogVariants (one per flavour), each grouping
+    its 60/120/180-pouch `ProductVariant` rows; every other product has 1
+    CatalogVariant grouping all its pack-size `ProductVariant` rows.
+
+    This layer is presentation only. Orders, Shiprocket dispatch, RTO,
+    `InventoryMovement`, and all idempotency still reference
+    `ProductVariant` unchanged. `ProductVariant.available_quantity` is
+    still the sole authoritative stock; read APIs merely SUM it across a
+    CatalogVariant's members. Nothing here ever moves stock.
+
+    Grouping assignments (`ProductVariant.catalog_variant_id`) are set by
+    an explicit, reviewed data operation -- never guessed, never written
+    by Shopify sync (the normalizer doesn't emit that key, so
+    `ProductService.upsert_synced_product` cannot touch it, same
+    protection-by-omission as `available_quantity` / `title_override`).
+    """
+
+    __tablename__ = "catalog_variants"
+    __table_args__ = (
+        UniqueConstraint("product_id", "name", name="uq_catalog_variants_product_name"),
+    )
+
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # English OMS display name shown in the Inventory UI (e.g. "Ghutka
+    # Flavour"). Editable via the Inventory "Edit Name" action; never
+    # sourced from or overwritten by Shopify.
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
+
+    product: Mapped[Product] = relationship(back_populates="catalog_variants")
+    product_variants: Mapped[list[ProductVariant]] = relationship(back_populates="catalog_variant")
 
 
 class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
@@ -103,5 +163,15 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
     status: Mapped[ProductStatus] = mapped_column(
         sa_enum(ProductStatus, "product_status"), nullable=False, default=ProductStatus.ACTIVE
     )
+    # OMS-visible grouping (presentation only). NULL == not yet grouped:
+    # such a variant is surfaced as its own implicit single-member OMS
+    # variant, exactly as before this layer existed. Set only by an
+    # explicit reviewed data operation; `ondelete="SET NULL"` so removing
+    # a CatalogVariant only un-groups its members -- it never deletes a
+    # ProductVariant or its movement ledger. Never written by Shopify sync.
+    catalog_variant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("catalog_variants.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     product: Mapped[Product] = relationship(back_populates="variants")
+    catalog_variant: Mapped[CatalogVariant | None] = relationship(back_populates="product_variants")
