@@ -136,17 +136,17 @@ function FulfillmentDashboardContent({
 
       <div className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
         <StatTile
-          label="Confirmed, Awaiting Shipment"
+          label="Orders Need Shipment"
           value={summary?.confirmed_awaiting_shipment ?? "—"}
           icon={ClipboardList}
           accent="amber"
           href={queueHref}
         />
         <StatTile
-          label="Total Shipments"
-          value={summary?.total_shipments ?? "—"}
-          icon={Truck}
-          accent="slate"
+          label="Ready to Ship"
+          value={summary?.pending ?? "—"}
+          icon={PackageCheck}
+          accent="amber"
         />
         <StatTile
           label="In Transit"
@@ -168,6 +168,12 @@ function FulfillmentDashboardContent({
         />
         <StatTile label="NDR" value={summary?.ndr ?? "—"} icon={AlertTriangle} accent="orange" />
         <StatTile label="RTO" value={summary?.rto ?? "—"} icon={Undo2} accent="orange" />
+        <StatTile
+          label="Total Shipments"
+          value={summary?.total_shipments ?? "—"}
+          icon={Truck}
+          accent="slate"
+        />
         <StatTile
           label="Cancelled"
           value={summary?.cancelled ?? "—"}

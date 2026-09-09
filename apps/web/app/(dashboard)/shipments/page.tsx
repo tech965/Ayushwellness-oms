@@ -35,7 +35,22 @@ export default function ShipmentsPage() {
   })
 
   const columns: DataTableColumn<Shipment>[] = [
-    { id: "awb", header: "AWB", cell: (shipment) => shipment.awb ?? "—" },
+    {
+      id: "order_number",
+      header: "Order #",
+      cell: (shipment) => <span className="font-medium">{shipment.order_number ?? "—"}</span>,
+    },
+    {
+      id: "customer_name",
+      header: "Customer",
+      cell: (shipment) => shipment.customer_name ?? "—",
+    },
+    {
+      id: "courier_name",
+      header: "Courier",
+      cell: (shipment) => shipment.courier_name ?? "—",
+    },
+    { id: "awb", header: "AWB / Tracking #", cell: (shipment) => shipment.awb ?? "—" },
     {
       id: "status",
       header: "Status",
@@ -44,9 +59,24 @@ export default function ShipmentsPage() {
       ),
     },
     {
-      id: "location",
-      header: "Current location",
-      cell: (shipment) => shipment.current_location ?? "—",
+      id: "ship_date",
+      header: "Ship Date",
+      cell: (shipment) => formatDate(shipment.created_at),
+    },
+    {
+      id: "payment_type",
+      header: "Payment",
+      cell: (shipment) =>
+        shipment.payment_type ? (
+          <StatusBadge domain="payment" status={shipment.payment_type} />
+        ) : (
+          "—"
+        ),
+    },
+    {
+      id: "confirmed_by_telecaller_name",
+      header: "Confirmed By",
+      cell: (shipment) => shipment.confirmed_by_telecaller_name ?? "—",
     },
     {
       id: "expected",

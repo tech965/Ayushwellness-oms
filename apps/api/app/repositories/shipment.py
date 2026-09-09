@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy.orm import selectinload
 
 from app.core.timezone import to_ist
 from app.models.order import Order
@@ -142,7 +143,15 @@ class ShipmentRepository(BaseRepository[Shipment]):
         date_to: datetime | None = None,
         telecaller_ids: list[uuid.UUID] | None = None,
     ):
-        stmt = self._base_query()
+        # Eager-loads what the list view denormalizes (order number,
+        # customer, confirming telecaller, courier) so it never needs an
+        # N+1 request per row — same pattern as `OrderRepository.
+        # shipment_queue_query`.
+        stmt = self._base_query().options(
+            selectinload(Shipment.order).selectinload(Order.customer),
+            selectinload(Shipment.order).selectinload(Order.confirmed_by_telecaller),
+            selectinload(Shipment.courier),
+        )
         if q:
             stmt = stmt.where(
                 or_(Shipment.awb.ilike(f"%{q}%"), Shipment.shiprocket_shipment_id.ilike(f"%{q}%"))

@@ -95,6 +95,7 @@ const BASE_ORDER: OrderDetail = {
   updated_at: "2026-08-01T00:00:00Z",
   items: [],
   customer: null,
+  confirmed_by_telecaller_name: null,
 }
 
 function setUpQueries(order: OrderDetail) {

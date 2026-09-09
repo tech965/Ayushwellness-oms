@@ -44,6 +44,7 @@ const ROW = {
   total_quantity: 1,
   total_amount: "499.00",
   payment_type: "cod",
+  payment_status: "pending",
   confirmed_at: "2026-09-01T00:00:00Z",
   confirmed_by_telecaller_id: "tc-1",
   confirmed_by_telecaller_name: "Sourabh",
@@ -66,7 +67,7 @@ function mockShipHooks() {
 }
 
 describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
-  it("renders confirmed orders awaiting shipment with a Ship via Shiprocket action", async () => {
+  it("renders orders needing shipment with a Ship Order action", async () => {
     const user = userEvent.setup()
     const shipMutate = vi.fn()
     mockedUseShipmentQueue.mockReturnValue({
@@ -93,9 +94,9 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
 
     expect(screen.getByText("Alice")).toBeInTheDocument()
     expect(screen.getByText("OMS-0001")).toBeInTheDocument()
-    expect(screen.getByText("Not created")).toBeInTheDocument()
+    expect(screen.getByText("Ready to Ship")).toBeInTheDocument()
 
-    await user.click(screen.getByRole("button", { name: /Ship via Shiprocket/i }))
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(shipMutate).toHaveBeenCalledWith("order-1", expect.anything())
   })
 

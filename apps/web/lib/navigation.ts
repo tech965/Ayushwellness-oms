@@ -65,7 +65,7 @@ export const navGroups: NavGroup[] = [
     label: "Fulfillment",
     items: [
       { label: "Fulfillment Dashboard", href: "/fulfillment/dashboard", icon: Gauge },
-      { label: "Confirmed Orders", href: "/fulfillment/orders", icon: ListChecks },
+      { label: "Orders Need Shipment", href: "/fulfillment/orders", icon: ListChecks },
       { label: "Shipments", href: "/shipments", icon: Truck },
       { label: "NDR", href: "/ndr", icon: PackageX },
       { label: "RTO", href: "/rto", icon: RotateCcw },
@@ -158,7 +158,7 @@ export const fulfillmentNavGroups: NavGroup[] = [
     label: "Fulfillment",
     items: [
       { label: "Fulfillment Dashboard", href: "/fulfillment/dashboard", icon: Gauge },
-      { label: "Confirmed Orders", href: "/fulfillment/orders", icon: ListChecks },
+      { label: "Orders Need Shipment", href: "/fulfillment/orders", icon: ListChecks },
       { label: "Shipments", href: "/fulfillment/shipments", icon: Truck },
       { label: "NDR", href: "/ndr", icon: PackageX, permission: "ndr.read" },
       { label: "RTO", href: "/rto", icon: RotateCcw, permission: "rto.read" },
@@ -183,7 +183,7 @@ export const shipmentStaffNavGroups: NavGroup[] = [
     label: "Shipment Staff",
     items: [
       { label: "My Shipment Dashboard", href: "/shipment-staff/dashboard", icon: Gauge },
-      { label: "Confirmed Orders", href: "/shipment-staff/orders", icon: ListChecks },
+      { label: "Orders Need Shipment", href: "/shipment-staff/orders", icon: ListChecks },
       { label: "Shipments", href: "/shipment-staff/shipments", icon: Truck },
       { label: "NDR", href: "/shipment-staff/ndr", icon: PackageX },
       { label: "RTO", href: "/shipment-staff/rto", icon: RotateCcw },

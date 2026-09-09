@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import (
     NDRStatus,
+    PaymentStatus,
     PaymentType,
     RTOStatus,
     ShipmentDelayStatus,
@@ -56,6 +57,23 @@ class ShipmentResponse(BaseModel):
     updated_at: datetime
 
 
+class ShipmentListResponse(ShipmentResponse):
+    """`ShipmentResponse` plus the denormalized fields the Shipments list
+    (`GET /shipments`) needs to render order/customer/courier/telecaller
+    columns without an N+1 request per row — same pattern as
+    `OrderListResponse`/`ShipmentQueueRowResponse`. Only `list_shipments`
+    returns this; `GET /shipments/{id}` still returns plain
+    `ShipmentResponse`, which already has its own order/customer context
+    from the order detail page it's shown alongside.
+    """
+
+    order_number: str | None = None
+    customer_name: str | None = None
+    payment_type: PaymentType | None = None
+    confirmed_by_telecaller_name: str | None = None
+    courier_name: str | None = None
+
+
 class ShipmentEventResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -97,6 +115,7 @@ class ShipmentQueueRowResponse(BaseModel):
     total_quantity: int
     total_amount: Decimal
     payment_type: PaymentType
+    payment_status: PaymentStatus
     confirmed_at: datetime | None
     confirmed_by_telecaller_id: uuid.UUID | None
     confirmed_by_telecaller_name: str | None

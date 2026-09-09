@@ -143,26 +143,25 @@ function FulfillmentQueueContent() {
   const columns: DataTableColumn<ShipmentQueueRow>[] = [
     {
       id: "order_number",
-      header: "Order",
+      header: "Order #",
       cell: (r) => <span className="font-medium">{r.order_number}</span>,
     },
-    { id: "customer_name", header: "Customer", cell: (r) => r.customer_name ?? "—" },
-    { id: "customer_phone", header: "Phone", cell: (r) => r.customer_phone ?? "—" },
+    {
+      id: "customer_name",
+      header: "Customer",
+      cell: (r) => (
+        <div className="flex flex-col">
+          <span>{r.customer_name ?? "—"}</span>
+          {r.customer_phone && (
+            <span className="text-muted-foreground text-xs">{r.customer_phone}</span>
+          )}
+        </div>
+      ),
+    },
     {
       id: "item_summary",
-      header: "Products",
-      cell: (r) => <span className="block max-w-[220px] truncate">{r.item_summary ?? "—"}</span>,
-    },
-    {
-      id: "sku_summary",
-      header: "SKU",
-      cell: (r) => <span className="block max-w-[160px] truncate">{r.sku_summary ?? "—"}</span>,
-    },
-    {
-      id: "total_quantity",
-      header: "Qty",
-      className: "text-right",
-      cell: (r) => r.total_quantity,
+      header: "Items",
+      cell: (r) => <span className="block max-w-[240px] truncate">{r.item_summary ?? "—"}</span>,
     },
     {
       id: "total_amount",
@@ -173,22 +172,24 @@ function FulfillmentQueueContent() {
     {
       id: "payment_type",
       header: "Payment",
-      cell: (r) => <StatusBadge domain="payment" status={r.payment_type} />,
+      cell: (r) => (
+        <div className="flex items-center gap-1.5">
+          <StatusBadge domain="payment" status={r.payment_type} />
+          <StatusBadge domain="payment" status={r.payment_status} />
+        </div>
+      ),
     },
     {
       id: "confirmed_by_telecaller_name",
-      header: "Telecaller",
-      cell: (r) => r.confirmed_by_telecaller_name ?? "—",
+      header: "Confirmed By",
+      cell: (r) => (
+        <span className="font-medium">{r.confirmed_by_telecaller_name ?? "—"}</span>
+      ),
     },
     {
       id: "confirmed_at",
-      header: "Confirmed",
+      header: "Confirmed At",
       cell: (r) => (r.confirmed_at ? formatDate(r.confirmed_at) : "—"),
-    },
-    {
-      id: "order_status",
-      header: "Order Status",
-      cell: () => <StatusBadge domain="order" status="confirmed" />,
     },
     {
       id: "shipment_status",
@@ -197,11 +198,9 @@ function FulfillmentQueueContent() {
         r.shipment_status ? (
           <StatusBadge domain="shipment" status={r.shipment_status} />
         ) : (
-          <span className="text-muted-foreground text-xs">Not created</span>
+          <span className="text-muted-foreground text-xs">Ready to Ship</span>
         ),
     },
-    { id: "awb", header: "AWB", cell: (r) => r.awb ?? "—" },
-    { id: "courier_name", header: "Courier", cell: (r) => r.courier_name ?? "—" },
     {
       id: "actions",
       header: "",
@@ -220,7 +219,6 @@ function FulfillmentQueueContent() {
         ) : (
           <Button
             size="sm"
-            variant="outline"
             disabled={shipOrder.isPending && shipOrder.variables === r.order_id}
             onClick={(e) => {
               e.stopPropagation()
@@ -229,7 +227,7 @@ function FulfillmentQueueContent() {
           >
             {shipOrder.isPending && shipOrder.variables === r.order_id
               ? "Shipping..."
-              : "Ship via Shiprocket"}
+              : "Ship Order"}
           </Button>
         ),
     },
@@ -238,11 +236,11 @@ function FulfillmentQueueContent() {
   return (
     <>
       <PageHeader
-        title="Confirmed Orders — Shipment Queue"
+        title="Orders Need Shipment"
         description={
           query.data
-            ? `${query.data.meta.total_items} confirmed orders awaiting shipment processing.`
-            : "Confirmed orders waiting for shipment processing."
+            ? `${query.data.meta.total_items} orders confirmed by Telecalling and ready for shipment.`
+            : "Orders confirmed by Telecalling and ready for shipment."
         }
         actions={
           selectedIds.size > 0 ? (

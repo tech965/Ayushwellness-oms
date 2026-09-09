@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams, useSearchParams } from "next/navigation"
-import { Mail, MapPin, Phone, Tag, Truck } from "lucide-react"
+import { Mail, MapPin, Phone, PhoneCall, Tag, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { CashfreePaymentCard } from "@/components/orders/cashfree-payment-card"
@@ -273,6 +273,37 @@ function OrderDetailContent() {
               </Card>
             </div>
 
+            {/* Makes it obvious the order came from Telecalling -- the
+                source of truth is `confirmed_by_telecaller_id`/
+                `confirmed_at` (never inferred from call history), same
+                fields the Fulfillment Queue's "Confirmed By" column
+                reads. Omitted for an order confirmed a different way
+                (e.g. auto-confirmed on Shopify sync), not a data gap. */}
+            {order.confirmed_by_telecaller_id && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-1.5">
+                    <PhoneCall className="size-4" />
+                    Telecalling Confirmation
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                  <SummaryStat
+                    label="Confirmed by"
+                    value={order.confirmed_by_telecaller_name ?? "—"}
+                  />
+                  <SummaryStat
+                    label="Confirmed at"
+                    value={order.confirmed_at ? formatDateTime(order.confirmed_at) : "—"}
+                  />
+                  <SummaryStat
+                    label="Confirmation status"
+                    value={<StatusBadge domain="order" status="confirmed" />}
+                  />
+                </CardContent>
+              </Card>
+            )}
+
             <Card>
               <CardHeader>
                 <CardTitle>Items</CardTitle>
@@ -284,6 +315,7 @@ function OrderDetailContent() {
                       <TableHead>SKU</TableHead>
                       <TableHead>Product</TableHead>
                       <TableHead className="text-right">Qty</TableHead>
+                      <TableHead className="text-right">Available stock</TableHead>
                       <TableHead className="text-right">Unit price</TableHead>
                       <TableHead className="text-right">Discount</TableHead>
                       <TableHead className="text-right">Tax</TableHead>
@@ -296,6 +328,15 @@ function OrderDetailContent() {
                         <TableCell className="font-mono text-xs">{item.sku}</TableCell>
                         <TableCell>{item.product_name}</TableCell>
                         <TableCell className="text-right">{item.quantity}</TableCell>
+                        <TableCell className="text-right">
+                          {item.available_quantity == null ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : item.available_quantity <= 0 ? (
+                            <span className="text-destructive font-medium">Out of stock</span>
+                          ) : (
+                            item.available_quantity
+                          )}
+                        </TableCell>
                         <TableCell className="text-right">
                           {formatMoney(item.unit_price, order.currency)}
                         </TableCell>
@@ -313,7 +354,7 @@ function OrderDetailContent() {
                   </TableBody>
                   <TableFooter>
                     <TableRow>
-                      <TableCell colSpan={6} className="text-right font-medium">
+                      <TableCell colSpan={7} className="text-right font-medium">
                         Order total
                       </TableCell>
                       <TableCell className="text-right font-semibold">
@@ -367,10 +408,9 @@ function OrderDetailContent() {
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between gap-2">
                   <CardTitle>Shipment</CardTitle>
-                  {hasPermission("shipments.update") && (
+                  {hasPermission("shipments.update") && !shipmentsQuery.data?.length && (
                     <Button
                       size="sm"
-                      variant="outline"
                       disabled={shipViaShiprocket.isPending}
                       onClick={() => {
                         shipViaShiprocket.mutate(undefined, {
@@ -380,9 +420,7 @@ function OrderDetailContent() {
                         })
                       }}
                     >
-                      {shipViaShiprocket.isPending
-                        ? "Shipping..."
-                        : "Ship via Shiprocket"}
+                      {shipViaShiprocket.isPending ? "Shipping..." : "Ship Order"}
                     </Button>
                   )}
                 </CardHeader>

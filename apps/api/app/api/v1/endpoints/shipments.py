@@ -21,6 +21,7 @@ from app.schemas.shipment import (
     ShipmentAnalyticsResponse,
     ShipmentCreateRequest,
     ShipmentEventResponse,
+    ShipmentListResponse,
     ShipmentQueueRowResponse,
     ShipmentResponse,
     ShipmentSummaryResponse,
@@ -48,6 +49,7 @@ def _to_shipment_queue_row(order: Order, shipment: Shipment | None) -> ShipmentQ
         total_quantity=total_quantity,
         total_amount=order.total_amount,
         payment_type=order.payment_type,
+        payment_status=order.payment_status,
         confirmed_at=order.confirmed_at,
         confirmed_by_telecaller_id=order.confirmed_by_telecaller_id,
         confirmed_by_telecaller_name=(
@@ -116,7 +118,23 @@ async def get_shipment_analytics(
     return ApiResponse(data=ShipmentAnalyticsResponse(**analytics))
 
 
-@router.get("", response_model=PaginatedResponse[ShipmentResponse])
+def _to_shipment_list_response(shipment: Shipment) -> ShipmentListResponse:
+    order = shipment.order
+    return ShipmentListResponse(
+        **ShipmentResponse.model_validate(shipment).model_dump(),
+        order_number=order.order_number if order else None,
+        customer_name=order.customer.full_name if order and order.customer else None,
+        payment_type=order.payment_type if order else None,
+        confirmed_by_telecaller_name=(
+            order.confirmed_by_telecaller.name
+            if order and order.confirmed_by_telecaller
+            else None
+        ),
+        courier_name=shipment.courier.name if shipment.courier else None,
+    )
+
+
+@router.get("", response_model=PaginatedResponse[ShipmentListResponse])
 async def list_shipments(
     q: str | None = Query(default=None),
     status: str | None = Query(default=None),
@@ -128,7 +146,7 @@ async def list_shipments(
     sort_params: SortParams = Depends(sort_params_dep),
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("shipments.read")),
-) -> PaginatedResponse[ShipmentResponse]:
+) -> PaginatedResponse[ShipmentListResponse]:
     items, total = await ShipmentService(session).list_shipments(
         page_params=page_params,
         sort_params=sort_params,
@@ -140,7 +158,7 @@ async def list_shipments(
         date_to=date_to,
     )
     return PaginatedResponse(
-        data=[ShipmentResponse.model_validate(s) for s in items],
+        data=[_to_shipment_list_response(s) for s in items],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
 

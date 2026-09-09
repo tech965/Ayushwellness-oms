@@ -41,6 +41,14 @@ export interface Shipment {
   shopify_synced_at: string | null
   created_at: string
   updated_at: string
+  // Present only on rows from `GET /shipments` (`ShipmentListResponse`)
+  // -- see `_to_shipment_list_response` in the backend endpoint. Absent
+  // (undefined) on a plain `ShipmentResponse`, e.g. `GET /shipments/{id}`.
+  order_number?: string | null
+  customer_name?: string | null
+  payment_type?: string | null
+  confirmed_by_telecaller_name?: string | null
+  courier_name?: string | null
 }
 
 export interface ShipmentEvent {
@@ -91,6 +99,7 @@ export interface ShipmentQueueRow {
   total_quantity: number
   total_amount: string
   payment_type: string
+  payment_status: string
   confirmed_at: string | null
   confirmed_by_telecaller_id: string | null
   confirmed_by_telecaller_name: string | null

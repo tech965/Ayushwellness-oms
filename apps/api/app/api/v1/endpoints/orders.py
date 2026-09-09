@@ -25,11 +25,13 @@ from app.models.enums import (
 )
 from app.models.order import Order
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
+from app.schemas.customer import CustomerResponse
 from app.schemas.order import (
     OrderCreateRequest,
     OrderDetailResponse,
     OrderEventCreateRequest,
     OrderEventResponse,
+    OrderItemResponse,
     OrderListResponse,
     OrderResponse,
     OrderStatusTransitionRequest,
@@ -91,6 +93,33 @@ def _order_filters(
         "date_from": date_from,
         "date_to": date_to,
     }
+
+
+def _to_detail_response(order: Order) -> OrderDetailResponse:
+    """Enriches `OrderDetailResponse` with fields that come from a
+    relationship rather than a plain column, so `GET/PATCH/POST
+    /orders/{id}` all agree on the same shape — mirrors `_to_list_response`
+    below and `shipments.py`'s `_to_shipment_queue_row`. Safe to call on a
+    freshly-created order (no items/telecaller yet): every enriched field
+    just falls back to its `None` default.
+    """
+    items = [
+        OrderItemResponse(
+            **OrderItemResponse.model_validate(item).model_dump(exclude={"available_quantity"}),
+            available_quantity=(
+                item.product_variant.available_quantity if item.product_variant else None
+            ),
+        )
+        for item in order.items
+    ]
+    return OrderDetailResponse(
+        **OrderResponse.model_validate(order).model_dump(),
+        items=items,
+        customer=CustomerResponse.model_validate(order.customer) if order.customer else None,
+        confirmed_by_telecaller_name=(
+            order.confirmed_by_telecaller.name if order.confirmed_by_telecaller else None
+        ),
+    )
 
 
 def _to_list_response(order: Order) -> OrderListResponse:
@@ -177,7 +206,7 @@ async def get_order(
     _: User = Depends(require_permission("orders.read")),
 ) -> ApiResponse[OrderDetailResponse]:
     order = await OrderService(session).get_order(order_id)
-    return ApiResponse(data=OrderDetailResponse.model_validate(order))
+    return ApiResponse(data=_to_detail_response(order))
 
 
 @router.patch("/{order_id}", response_model=ApiResponse[OrderDetailResponse])
@@ -199,9 +228,7 @@ async def update_order_status(
     order = await OrderService(session).transition_status(
         order_id, new_status=payload.status, actor=current_user, description=payload.description
     )
-    return ApiResponse(
-        data=OrderDetailResponse.model_validate(order), message="Order status updated."
-    )
+    return ApiResponse(data=_to_detail_response(order), message="Order status updated.")
 
 
 @router.get("/{order_id}/timeline", response_model=ApiResponse[list[OrderEventResponse]])

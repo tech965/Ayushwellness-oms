@@ -42,16 +42,22 @@ class OrderRepository(BaseRepository[Order]):
         return result.scalar_one_or_none()
 
     async def get_by_id_with_items_and_customer(self, id_: uuid.UUID) -> Order | None:
-        """Eager-loads `items` and `customer` — needed by any caller that
-        touches `order.customer` (e.g.
-        `ShiprocketOperationsService.create_shipment_for_order`), since a
-        lazy load on an un-loaded relationship raises `MissingGreenlet`
-        under `AsyncSession`.
+        """Eager-loads `items` (with each item's `product_variant`, for
+        the order detail page's per-line "available stock" column),
+        `customer`, and `confirmed_by_telecaller` — needed by any caller
+        that touches these relationships (e.g.
+        `ShiprocketOperationsService.create_shipment_for_order`, the
+        order detail endpoints below), since a lazy load on an un-loaded
+        relationship raises `MissingGreenlet` under `AsyncSession`.
         """
         stmt = (
             select(Order)
             .where(Order.id == id_)
-            .options(selectinload(Order.items), selectinload(Order.customer))
+            .options(
+                selectinload(Order.items).selectinload(OrderItem.product_variant),
+                selectinload(Order.customer),
+                selectinload(Order.confirmed_by_telecaller),
+            )
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()

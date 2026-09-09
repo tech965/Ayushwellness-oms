@@ -137,7 +137,6 @@ function ShipmentStaffOrdersContent() {
         ) : (
           <Button
             size="sm"
-            variant="outline"
             disabled={shipOrder.isPending && shipOrder.variables === r.order_id}
             onClick={() => {
               shipOrder.mutate(r.order_id, {
@@ -148,7 +147,7 @@ function ShipmentStaffOrdersContent() {
           >
             {shipOrder.isPending && shipOrder.variables === r.order_id
               ? "Shipping..."
-              : "Ship via Shiprocket"}
+              : "Ship Order"}
           </Button>
         ),
     },
@@ -157,11 +156,11 @@ function ShipmentStaffOrdersContent() {
   return (
     <>
       <PageHeader
-        title="Confirmed Orders"
+        title="Orders Need Shipment"
         description={
           query.data
-            ? `${query.data.meta.total_items} confirmed orders awaiting shipment processing.`
-            : "Confirmed orders waiting for shipment processing."
+            ? `${query.data.meta.total_items} orders confirmed by Telecalling and ready for shipment.`
+            : "Orders confirmed by Telecalling and ready for shipment."
         }
       />
       <div className="flex flex-col gap-4">

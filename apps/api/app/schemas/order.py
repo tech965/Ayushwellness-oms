@@ -39,6 +39,13 @@ class OrderItemResponse(BaseModel):
     discount_amount: Decimal
     tax_amount: Decimal
     total_amount: Decimal
+    # OMS-authoritative current stock for this line's variant, in boxes
+    # (see `InventoryService`/`ProductVariant.available_quantity`) --
+    # `None` when the item never resolved to a variant (unsynced SKU,
+    # guest/manual order), not a data gap. Populated by the endpoint,
+    # not by plain `model_validate`, since it comes from a relationship
+    # (`OrderItem.product_variant`), not a column on `OrderItem` itself.
+    available_quantity: int | None = None
 
 
 class OrderCreateRequest(BaseModel):
@@ -110,6 +117,12 @@ class OrderDetailResponse(OrderResponse):
     # "customer_id is set but that Customer hasn't synced yet" — the
     # frontend already has customer_id to tell those apart if needed.
     customer: CustomerResponse | None = None
+    # Denormalized alongside `confirmed_by_telecaller_id` (`OrderResponse`
+    # above) so the order detail page can show "Confirmed By <name>"
+    # without a second lookup — same pattern as `ShipmentQueueRowResponse.
+    # confirmed_by_telecaller_name`. `None` whenever the id itself is
+    # `None`, not a data gap.
+    confirmed_by_telecaller_name: str | None = None
 
 
 class OrderListResponse(OrderResponse):

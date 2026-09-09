@@ -60,6 +60,7 @@ const ROW = {
   total_quantity: 2,
   total_amount: "499.00",
   payment_type: "cod",
+  payment_status: "pending",
   confirmed_at: "2026-09-01T00:00:00Z",
   confirmed_by_telecaller_id: "tc-1",
   confirmed_by_telecaller_name: "Sourabh",
@@ -70,7 +71,7 @@ const ROW = {
 }
 
 describe("FulfillmentOrdersPage", () => {
-  it("lists confirmed orders awaiting shipment with a Ship via Shiprocket row action", async () => {
+  it("lists orders needing shipment with a Ship Order row action", async () => {
     const user = userEvent.setup()
     const shipMutate = vi.fn()
     mockedUseShipmentQueue.mockReturnValue({
@@ -95,15 +96,15 @@ describe("FulfillmentOrdersPage", () => {
 
     renderWithProviders(<FulfillmentOrdersPage />)
 
-    expect(screen.getByText("Confirmed Orders — Shipment Queue")).toBeInTheDocument()
+    expect(screen.getByText("Orders Need Shipment")).toBeInTheDocument()
     expect(screen.getByText("Alice")).toBeInTheDocument()
     expect(screen.getByText("9990000001")).toBeInTheDocument()
     expect(screen.getByText("Sourabh")).toBeInTheDocument()
-    expect(screen.getByText("Not created")).toBeInTheDocument()
+    expect(screen.getByText("Ready to Ship")).toBeInTheDocument()
 
     // No shipment yet -- the row offers to create one directly, no
     // navigation required.
-    await user.click(screen.getByRole("button", { name: /Ship via Shiprocket/i }))
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(shipMutate).toHaveBeenCalledWith("order-1", expect.anything())
     expect(mockPush).not.toHaveBeenCalled()
   })

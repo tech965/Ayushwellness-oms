@@ -65,14 +65,14 @@ describe("ShipmentStaffOrdersPage", () => {
 
     renderWithProviders(<ShipmentStaffOrdersPage />)
 
-    expect(screen.getByText("Confirmed Orders")).toBeInTheDocument()
+    expect(screen.getByText("Orders Need Shipment")).toBeInTheDocument()
     expect(screen.getByText("Alice")).toBeInTheDocument()
     expect(screen.getByText("Sourabh")).toBeInTheDocument()
     // Unlike the Fulfillment/Admin queue, there is no telecaller filter --
     // every row already belongs to this Shipment Staff user's own scope.
     expect(screen.queryByText("All telecallers")).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole("button", { name: /Ship via Shiprocket/i }))
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(shipMutate).toHaveBeenCalledWith("order-1", expect.anything())
   })
 

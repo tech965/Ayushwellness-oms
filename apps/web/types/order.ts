@@ -29,6 +29,10 @@ export interface OrderItem {
   discount_amount: string
   tax_amount: string
   total_amount: string
+  // OMS-authoritative current stock for this line's variant, in boxes --
+  // `null` when the item never resolved to a variant, not a data gap.
+  // Present only on `OrderDetail.items` rows (`GET/PATCH /orders/{id}`).
+  available_quantity?: number | null
 }
 
 export interface Order {
@@ -100,6 +104,9 @@ export interface OrderAddress {
 export interface OrderDetail extends Order {
   items: OrderItem[]
   customer: Customer | null
+  // See `confirmed_by_telecaller_id` above -- resolved name, `null`
+  // whenever the id itself is `null`.
+  confirmed_by_telecaller_name: string | null
 }
 
 export interface OrderEvent {
