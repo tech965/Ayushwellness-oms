@@ -47,10 +47,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select  # type: ignore[reportMissingImports]
+from sqlalchemy.exc import IntegrityError  # type: ignore[reportMissingImports]
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
@@ -81,7 +81,7 @@ def _ceil_div(numerator: int, denominator: int) -> int:
 
 
 class InventoryService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: Any) -> None:
         self.session = session
         self.products = InventoryProductRepository(session)
         self.stock = InventoryStockRepository(session)
@@ -412,6 +412,37 @@ class InventoryService:
         await self.session.commit()
         return movement
 
+    async def adjust_product_to_target(
+        self, product_id: uuid.UUID, *, target_boxes: int, reason: str, actor: User | None
+    ) -> InventoryMovement:
+        """Product-level Edit Stock convenience for a product that has
+        exactly ONE underlying variant -- forwards to `adjust_to_target`
+        for that variant unchanged (same movement, same audit row, same
+        negative-stock rejection).
+
+        A product with more than one variant is rejected outright: there
+        is no non-arbitrary way to split a single product-level box
+        target across variants, and inventing one is explicitly out of
+        scope. The client adjusts each variant line individually via
+        `adjust_to_target` instead.
+        """
+        product = await self.session.get(Product, product_id)
+        if product is None:
+            raise NotFoundError("Product not found.")
+
+        variants = await self.variants.list_for_product(product_id)
+        if len(variants) == 0:
+            raise NotFoundError("This product has no variants.")
+        if len(variants) > 1:
+            raise ValidationError(
+                "This product has multiple variants; adjust each variant's stock "
+                "individually rather than setting a single product-level total."
+            )
+
+        return await self.adjust_to_target(
+            variants[0].id, target_boxes=target_boxes, reason=reason, actor=actor
+        )
+
     async def update_packets_per_box(
         self, variant_id: uuid.UUID, *, packets_per_box: int, actor: User | None
     ) -> ProductVariant:
@@ -439,6 +470,67 @@ class InventoryService:
             entity_id=str(variant.id),
             previous_value={"packets_per_box": previous},
             new_value={"packets_per_box": packets_per_box},
+        )
+        await self.session.commit()
+        return variant
+
+    async def set_product_display_name(
+        self, product_id: uuid.UUID, *, name: str | None, actor: User | None
+    ) -> Product:
+        """Set (`name` non-empty) or clear (`name` None/blank ->
+        "Reset to Shopify Name") `Product.title_override` -- the custom
+        display name the Inventory UI shows in place of the Shopify
+        `title`. Touches ONLY `title_override`: never `title` (Shopify's
+        own value), SKUs, quantities, prices, or any variant row. No
+        `InventoryMovement` is written -- this is catalog/presentation
+        data, not stock.
+        """
+        product = await self.session.get(Product, product_id)
+        if product is None:
+            raise NotFoundError("Product not found.")
+
+        normalized = name.strip() if name and name.strip() else None
+        previous = product.title_override
+        if previous == normalized:
+            return product
+
+        await self.products.update(product, title_override=normalized)
+        await self.audit.record(
+            user=actor,
+            action="inventory.product_name_override_updated",
+            entity_type="product",
+            entity_id=str(product.id),
+            previous_value={"title_override": previous},
+            new_value={"title_override": normalized},
+        )
+        await self.session.commit()
+        return product
+
+    async def set_variant_display_name(
+        self, variant_id: uuid.UUID, *, name: str | None, actor: User | None
+    ) -> ProductVariant:
+        """Variant counterpart of `set_product_display_name` -- sets or
+        clears `ProductVariant.title_override` and nothing else. Never
+        touches `title`, `sku`, `available_quantity`, `inventory_quantity`,
+        `packets_per_box`, `price`, or the movement ledger.
+        """
+        variant = await self.variants.get_by_id(variant_id)
+        if variant is None:
+            raise NotFoundError("Product variant not found.")
+
+        normalized = name.strip() if name and name.strip() else None
+        previous = variant.title_override
+        if previous == normalized:
+            return variant
+
+        await self.variants.update(variant, title_override=normalized)
+        await self.audit.record(
+            user=actor,
+            action="inventory.variant_name_override_updated",
+            entity_type="product_variant",
+            entity_id=str(variant.id),
+            previous_value={"title_override": previous},
+            new_value={"title_override": normalized},
         )
         await self.session.commit()
         return variant

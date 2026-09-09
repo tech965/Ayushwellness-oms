@@ -3,8 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
+  CatalogName,
   InventoryMovement,
   InventoryMovementFilters,
+  InventoryProductStock,
   InventoryProductSummary,
   InventoryProductVariants,
   InventoryStockFilters,
@@ -49,6 +51,26 @@ export function useInventoryProductVariants(productId: string) {
   return useQuery({
     queryKey: ["inventory", "products", productId, "variants"],
     queryFn: () => fetchProductVariants(productId),
+    enabled: Boolean(productId),
+  })
+}
+
+async function fetchProductStock(productId: string): Promise<InventoryProductStock> {
+  const response = await apiClient.get<ApiResponse<InventoryProductStock>>(
+    `/inventory/products/${productId}/stock`
+  )
+  if (!response.data.data) throw new Error("Product not found.")
+  return response.data.data
+}
+
+/** The ONE product-level Inventory card (Product -> one card -> complete
+ * stock). Aggregated server-side from the product's underlying variant
+ * rows, which stay intact.
+ */
+export function useInventoryProductStock(productId: string) {
+  return useQuery({
+    queryKey: ["inventory", "products", productId, "stock"],
+    queryFn: () => fetchProductStock(productId),
     enabled: Boolean(productId),
   })
 }
@@ -107,6 +129,47 @@ export function useAdjustStock(variantId: string) {
   })
 }
 
+/** Absolute-target edit for a SINGLE-variant product -- the backend
+ * forwards to that variant's adjustment. A multi-variant product is
+ * rejected (422); use `useAdjustVariantStock` per row instead.
+ */
+export function useAdjustProductStock(productId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { target_boxes: number; reason: string }) => {
+      const response = await apiClient.post<ApiResponse<InventoryMovement>>(
+        `/inventory/products/${productId}/adjust`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => invalidateInventory(queryClient),
+  })
+}
+
+/** Variant-agnostic absolute-target edit -- used for the one-row-per-
+ * variant Edit Stock on a multi-variant product card. Pass the variant id
+ * per call so a single hook instance drives every row.
+ */
+export function useAdjustVariantStock() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: {
+      variantId: string
+      target_boxes: number
+      reason: string
+    }) => {
+      const { variantId, ...body } = input
+      const response = await apiClient.post<ApiResponse<InventoryMovement>>(
+        `/inventory/stock/${variantId}/adjust`,
+        body
+      )
+      return response.data.data
+    },
+    onSuccess: () => invalidateInventory(queryClient),
+  })
+}
+
 /** Changes only the packets<->boxes conversion for this variant -- never
  * moves `available_boxes` itself.
  */
@@ -118,6 +181,41 @@ export function useUpdatePacketsPerBox(variantId: string) {
         `/inventory/stock/${variantId}/settings`,
         input
       )
+      return response.data.data
+    },
+    onSuccess: () => invalidateInventory(queryClient),
+  })
+}
+
+/** Manual "Edit Name": set a custom display name, or pass `null` to reset
+ * to the Shopify name. Presentation only -- the backend never touches the
+ * real Shopify `title`, stock, or the movement ledger, and a later Shopify
+ * product sync does not overwrite the custom name.
+ */
+export function useSetProductName(productId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (name: string | null) => {
+      const url = `/inventory/products/${productId}/name`
+      const response =
+        name === null
+          ? await apiClient.delete<ApiResponse<CatalogName>>(url)
+          : await apiClient.patch<ApiResponse<CatalogName>>(url, { name })
+      return response.data.data
+    },
+    onSuccess: () => invalidateInventory(queryClient),
+  })
+}
+
+export function useSetVariantName(variantId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (name: string | null) => {
+      const url = `/inventory/stock/${variantId}/name`
+      const response =
+        name === null
+          ? await apiClient.delete<ApiResponse<CatalogName>>(url)
+          : await apiClient.patch<ApiResponse<CatalogName>>(url, { name })
       return response.data.data
     },
     onSuccess: () => invalidateInventory(queryClient),

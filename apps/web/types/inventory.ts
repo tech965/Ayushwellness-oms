@@ -12,7 +12,12 @@ export type InventoryMovementType =
 
 export interface InventoryProductSummary {
   id: string
+  /** Raw Shopify name. */
   title: string
+  /** Staff-set custom name, or null. */
+  title_override: string | null
+  /** What the UI shows: `title_override` if set, else `title`. */
+  display_title: string
   vendor: string | null
   variant_count: number
   total_available_boxes: number
@@ -25,7 +30,12 @@ export interface InventoryVariant {
   id: string
   product_id: string
   sku: string
+  /** Raw Shopify name. */
   variant_title: string | null
+  /** Staff-set custom name, or null. */
+  variant_title_override: string | null
+  /** What the UI shows: override if set, else Shopify title, else SKU. */
+  display_title: string
   packets_per_box: number
   available_boxes: number
   total_packets: number
@@ -38,7 +48,46 @@ export interface InventoryVariant {
 export interface InventoryProductVariants {
   product_id: string
   product_title: string
+  product_title_override: string | null
+  product_display_title: string
   variants: InventoryVariant[]
+}
+
+/** One underlying variant row inside the product-level Inventory card. */
+export interface ProductVariantStockLine {
+  id: string
+  sku: string
+  variant_title: string | null
+  variant_title_override: string | null
+  display_title: string
+  available_boxes: number
+  packets_per_box: number
+  total_packets: number
+  stock_status: StockStatus
+}
+
+/** The ONE product-level Inventory card -- aggregated from the product's
+ * underlying variant rows (which are kept intact server-side).
+ */
+export interface InventoryProductStock {
+  product_id: string
+  product_name: string
+  title: string
+  title_override: string | null
+  available_boxes: number
+  total_packets: number
+  stock_status: StockStatus
+  variant_count: number
+  packets_per_box_uniform: boolean
+  variant_ids: string[]
+  variants: ProductVariantStockLine[]
+}
+
+export interface CatalogName {
+  id: string
+  title: string | null
+  title_override: string | null
+  display_title: string
 }
 
 export interface InventoryMovement {
@@ -47,6 +96,7 @@ export interface InventoryMovement {
   product_id: string | null
   product_title: string | null
   variant_title: string | null
+  variant_display_title: string | null
   sku: string | null
   movement_type: InventoryMovementType
   quantity_delta: number

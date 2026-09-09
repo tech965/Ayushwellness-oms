@@ -117,7 +117,7 @@ export default function InventoryPage() {
     {
       id: "title",
       header: "Product",
-      cell: (product) => <span className="font-medium">{product.title}</span>,
+      cell: (product) => <span className="font-medium">{product.display_title}</span>,
     },
     { id: "vendor", header: "Vendor", cell: (product) => product.vendor ?? "—" },
     {

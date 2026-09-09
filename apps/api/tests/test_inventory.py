@@ -984,3 +984,192 @@ async def test_ceiling_example_61_packets_60_per_box_is_2_boxes(db_session: Asyn
 
     refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
     assert refreshed.available_quantity == 8  # 10 - 2 (ceil(61/60) = 2)
+
+
+# --- product-level Inventory card: ONE per product ----------------------
+
+
+async def _make_product_with_variants(
+    session: AsyncSession, *, key: str, variants: list[dict]
+):
+    product, _ = await ProductRepository(session).upsert_by_external_id(
+        source_system="shopify", external_id=f"prod-{key}", title=f"Product {key}"
+    )
+    made = []
+    for spec in variants:
+        variant, _ = await ProductVariantRepository(session).upsert_by_external_id(
+            source_system="shopify",
+            external_id=f"var-{spec['sku']}",
+            product_id=product.id,
+            sku=spec["sku"],
+            price=Decimal("100.00"),
+            available_quantity=spec["available_quantity"],
+            packets_per_box=spec.get("packets_per_box", 1),
+            inventory_quantity=spec.get("inventory_quantity", 0),
+        )
+        made.append(variant)
+    await session.commit()
+    return product, made
+
+
+async def test_product_stock_endpoint_returns_one_aggregate_not_per_variant(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """A product with 3 'Pack of N' variants resolves to ONE product-level
+    stock response -- not three -- with the boxes summed and every
+    underlying variant still listed (records preserved, not merged away).
+    """
+    product, variants = await _make_product_with_variants(
+        db_session,
+        key="CARD1",
+        variants=[
+            {"sku": "PK-1", "available_quantity": 300, "packets_per_box": 1},
+            {"sku": "PK-2", "available_quantity": 400, "packets_per_box": 1},
+            {"sku": "PK-3", "available_quantity": 293, "packets_per_box": 1},
+        ],
+    )
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read"]
+    ) as client:
+        resp = await client.get(f"/api/v1/inventory/products/{product.id}/stock")
+        assert resp.status_code == 200
+        body = resp.json()["data"]
+
+        assert body["product_id"] == str(product.id)
+        assert body["available_boxes"] == 993  # 300 + 400 + 293, not hardcoded
+        assert body["total_packets"] == 993  # Σ boxes * packets_per_box (all 1)
+        assert body["variant_count"] == 3
+        assert body["packets_per_box_uniform"] is True
+        assert set(body["variant_ids"]) == {str(v.id) for v in variants}
+        assert len(body["variants"]) == 3  # underlying rows preserved
+        assert {v["sku"] for v in body["variants"]} == {"PK-1", "PK-2", "PK-3"}
+        assert body["stock_status"] == "in_stock"
+
+
+async def test_product_stock_endpoint_flags_mixed_pack_sizes_without_merging_units(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Variants with different `packets_per_box` are NOT collapsed to a
+    single fabricated ratio: `available_boxes` is still a plain box sum
+    (boxes are the common unit), `total_packets` is the sum of each
+    variant's own boxes*packets_per_box, and `packets_per_box_uniform`
+    is False so the UI can say 'mixed pack sizes'.
+    """
+    product, _ = await _make_product_with_variants(
+        db_session,
+        key="MIX1",
+        variants=[
+            {"sku": "MIX-30", "available_quantity": 10, "packets_per_box": 30},
+            {"sku": "MIX-60", "available_quantity": 5, "packets_per_box": 60},
+            {"sku": "MIX-90", "available_quantity": 2, "packets_per_box": 90},
+        ],
+    )
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read"]
+    ) as client:
+        body = (
+            await client.get(f"/api/v1/inventory/products/{product.id}/stock")
+        ).json()["data"]
+
+    assert body["available_boxes"] == 17  # 10 + 5 + 2 boxes
+    assert body["total_packets"] == 10 * 30 + 5 * 60 + 2 * 90  # 780, per-variant factors
+    assert body["packets_per_box_uniform"] is False
+    per_variant = {v["sku"]: v for v in body["variants"]}
+    assert per_variant["MIX-30"]["packets_per_box"] == 30
+    assert per_variant["MIX-60"]["packets_per_box"] == 60
+
+
+async def test_product_level_adjust_single_variant_creates_one_movement(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    _, [variant] = await _make_product_with_variants(
+        db_session, key="ADJ1", variants=[{"sku": "ADJ-1", "available_quantity": 395}]
+    )
+    product = await ProductRepository(db_session).get_by_source_external_id(
+        source_system="shopify", external_id="prod-ADJ1"
+    )
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/inventory/products/{product.id}/adjust",
+            json={"target_boxes": 400, "reason": "Stock received"},
+        )
+        assert resp.status_code == 200
+        mv = resp.json()["data"]
+        assert mv["quantity_delta"] == 5
+        assert mv["previous_balance"] == 395
+        assert mv["quantity_after"] == 400
+        assert mv["movement_type"] == "manual_adjustment"
+        assert mv["actor_label"]
+
+        # negative rejected
+        neg = await client.post(
+            f"/api/v1/inventory/products/{product.id}/adjust",
+            json={"target_boxes": -1, "reason": "bad"},
+        )
+        assert neg.status_code == 422
+
+        movements = (
+            await client.get(
+                "/api/v1/inventory/movements", params={"product_id": str(product.id)}
+            )
+        ).json()["data"]
+        assert len(movements) == 1
+        assert movements[0]["quantity_delta"] == 5
+
+    refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert refreshed.available_quantity == 400
+
+
+async def test_product_level_adjust_rejects_multi_variant_product(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """No invented product-level distribution rule: a multi-variant
+    product's stock is edited per variant, so the product-level adjust
+    endpoint refuses it (422) and changes nothing.
+    """
+    product, variants = await _make_product_with_variants(
+        db_session,
+        key="MULTIADJ",
+        variants=[
+            {"sku": "MA-1", "available_quantity": 100},
+            {"sku": "MA-2", "available_quantity": 200},
+        ],
+    )
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.manage"]
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/inventory/products/{product.id}/adjust",
+            json={"target_boxes": 500, "reason": "should be rejected"},
+        )
+        assert resp.status_code == 422
+        assert "multiple variants" in resp.text.lower()
+
+        # per-variant adjust still works for the same product
+        ok = await client.post(
+            f"/api/v1/inventory/stock/{variants[0].id}/adjust",
+            json={"target_boxes": 120, "reason": "per-variant edit"},
+        )
+        assert ok.status_code == 200
+
+    fresh = [await ProductVariantRepository(db_session).get_by_id(v.id) for v in variants]
+    assert [v.available_quantity for v in fresh] == [120, 200]  # only the one row moved
+
+
+async def test_product_stock_endpoint_requires_inventory_read(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _ = await _make_product_with_variants(
+        db_session, key="PERM1", variants=[{"sku": "PERM-1", "available_quantity": 5}]
+    )
+    async with await make_authenticated_client(
+        db_session, permission_codes=["analytics.read"], email="nope@example.com"
+    ) as client:
+        resp = await client.get(f"/api/v1/inventory/products/{product.id}/stock")
+        assert resp.status_code == 403

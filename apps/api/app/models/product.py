@@ -28,6 +28,12 @@ class Product(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
         String(64), unique=True, nullable=True, index=True
     )
     title: Mapped[str] = mapped_column(String(500), nullable=False)
+    # Optional OMS-authoritative display name. When set, the Inventory UI
+    # shows this instead of `title`; `title` still mirrors Shopify exactly.
+    # Never written by a sync -- `ShopifyProductNormalizer` doesn't emit it,
+    # so `upsert_synced_product` can't overwrite a staff edit (same
+    # protection-by-omission as `ProductVariant.available_quantity`).
+    title_override: Mapped[str | None] = mapped_column(String(500), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[ProductStatus] = mapped_column(
         sa_enum(ProductStatus, "product_status"), nullable=False, default=ProductStatus.ACTIVE
@@ -58,6 +64,10 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
     )
     sku: Mapped[str] = mapped_column(String(120), unique=True, nullable=False, index=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Optional OMS-authoritative display name -- see `Product.title_override`.
+    # Shown in the Inventory UI instead of `title` when set; never touched
+    # by a Shopify resync (the normalizer doesn't produce this key).
+    title_override: Mapped[str | None] = mapped_column(String(255), nullable=True)
     price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0"))
     compare_at_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     inventory_quantity: Mapped[int] = mapped_column(

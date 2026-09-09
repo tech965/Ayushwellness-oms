@@ -27,9 +27,12 @@ import { formatDateTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { usePaginationState } from "@/lib/use-pagination"
 import {
-  useAdjustStock,
+  useAdjustProductStock,
+  useAdjustVariantStock,
   useInventoryMovements,
-  useInventoryProductVariants,
+  useInventoryProductStock,
+  useSetProductName,
+  useSetVariantName,
   useUpdatePacketsPerBox,
 } from "@/services/inventory"
 import {
@@ -38,56 +41,241 @@ import {
   STOCK_STATUS_LABELS,
   type InventoryMovement,
   type InventoryMovementType,
-  type InventoryVariant,
+  type InventoryProductStock,
+  type ProductVariantStockLine,
+  type StockStatus,
 } from "@/types/inventory"
 
-function StockStatusBadge({ status }: { status: InventoryVariant["stock_status"] }) {
+function StockStatusBadge({ status }: { status: StockStatus }) {
   return (
     <Badge
       variant="outline"
-      className={cn("rounded-md border-transparent font-semibold", STOCK_STATUS_BADGE_CLASSES[status])}
+      className={cn(
+        "rounded-md border-transparent font-semibold",
+        STOCK_STATUS_BADGE_CLASSES[status]
+      )}
     >
       {STOCK_STATUS_LABELS[status]}
     </Badge>
   )
 }
 
-/** Absolute-target stock adjustment -- staff enters the NEW total, never a
- * raw +/- delta. Deliberately a separate dialog from packets-per-box (spec:
- * "Do not mix stock adjustment and packets-per-box change into one
- * ambiguous operation"). The backend is authoritative for the delta/new
- * balance math -- this preview is display-only and is recomputed from
- * whatever the server returns on save, never trusted as the actual result.
+/** Manual "Edit Name" -- sets a custom display name the Inventory UI shows
+ * instead of the Shopify name. Presentational only: the backend never
+ * touches the real Shopify title, stock, or the movement ledger, and a
+ * later Shopify product sync does not overwrite the custom name.
+ * "Reset to Shopify Name" (shown only when a custom name is set) clears it.
+ * `mutation` is `useSetProductName(id)` / `useSetVariantName(id)` -- same
+ * shape; pass `null` to reset, a trimmed string to set.
  */
-function AdjustStockDialog({ variant }: { variant: InventoryVariant }) {
+export function EditNameDialog({
+  kind,
+  currentDisplayName,
+  shopifyName,
+  hasOverride,
+  maxLength,
+  mutation,
+}: {
+  kind: "product" | "variant"
+  currentDisplayName: string
+  shopifyName: string | null
+  hasOverride: boolean
+  maxLength: number
+  mutation: ReturnType<typeof useSetProductName>
+}) {
   const [open, setOpen] = React.useState(false)
-  const [target, setTarget] = React.useState(String(variant.available_boxes))
-  const [reason, setReason] = React.useState("")
-  const adjust = useAdjustStock(variant.id)
+  const [value, setValue] = React.useState(currentDisplayName)
 
   function openDialog() {
-    setTarget(String(variant.available_boxes))
-    setReason("")
+    setValue(currentDisplayName)
     setOpen(true)
   }
 
-  const parsedTarget = Number(target)
-  const hasValidTarget = target !== "" && Number.isInteger(parsedTarget) && parsedTarget >= 0
-  const canSubmit = hasValidTarget && parsedTarget !== variant.available_boxes && reason.trim().length > 0
-  const delta = hasValidTarget ? parsedTarget - variant.available_boxes : 0
+  const trimmed = value.trim()
+  const isEmpty = trimmed.length === 0
+  const canSave =
+    !isEmpty && trimmed.length <= maxLength && trimmed !== currentDisplayName
 
-  function submit() {
-    adjust.mutate(
-      { target_boxes: parsedTarget, reason: reason.trim() },
-      {
-        onSuccess: () => {
-          toast.success("Stock adjusted.")
-          setOpen(false)
-          setReason("")
-        },
-        onError: (error) => toast.error(getApiErrorMessage(error)),
-      }
+  function save() {
+    mutation.mutate(trimmed, {
+      onSuccess: () => {
+        toast.success(
+          kind === "product" ? "Product name updated." : "Variant name updated."
+        )
+        setOpen(false)
+      },
+      onError: (error) => toast.error(getApiErrorMessage(error)),
+    })
+  }
+
+  function reset() {
+    mutation.mutate(null, {
+      onSuccess: () => {
+        toast.success("Reset to Shopify name.")
+        setOpen(false)
+      },
+      onError: (error) => toast.error(getApiErrorMessage(error)),
+    })
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Button variant="ghost" size="sm" onClick={openDialog}>
+        Edit Name
+      </Button>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            {kind === "product" ? "Edit Product Name" : "Edit Variant Name"}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          {shopifyName && (
+            <p className="text-muted-foreground text-sm">
+              Shopify name: <span className="text-foreground">{shopifyName}</span>
+            </p>
+          )}
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="display-name">Display name</Label>
+            <Input
+              id="display-name"
+              value={value}
+              maxLength={maxLength}
+              onChange={(e) => setValue(e.target.value)}
+              autoFocus
+            />
+            {isEmpty && <p className="text-sm text-red-600">Name cannot be empty.</p>}
+          </div>
+        </div>
+        <DialogFooter className="sm:justify-between">
+          {hasOverride ? (
+            <Button variant="ghost" onClick={reset} disabled={mutation.isPending}>
+              Reset to Shopify Name
+            </Button>
+          ) : (
+            <span />
+          )}
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button disabled={!canSave || mutation.isPending} onClick={save}>
+              {mutation.isPending ? "Saving..." : "Save"}
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ProductNameEditor({
+  productId,
+  displayName,
+  shopifyName,
+  hasOverride,
+}: {
+  productId: string
+  displayName: string
+  shopifyName: string
+  hasOverride: boolean
+}) {
+  const mutation = useSetProductName(productId)
+  return (
+    <EditNameDialog
+      kind="product"
+      currentDisplayName={displayName}
+      shopifyName={shopifyName}
+      hasOverride={hasOverride}
+      maxLength={500}
+      mutation={mutation}
+    />
+  )
+}
+
+function VariantNameEditor({ variant }: { variant: ProductVariantStockLine }) {
+  const mutation = useSetVariantName(variant.id)
+  return (
+    <EditNameDialog
+      kind="variant"
+      currentDisplayName={variant.display_title}
+      shopifyName={variant.variant_title}
+      hasOverride={variant.variant_title_override !== null}
+      maxLength={255}
+      mutation={mutation}
+    />
+  )
+}
+
+/** Product-level "Edit Stock". Absolute target, never a raw +/- delta.
+ * One product = ONE card, but the underlying variant records are edited
+ * directly: a single-variant product gets one "New stock" field (backend
+ * forwards to that variant); a multi-variant product gets one row per
+ * underlying variant -- no product-level distribution rule is invented.
+ * The backend computes the delta / new balance and writes one
+ * `InventoryMovement` per changed variant.
+ */
+function EditStockDialog({ product }: { product: InventoryProductStock }) {
+  const single = product.variant_count === 1
+  const adjustProduct = useAdjustProductStock(product.product_id)
+  const adjustVariant = useAdjustVariantStock()
+
+  const [open, setOpen] = React.useState(false)
+  const [reason, setReason] = React.useState("")
+  const [targets, setTargets] = React.useState<Record<string, string>>({})
+
+  function openDialog() {
+    setReason("")
+    setTargets(
+      Object.fromEntries(product.variants.map((v) => [v.id, String(v.available_boxes)]))
     )
+    setOpen(true)
+  }
+
+  const rows = product.variants.map((v) => {
+    const raw = targets[v.id] ?? String(v.available_boxes)
+    const parsed = Number(raw)
+    const valid = raw !== "" && Number.isInteger(parsed) && parsed >= 0
+    const delta = valid ? parsed - v.available_boxes : 0
+    return {
+      v,
+      raw,
+      parsed,
+      valid,
+      delta,
+      changed: valid && parsed !== v.available_boxes,
+    }
+  })
+  const anyInvalid = rows.some((r) => !r.valid)
+  const changedRows = rows.filter((r) => r.changed)
+  const canSave = !anyInvalid && changedRows.length > 0 && reason.trim().length > 0
+  const pending = adjustProduct.isPending || adjustVariant.isPending
+
+  async function save() {
+    try {
+      if (single) {
+        await adjustProduct.mutateAsync({
+          target_boxes: changedRows[0].parsed,
+          reason: reason.trim(),
+        })
+      } else {
+        for (const r of changedRows) {
+          await adjustVariant.mutateAsync({
+            variantId: r.v.id,
+            target_boxes: r.parsed,
+            reason: reason.trim(),
+          })
+        }
+      }
+      toast.success(
+        changedRows.length === 1
+          ? "Stock adjusted."
+          : `Stock adjusted for ${changedRows.length} variants.`
+      )
+      setOpen(false)
+    } catch (error) {
+      toast.error(getApiErrorMessage(error))
+    }
   }
 
   return (
@@ -95,30 +283,69 @@ function AdjustStockDialog({ variant }: { variant: InventoryVariant }) {
       <Button variant="outline" size="sm" onClick={openDialog}>
         Edit Stock
       </Button>
-      <DialogContent>
+      <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Edit inventory — {variant.variant_title ?? variant.sku}</DialogTitle>
+          <DialogTitle>Edit Stock — {product.product_name}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div>
-              <div className="text-muted-foreground">Current stock</div>
-              <div className="text-foreground font-semibold">{variant.available_boxes} boxes</div>
-            </div>
-            <div>
-              <div className="text-muted-foreground">Packets per box</div>
-              <div className="text-foreground font-semibold">{variant.packets_per_box}</div>
-            </div>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="target">New stock (boxes)</Label>
-            <Input
-              id="target"
-              type="number"
-              min={0}
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-            />
+          {!single && (
+            <p className="text-muted-foreground text-sm">
+              Enter the new box count for each variant you want to change. Each edit is
+              recorded as its own inventory movement.
+            </p>
+          )}
+          <div className="flex flex-col gap-3">
+            {rows.map(({ v, raw, valid, delta }) => (
+              <div key={v.id} className="flex flex-col gap-1.5">
+                {!single && (
+                  <div className="text-sm font-medium">
+                    {v.display_title}
+                    <span className="text-muted-foreground font-normal">
+                      {" "}
+                      · SKU {v.sku}
+                    </span>
+                  </div>
+                )}
+                <div className="flex items-center gap-3 text-sm">
+                  <span className="text-muted-foreground">
+                    Current:{" "}
+                    <span className="text-foreground font-semibold">
+                      {v.available_boxes}
+                    </span>{" "}
+                    boxes
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <Label
+                      htmlFor={`target-${v.id}`}
+                      className="text-muted-foreground font-normal"
+                    >
+                      New
+                    </Label>
+                    <Input
+                      id={`target-${v.id}`}
+                      type="number"
+                      min={0}
+                      className="h-8 w-24"
+                      value={raw}
+                      onChange={(e) =>
+                        setTargets((prev) => ({ ...prev, [v.id]: e.target.value }))
+                      }
+                    />
+                  </div>
+                  {valid && delta !== 0 && (
+                    <span
+                      className={cn(
+                        "font-semibold",
+                        delta < 0 ? "text-red-600" : "text-emerald-600"
+                      )}
+                    >
+                      {delta > 0 ? "+" : ""}
+                      {delta} boxes
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="reason">Reason</Label>
@@ -129,27 +356,13 @@ function AdjustStockDialog({ variant }: { variant: InventoryVariant }) {
               placeholder="e.g. New warehouse stock received"
             />
           </div>
-          {hasValidTarget && (
-            <div className="bg-muted/50 rounded-md p-3 text-sm">
-              <div>
-                Adjustment:{" "}
-                <span className={cn("font-semibold", delta < 0 ? "text-red-600" : "text-emerald-600")}>
-                  {delta > 0 ? "+" : ""}
-                  {delta} boxes
-                </span>
-              </div>
-              <div>
-                New balance: <span className="font-semibold">{parsedTarget} boxes</span>
-              </div>
-            </div>
-          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>
             Cancel
           </Button>
-          <Button disabled={!canSubmit || adjust.isPending} onClick={submit}>
-            {adjust.isPending ? "Saving..." : "Save Adjustment"}
+          <Button disabled={!canSave || pending} onClick={save}>
+            {pending ? "Saving..." : "Save"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -157,13 +370,11 @@ function AdjustStockDialog({ variant }: { variant: InventoryVariant }) {
   )
 }
 
-/** Packets-per-box configuration -- changes only the packets<->boxes
- * conversion/display, never `available_boxes` itself, and never rewrites
- * historical movement quantities (each ledger row keeps the box amount
- * that was actually moved at the time -- see `InventoryService.
- * apply_rto_restock`'s dispatch-consistency fix).
+/** Packets-per-box configuration for one underlying variant -- changes
+ * only the packets<->boxes conversion/display, never `available_boxes`
+ * itself, and never rewrites historical movement quantities.
  */
-function PacketsPerBoxDialog({ variant }: { variant: InventoryVariant }) {
+function PacketsPerBoxDialog({ variant }: { variant: ProductVariantStockLine }) {
   const [open, setOpen] = React.useState(false)
   const [value, setValue] = React.useState(String(variant.packets_per_box))
   const update = useUpdatePacketsPerBox(variant.id)
@@ -196,12 +407,12 @@ function PacketsPerBoxDialog({ variant }: { variant: InventoryVariant }) {
       </Button>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Packets per box — {variant.variant_title ?? variant.sku}</DialogTitle>
+          <DialogTitle>Packets per box — {variant.display_title}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <p className="text-muted-foreground text-sm">
-            Changes only how packets are converted/displayed — the box count itself
-            ({variant.available_boxes} boxes) and past movement history are not affected.
+            Changes only how packets are converted/displayed — the box count itself (
+            {variant.available_boxes} boxes) and past movement history are not affected.
           </p>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="ppb">Packets per box</Label>
@@ -224,93 +435,151 @@ function PacketsPerBoxDialog({ variant }: { variant: InventoryVariant }) {
   )
 }
 
-function VariantCard({
-  variant,
-  onViewHistory,
+/** The underlying variant records, kept intact but folded into the ONE
+ * product card as a collapsible list (rows, not separate cards). Lets an
+ * admin still rename a variant or set its packets-per-box.
+ */
+function UnderlyingVariants({
+  product,
+  canManage,
 }: {
-  variant: InventoryVariant
-  onViewHistory: (variant: InventoryVariant) => void
+  product: InventoryProductStock
+  canManage: boolean
+}) {
+  return (
+    <details className="mt-4">
+      <summary className="text-muted-foreground cursor-pointer text-sm select-none">
+        Underlying variants ({product.variant_count})
+      </summary>
+      <div className="mt-2 flex flex-col divide-y rounded-md border">
+        {product.variants.map((v) => (
+          <div
+            key={v.id}
+            className="flex flex-wrap items-center justify-between gap-2 p-2 text-sm"
+          >
+            <div>
+              <span className="font-medium">{v.display_title}</span>
+              <span className="text-muted-foreground">
+                {" "}
+                · SKU {v.sku} · {v.available_boxes} boxes · {v.packets_per_box}/box
+              </span>
+            </div>
+            {canManage && (
+              <div className="flex gap-1">
+                <VariantNameEditor variant={v} />
+                <PacketsPerBoxDialog variant={v} />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+function ProductStockCard({
+  product,
+  historyShown,
+  onToggleHistory,
+}: {
+  product: InventoryProductStock
+  historyShown: boolean
+  onToggleHistory: () => void
 }) {
   const { hasPermission } = useAuth()
   const canManage = hasPermission("inventory.manage")
+  const packSize =
+    product.packets_per_box_uniform && product.variants[0]
+      ? `${product.variants[0].packets_per_box} packets/box`
+      : "mixed pack sizes"
 
   return (
     <Card>
       <CardHeader className="flex-row items-start justify-between">
         <div>
-          <CardTitle>{variant.variant_title ?? variant.sku}</CardTitle>
-          <p className="text-muted-foreground text-sm">SKU: {variant.sku}</p>
+          <CardTitle>{product.product_name}</CardTitle>
+          <p className="text-muted-foreground text-sm">
+            {product.variant_count} variant{product.variant_count === 1 ? "" : "s"} ·{" "}
+            {packSize}
+          </p>
         </div>
-        <StockStatusBadge status={variant.stock_status} />
+        <StockStatusBadge status={product.stock_status} />
       </CardHeader>
       <CardContent>
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
           <div>
-            <dt className="text-muted-foreground">Packets/box</dt>
-            <dd className="font-medium">{variant.packets_per_box}</dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Available boxes</dt>
-            <dd className="font-medium">{variant.available_boxes}</dd>
+            <dt className="text-muted-foreground">Available stock</dt>
+            <dd className="font-medium">
+              {product.available_boxes.toLocaleString()} boxes
+            </dd>
           </div>
           <div>
             <dt className="text-muted-foreground">Total packets</dt>
-            <dd className="font-medium">{variant.total_packets.toLocaleString()}</dd>
+            <dd className="font-medium">{product.total_packets.toLocaleString()}</dd>
           </div>
           <div>
-            <dt className="text-muted-foreground">Shopify qty (reference)</dt>
-            <dd className="text-muted-foreground">{variant.shopify_inventory_quantity}</dd>
+            <dt className="text-muted-foreground">Status</dt>
+            <dd className="font-medium">{STOCK_STATUS_LABELS[product.stock_status]}</dd>
           </div>
         </dl>
         <div className="mt-4 flex flex-wrap gap-2">
+          {canManage && <EditStockDialog product={product} />}
           {canManage && (
-            <>
-              <AdjustStockDialog variant={variant} />
-              <PacketsPerBoxDialog variant={variant} />
-            </>
+            <ProductNameEditor
+              productId={product.product_id}
+              displayName={product.product_name}
+              shopifyName={product.title}
+              hasOverride={product.title_override !== null}
+            />
           )}
-          <Button variant="ghost" size="sm" onClick={() => onViewHistory(variant)}>
-            History
+          <Button variant="ghost" size="sm" onClick={onToggleHistory}>
+            {historyShown ? "Hide History" : "History"}
           </Button>
         </div>
+        <UnderlyingVariants product={product} canManage={canManage} />
       </CardContent>
     </Card>
   )
 }
 
 function movementTypeLabel(type: InventoryMovement["movement_type"]): string {
-  return INVENTORY_MOVEMENT_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type
+  return (
+    INVENTORY_MOVEMENT_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type
+  )
 }
 
 function MovementHistorySection({
   productId,
-  selectedVariant,
-  onClearVariant,
+  productName,
 }: {
   productId: string
-  selectedVariant: InventoryVariant | null
-  onClearVariant: () => void
+  productName: string
 }) {
   const { page, pageSize, setPage, resetPage } = usePaginationState()
-  const [movementType, setMovementType] = React.useState<InventoryMovementType | undefined>(
-    undefined
-  )
+  const [movementType, setMovementType] = React.useState<
+    InventoryMovementType | undefined
+  >(undefined)
   const query = useInventoryMovements({
     page,
     pageSize,
     product_id: productId,
-    product_variant_id: selectedVariant?.id,
     movement_type: movementType,
   })
 
   const columns: DataTableColumn<InventoryMovement>[] = [
     { id: "when", header: "Date/time", cell: (row) => formatDateTime(row.created_at) },
-    { id: "variant", header: "Variant", cell: (row) => row.variant_title ?? row.sku ?? "—" },
+    {
+      id: "variant",
+      header: "Variant",
+      cell: (row) => row.variant_display_title ?? row.variant_title ?? row.sku ?? "—",
+    },
     { id: "sku", header: "SKU", cell: (row) => row.sku ?? "—" },
     {
       id: "type",
       header: "Movement",
-      cell: (row) => <Badge variant="secondary">{movementTypeLabel(row.movement_type)}</Badge>,
+      cell: (row) => (
+        <Badge variant="secondary">{movementTypeLabel(row.movement_type)}</Badge>
+      ),
     },
     {
       id: "delta",
@@ -321,12 +590,17 @@ function MovementHistorySection({
         </span>
       ),
     },
-    { id: "previous", header: "Previous balance", cell: (row) => `${row.previous_balance} boxes` },
+    {
+      id: "previous",
+      header: "Previous balance",
+      cell: (row) => `${row.previous_balance} boxes`,
+    },
     { id: "new", header: "New balance", cell: (row) => `${row.quantity_after} boxes` },
     {
       id: "reference",
       header: "Reference",
-      cell: (row) => (row.shipment_id ? "Shipment" : row.rto_id ? "RTO" : row.order_id ? "Order" : "—"),
+      cell: (row) =>
+        row.shipment_id ? "Shipment" : row.rto_id ? "RTO" : row.order_id ? "Order" : "—",
     },
     { id: "reason", header: "Reason", cell: (row) => row.reason ?? "—" },
     { id: "actor", header: "Actor/source", cell: (row) => row.actor_label },
@@ -334,18 +608,7 @@ function MovementHistorySection({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold">
-          {selectedVariant
-            ? `Movement History — ${selectedVariant.variant_title ?? selectedVariant.sku}`
-            : "Movement History — all variants"}
-        </h2>
-        {selectedVariant && (
-          <Button variant="link" size="sm" className="h-auto p-0" onClick={onClearVariant}>
-            Show all variants
-          </Button>
-        )}
-      </div>
+      <h2 className="text-lg font-semibold">Movement History — {productName}</h2>
       <FilterBar
         statusValue={movementType}
         onStatusChange={(value) => {
@@ -379,14 +642,16 @@ function MovementHistorySection({
 export default function InventoryProductPage() {
   const params = useParams<{ productId: string }>()
   const productId = params.productId
-  const query = useInventoryProductVariants(productId)
-  const [selectedVariant, setSelectedVariant] = React.useState<InventoryVariant | null>(null)
+  const query = useInventoryProductStock(productId)
+  const [showHistory, setShowHistory] = React.useState(true)
+
+  const product = query.data
 
   return (
     <>
       <PageHeader
-        title={query.data?.product_title ?? "Product variants"}
-        description="Product → Variant → Inventory. Stock is in boxes; each variant configures its own packets per box."
+        title={product?.product_name ?? "Product inventory"}
+        description="One inventory card per product. Stock is in boxes, owned by the OMS and moved only by manual edits and Shiprocket dispatch/RTO events — never by Shopify."
         backHref="/inventory"
         backLabel="Back to Inventory"
       />
@@ -396,25 +661,26 @@ export default function InventoryProductPage() {
           isError={query.isError}
           error={query.error}
           data={query.data}
-          isEmpty={(data) => data.variants.length === 0}
+          isEmpty={(data) => data.variant_count === 0}
           onRetry={() => void query.refetch()}
-          emptyTitle="No variants found"
+          emptyTitle="No stock records"
           emptyDescription="This product has no variants yet."
         >
           {(data) => (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {data.variants.map((variant) => (
-                <VariantCard key={variant.id} variant={variant} onViewHistory={setSelectedVariant} />
-              ))}
-            </div>
+            <ProductStockCard
+              product={data}
+              historyShown={showHistory}
+              onToggleHistory={() => setShowHistory((s) => !s)}
+            />
           )}
         </QueryStates>
 
-        <MovementHistorySection
-          productId={productId}
-          selectedVariant={selectedVariant}
-          onClearVariant={() => setSelectedVariant(null)}
-        />
+        {showHistory && product && (
+          <MovementHistorySection
+            productId={productId}
+            productName={product.product_name}
+          />
+        )}
       </div>
     </>
   )
