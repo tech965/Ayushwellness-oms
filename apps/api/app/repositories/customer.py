@@ -47,17 +47,22 @@ class CustomerRepository(BaseRepository[Customer]):
             )
         return stmt
 
-    async def search_repeat_customers(
-        self, *, q: str | None, page_params: PageParams
-    ) -> tuple[list[tuple[Customer, int, datetime | None, Decimal]], int]:
-        """Customers with `>= REPEAT_CUSTOMER_MIN_ORDERS` real `Order`
-        rows, most orders first -- `(customer, order_count,
-        latest_order_at, total_order_value)` tuples, paginated. Exactly
-        two queries total regardless of page size (this one, plus the
-        caller's one follow-up query for per-order detail) -- never one
-        query per customer.
+    @staticmethod
+    def _repeat_order_counts_subquery():  # noqa: ANN205
+        """Per-customer real order counts/aggregates for every customer
+        with `>= REPEAT_CUSTOMER_MIN_ORDERS` orders -- the ONE query
+        "repeat customer" is defined by anywhere in this codebase.
+        Deliberately never date-scoped: a repeat customer is one with
+        that many orders across their whole history, not within any
+        particular window (see `CustomerRepository.
+        count_repeat_customers_in_range`'s docstring for how a dashboard
+        date range still applies -- to when the *customer* was created,
+        never to which of their orders count towards this total).
+        Reused by both `search_repeat_customers` (Customers -> Repeat
+        Customers page) and `count_repeat_customers_in_range` (the
+        Admin Dashboard KPI) so there is only ever one definition.
         """
-        order_counts = (
+        return (
             select(
                 Order.customer_id.label("customer_id"),
                 func.count(Order.id).label("order_count"),
@@ -69,6 +74,49 @@ class CustomerRepository(BaseRepository[Customer]):
             .having(func.count(Order.id) >= REPEAT_CUSTOMER_MIN_ORDERS)
             .subquery()
         )
+
+    async def count_repeat_customers_in_range(
+        self, *, date_from: datetime, date_to: datetime
+    ) -> int:
+        """The Admin Dashboard "Repeat Customers" KPI: customers whose
+        `Customer.created_at` falls in `[date_from, date_to]` who ALSO
+        have `>= REPEAT_CUSTOMER_MIN_ORDERS` real orders.
+
+        Date semantics deliberately mirror the dashboard's existing
+        "Total Customers" KPI exactly (`AnalyticsService._summary_counts`:
+        `Customer.created_at` in range, "new customers" in the period,
+        not an all-time running total) -- so `repeat_customers /
+        total_customers` is always a same-cohort percentage, never two
+        differently-scoped numbers divided against each other. The
+        `>= REPEAT_CUSTOMER_MIN_ORDERS` check itself stays all-time/
+        unscoped (`_repeat_order_counts_subquery`) -- a customer's repeat
+        status is never redefined per dashboard window, only WHICH
+        customers are being asked about is.
+
+        One aggregate query -- no customers/orders fetched into Python.
+        """
+        order_counts = self._repeat_order_counts_subquery()
+        stmt = (
+            select(func.count())
+            .select_from(Customer)
+            .join(order_counts, order_counts.c.customer_id == Customer.id)
+            .where(Customer.created_at >= date_from, Customer.created_at <= date_to)
+        )
+        return int(await self.session.scalar(stmt) or 0)
+
+    async def search_repeat_customers(
+        self, *, q: str | None, page_params: PageParams
+    ) -> tuple[list[tuple[Customer, int, datetime | None, Decimal]], int]:
+        """Customers with `>= REPEAT_CUSTOMER_MIN_ORDERS` real `Order`
+        rows, most orders first -- `(customer, order_count,
+        latest_order_at, total_order_value)` tuples, paginated. Exactly
+        two queries total regardless of page size (this one, plus the
+        caller's one follow-up query for per-order detail) -- never one
+        query per customer. All-time/unfiltered by design -- see
+        `_repeat_order_counts_subquery`'s docstring; unaffected by
+        `count_repeat_customers_in_range`'s dashboard date scoping.
+        """
+        order_counts = self._repeat_order_counts_subquery()
 
         stmt = select(
             Customer,

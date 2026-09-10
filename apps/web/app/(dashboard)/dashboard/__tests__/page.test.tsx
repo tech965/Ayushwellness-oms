@@ -156,4 +156,47 @@ describe("Dashboard Today/Yesterday hourly comparison", () => {
     expect(screen.getByText("Orders & Revenue")).toBeInTheDocument()
     expect(screen.queryByText(/vs\./)).not.toBeInTheDocument()
   })
+
+  it("shows the Repeat Customers card with count and percentage of Total Customers", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW_UTC)
+    const weekAgo = new Date(NOW_UTC.getTime() - 6 * 24 * 60 * 60 * 1000)
+    setUrlDateRange(istStartOfDay(weekAgo), istEndOfDay(NOW_UTC))
+
+    mockedSummary.mockReturnValue({
+      data: {
+        date_from: weekAgo.toISOString(),
+        date_to: NOW_UTC.toISOString(),
+        total_customers: { current: "40", previous: "20", change_pct: 100 },
+        repeat_customers: { current: "5", previous: "2", change_pct: 150 },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAnalyticsSummary>)
+
+    renderWithProviders(<DashboardPage />)
+
+    expect(screen.getByText("Repeat Customers")).toBeInTheDocument()
+    expect(screen.getByText("5")).toBeInTheDocument()
+    expect(screen.getByText("12.5% of customers")).toBeInTheDocument()
+  })
+
+  it("shows 0% for Repeat Customers when there are no customers in range", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW_UTC)
+    setUrlDateRange(istStartOfDay(NOW_UTC), istEndOfDay(NOW_UTC))
+
+    mockedSummary.mockReturnValue({
+      data: {
+        date_from: NOW_UTC.toISOString(),
+        date_to: NOW_UTC.toISOString(),
+        total_customers: { current: "0", previous: "0", change_pct: null },
+        repeat_customers: { current: "0", previous: "0", change_pct: null },
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAnalyticsSummary>)
+
+    renderWithProviders(<DashboardPage />)
+
+    expect(screen.getByText("0.0% of customers")).toBeInTheDocument()
+  })
 })

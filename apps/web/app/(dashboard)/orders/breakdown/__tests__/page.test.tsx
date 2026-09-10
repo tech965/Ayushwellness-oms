@@ -40,6 +40,7 @@ const SUMMARY: AnalyticsSummary = {
   total_orders: kpi("100"),
   total_revenue: kpi("500000.00"),
   total_customers: kpi("40"),
+  repeat_customers: kpi("5"),
   total_products: kpi("10"),
   fulfilled_orders: kpi("60"),
   unfulfilled_orders: kpi("40"),

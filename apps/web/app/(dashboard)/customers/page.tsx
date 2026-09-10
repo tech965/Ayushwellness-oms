@@ -19,7 +19,16 @@ export default function CustomersPage() {
   const router = useRouter()
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const [search, setSearch] = React.useState("")
-  const [view, setView] = React.useState<"all" | "repeat">("all")
+  // Lazy initializer (not `useSearchParams`, which would force this
+  // otherwise-static page into a Suspense boundary) -- only needs to read
+  // the URL once, on first mount, so the Dashboard's "Repeat Customers"
+  // card (?view=repeat) can land directly on that tab.
+  const [view, setView] = React.useState<"all" | "repeat">(() =>
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("view") === "repeat"
+      ? "repeat"
+      : "all"
+  )
 
   const query = useCustomers({ page, pageSize, q: search })
   const repeatQuery = useRepeatCustomers({ page, pageSize, q: search })

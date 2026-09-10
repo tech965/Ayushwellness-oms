@@ -1,3 +1,4 @@
+import type { ReactNode } from "react"
 import Link from "next/link"
 import {
   ArrowDownRight,
@@ -35,6 +36,13 @@ interface KpiCardProps {
   invert?: boolean
   /** Tints the icon chip so KPI rows aren't visually identical tile-to-tile. */
   accent?: KpiAccent
+  /** Replaces the default "±X% vs previous period" line with custom
+   * content (e.g. "12.5% of customers") — for a KPI whose meaningful
+   * secondary figure is a share of another metric, not a period-over-
+   * period trend. Other cards are unaffected: omitting this prop keeps
+   * the original change_pct line exactly as before.
+   */
+  subtitle?: ReactNode
 }
 
 /** A single dashboard KPI tile: current value, %-change vs. the prior
@@ -50,6 +58,7 @@ export function KpiCard({
   href,
   invert,
   accent = "slate",
+  subtitle,
 }: KpiCardProps) {
   const changePct = kpi?.change_pct ?? null
   const isUp = changePct !== null && changePct > 0
@@ -87,23 +96,29 @@ export function KpiCard({
             <ChevronRight className="text-muted-foreground/50 group-hover:text-primary mb-1 size-4 shrink-0 transition-transform group-hover:translate-x-0.5" />
           )}
         </div>
-        {kpi && changePct !== null && (
-          <p
-            className={cn(
-              "mt-1 flex items-center gap-1 text-xs font-medium",
-              isGood && "text-success",
-              isBad && "text-danger",
-              !isGood && !isBad && "text-muted-foreground"
+        {subtitle !== undefined ? (
+          <p className="text-muted-foreground mt-1 text-xs">{subtitle}</p>
+        ) : (
+          <>
+            {kpi && changePct !== null && (
+              <p
+                className={cn(
+                  "mt-1 flex items-center gap-1 text-xs font-medium",
+                  isGood && "text-success",
+                  isBad && "text-danger",
+                  !isGood && !isBad && "text-muted-foreground"
+                )}
+              >
+                {isUp && <ArrowUpRight className="size-3.5" />}
+                {isDown && <ArrowDownRight className="size-3.5" />}
+                {!isUp && !isDown && <Minus className="size-3.5" />}
+                {Math.abs(changePct).toFixed(1)}% vs previous period
+              </p>
             )}
-          >
-            {isUp && <ArrowUpRight className="size-3.5" />}
-            {isDown && <ArrowDownRight className="size-3.5" />}
-            {!isUp && !isDown && <Minus className="size-3.5" />}
-            {Math.abs(changePct).toFixed(1)}% vs previous period
-          </p>
-        )}
-        {kpi && changePct === null && (
-          <p className="text-muted-foreground mt-1 text-xs">No prior-period data</p>
+            {kpi && changePct === null && (
+              <p className="text-muted-foreground mt-1 text-xs">No prior-period data</p>
+            )}
+          </>
         )}
       </CardContent>
     </Card>

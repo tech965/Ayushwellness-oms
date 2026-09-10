@@ -10,6 +10,11 @@ export interface AnalyticsSummary {
   total_orders: KPIValue
   total_revenue: KPIValue
   total_customers: KPIValue
+  // Customers with `created_at` in the same window as `total_customers`
+  // above who also have >= 2 real orders (all-time -- see the backend's
+  // `REPEAT_CUSTOMER_MIN_ORDERS`). Same repeat-customer definition as
+  // the Customers -> Repeat Customers page.
+  repeat_customers: KPIValue
   total_products: KPIValue
   fulfilled_orders: KPIValue
   unfulfilled_orders: KPIValue

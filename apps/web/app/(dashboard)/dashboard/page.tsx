@@ -10,6 +10,7 @@ import {
   PackageCheck,
   PackageX,
   RefreshCcw,
+  Repeat,
   RotateCcw,
   ShoppingCart,
   Truck,
@@ -77,8 +78,8 @@ function DashboardSkeleton() {
         description="Live operational overview of your OMS."
       />
       <div className="flex flex-col gap-6">
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          {Array.from({ length: 5 }).map((_, i) => (
             <Skeleton key={i} className="h-24 w-full" />
           ))}
         </div>
@@ -210,6 +211,17 @@ function DashboardContent() {
 
   const summary = summaryQuery.data
 
+  // Share of `total_customers` (same date-scoped cohort — both KPIs use
+  // `Customer.created_at` in range) that's also repeat, not a period-
+  // over-period trend — computed here rather than added as a backend
+  // field since both numbers the ratio needs are already on the
+  // response. 0% (never NaN/Infinity) when there are no customers in
+  // range at all.
+  const totalCustomerCount = summary ? Number(summary.total_customers.current) : 0
+  const repeatCustomerCount = summary ? Number(summary.repeat_customers.current) : 0
+  const repeatCustomerPct =
+    totalCustomerCount > 0 ? (repeatCustomerCount / totalCustomerCount) * 100 : 0
+
   const shipmentOverviewItems: ShipmentOverviewItem[] = [
     {
       key: "delivered",
@@ -280,7 +292,7 @@ function DashboardContent() {
       />
 
       <div className="flex flex-col gap-6">
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-5">
           <KpiCard
             label="Total Orders"
             icon={ShoppingCart}
@@ -304,6 +316,15 @@ function DashboardContent() {
             format={count}
             href="/customers"
             accent="violet"
+          />
+          <KpiCard
+            label="Repeat Customers"
+            icon={Repeat}
+            kpi={summary?.repeat_customers}
+            format={count}
+            href="/customers?view=repeat"
+            accent="violet"
+            subtitle={summary ? `${repeatCustomerPct.toFixed(1)}% of customers` : undefined}
           />
           <KpiCard
             label="Total Products"

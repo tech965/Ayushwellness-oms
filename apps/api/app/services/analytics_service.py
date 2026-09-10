@@ -80,6 +80,7 @@ from app.models.refund import Refund
 from app.models.returns import Return
 from app.models.rto import RTO
 from app.models.shipment import Shipment
+from app.repositories.customer import CustomerRepository
 from app.schemas.analytics import (
     AnalyticsSummaryResponse,
     BreakdownsResponse,
@@ -143,6 +144,7 @@ def _kpi(current: Decimal | int, previous: Decimal | int) -> KPIValue:
 class AnalyticsService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self.customers = CustomerRepository(session)
 
     async def _scalar(self, stmt) -> Decimal:  # noqa: ANN001
         value = await self.session.scalar(stmt)
@@ -223,6 +225,14 @@ class AnalyticsService:
         total_customers = await self._count_where(
             Customer, Customer.created_at >= r.date_from, Customer.created_at <= r.date_to
         )
+        # Same `Customer.created_at` scope as `total_customers` immediately
+        # above (never a second date-filtering rule) -- see
+        # `CustomerRepository.count_repeat_customers_in_range`'s docstring.
+        repeat_customers = Decimal(
+            await self.customers.count_repeat_customers_in_range(
+                date_from=r.date_from, date_to=r.date_to
+            )
+        )
         total_products = await self._count_where(
             Product, Product.created_at >= r.date_from, Product.created_at <= r.date_to
         )
@@ -274,6 +284,7 @@ class AnalyticsService:
             "total_orders": total_orders,
             "total_revenue": total_revenue,
             "total_customers": total_customers,
+            "repeat_customers": repeat_customers,
             "total_products": total_products,
             "fulfilled_orders": fulfilled_orders,
             "unfulfilled_orders": unfulfilled_orders,

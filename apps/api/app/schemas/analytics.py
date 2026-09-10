@@ -25,6 +25,15 @@ class AnalyticsSummaryResponse(BaseModel):
     total_orders: KPIValue
     total_revenue: KPIValue
     total_customers: KPIValue
+    # Customers with `Customer.created_at` in the same window as
+    # `total_customers` above who also have
+    # `>= app.repositories.customer.REPEAT_CUSTOMER_MIN_ORDERS` real
+    # orders (all-time, never date-scoped) -- see `AnalyticsService.
+    # _summary_counts` and `CustomerRepository.
+    # count_repeat_customers_in_range`. The exact same repeat-customer
+    # definition the Customers -> Repeat Customers page uses, never a
+    # second one.
+    repeat_customers: KPIValue
     total_products: KPIValue
     fulfilled_orders: KPIValue
     unfulfilled_orders: KPIValue
