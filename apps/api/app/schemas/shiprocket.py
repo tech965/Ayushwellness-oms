@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 class LocateShiprocketOrderRequest(BaseModel):
     """One or many OMS order ids to resolve to their existing Shiprocket
-    "Ready to Ship" page -- never creates anything, see
+    order id -- never creates anything, see
     `app.services.shiprocket_service.locate_shiprocket_orders`.
     """
 
@@ -23,7 +23,13 @@ class LocateShiprocketOrderRequest(BaseModel):
 class LocateShiprocketOrderResult(BaseModel):
     order_id: uuid.UUID
     status: Literal["found", "not_found", "error"]
-    shiprocket_order_url: str | None = None
+    # The real, numeric Shiprocket order id -- NOT a URL. Shiprocket has
+    # no supported deep-link filter for its "Ready to Ship" page, so the
+    # frontend opens that page plain and copies this id to the clipboard
+    # for the operator to paste into Shiprocket's own "Multiple Order
+    # IDs" filter (see `app.services.shiprocket_service.
+    # SHIPROCKET_READY_TO_SHIP_URL`'s docstring).
+    shiprocket_order_id: str | None = None
     message: str | None = None
 
 

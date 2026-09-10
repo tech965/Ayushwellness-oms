@@ -46,7 +46,7 @@ from app.schemas.shipment import (
 )
 from app.schemas.shiprocket import ShiprocketShipRequest
 from app.services.order_service import OrderService
-from app.services.shiprocket_service import ShiprocketOperationsService, shiprocket_order_url
+from app.services.shiprocket_service import ShiprocketOperationsService, shiprocket_order_id
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 router = APIRouter()
@@ -153,7 +153,7 @@ def _to_list_response(order: Order) -> OrderListResponse:
     # a documented "insertion order" guarantee. Real production impact:
     # a stale/CANCELLED/no-Shiprocket-order-id shipment could be picked
     # over the genuine current one, silently showing the wrong (or a
-    # `None`) `shiprocket_order_url` for "Process Shipment"/"Ship Order"
+    # `None`) `shiprocket_order_id` for "Process Shipment"/"Ship Order"
     # on this exact list (backs "Confirmed by Telecaller").
     shipment = max(order.shipments, key=lambda s: s.created_at) if order.shipments else None
 
@@ -176,7 +176,7 @@ def _to_list_response(order: Order) -> OrderListResponse:
         tracking_number=shipment.awb if shipment else None,
         shipment_id=shipment.id if shipment else None,
         shopify_sync_status=shipment.shopify_sync_status.value if shipment else None,
-        shiprocket_order_url=shiprocket_order_url(shipment),
+        shiprocket_order_id=shiprocket_order_id(shipment),
         confirmed_by_telecaller_name=(
             order.confirmed_by_telecaller.name if order.confirmed_by_telecaller else None
         ),

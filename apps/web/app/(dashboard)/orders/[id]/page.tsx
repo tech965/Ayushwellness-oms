@@ -34,6 +34,7 @@ import {
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
 import { formatDateTime, formatMoney } from "@/lib/format"
+import { copyToClipboard, SHIPROCKET_READY_TO_SHIP_URL } from "@/lib/shiprocket"
 import { usePaymentsForOrder } from "@/services/payments"
 import { useRefundsForOrder } from "@/services/refunds"
 import { useReturnsForOrder } from "@/services/returns"
@@ -80,28 +81,44 @@ function OrderDetailContent() {
 
   const [nextStatus, setNextStatus] = React.useState<OrderStatus | undefined>(undefined)
 
-  // "Ship Order" opens the real Shiprocket "Ready to Ship" page
-  // (pre-filtered to just this order) in a new tab -- never a Shiprocket
-  // create-shipment API call from here.
-  // Shiprocket may already have this order (e.g. via its own Shopify
-  // channel connector, independent of this OMS), so creating one here
-  // risked a real, confirmed duplicate-shipment bug -- see the identical
-  // rule on `ShipmentActionCell`, the Fulfillment Queue's equivalent
-  // action. This card only ever shows the button while no `Shipment` row
-  // exists yet for this order (`!shipmentsQuery.data?.length` below), so
-  // the OMS never has a stored Shiprocket order id to link to here
-  // locally -- a click asks the backend to locate the EXISTING
-  // Shiprocket order live (`useLocateShiprocketOrders`, never creates
-  // one) before falling back to the "unavailable" message.
+  // "Ship Order" opens Shiprocket's plain "Ready to Ship" page in a new
+  // tab and copies the real Shiprocket order id to the clipboard --
+  // never a Shiprocket create-shipment API call from here. Shiprocket
+  // may already have this order (e.g. via its own Shopify channel
+  // connector, independent of this OMS), so creating one here risked a
+  // real, confirmed duplicate-shipment bug -- see the identical rule on
+  // `ShipmentActionCell`, the Fulfillment Queue's equivalent action.
+  // This card only ever shows the button while no `Shipment` row exists
+  // yet for this order (`!shipmentsQuery.data?.length` below), so the
+  // OMS never has a stored Shiprocket order id to use here locally -- a
+  // click asks the backend to locate the EXISTING Shiprocket order live
+  // (`useLocateShiprocketOrders`, never creates one) before falling back
+  // to the "unavailable" message.
+  async function openAndCopy(id: string) {
+    window.open(SHIPROCKET_READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
+    const copied = await copyToClipboard(id)
+    if (copied) {
+      toast.success(`Shiprocket Order ID ${id} copied.`, {
+        description: "Paste it into Shiprocket's Multiple Order IDs filter to find this order.",
+      })
+    } else {
+      toast.warning(`Shiprocket Order ID: ${id}`, {
+        description:
+          "Couldn't copy automatically -- copy this ID and paste it into Shiprocket's " +
+          "Multiple Order IDs filter to find this order.",
+      })
+    }
+  }
+
   function openShiprocketOrder() {
     if (locate.isPending) return
     locate.mutate([orderId], {
       onSuccess: (results) => {
         const result = results[0]
-        if (result?.shiprocket_order_url) {
-          window.open(result.shiprocket_order_url, "_blank", "noopener,noreferrer")
+        if (result?.shiprocket_order_id) {
+          void openAndCopy(result.shiprocket_order_id)
         } else {
-          toast.error("Shiprocket order link is unavailable for this order.", {
+          toast.error("Shiprocket order ID is unavailable for this order.", {
             description:
               result?.message ??
               "The OMS doesn't have a stored Shiprocket order id for this order yet -- it hasn't " +

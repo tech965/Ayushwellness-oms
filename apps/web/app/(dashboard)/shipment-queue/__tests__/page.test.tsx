@@ -10,6 +10,7 @@ import { useRetryShopifySync } from "@/services/shipments"
 import { useTeamTelecallers } from "@/services/team"
 
 const mockPush = vi.fn()
+const READY_TO_SHIP_URL = "https://app.shiprocket.in/seller/orders/readytoship"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, replace: vi.fn(), back: vi.fn() }),
@@ -56,7 +57,7 @@ const ROW = {
   shipment_id: null,
   shipment_status: null,
   shopify_sync_status: null,
-  shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
+  shiprocket_order_id: "1576398335",
   awb: null,
   courier_name: null,
 }
@@ -68,7 +69,7 @@ function mockShipHooks() {
         ids.map((id) => ({
           order_id: id,
           status: "not_found",
-          shiprocket_order_url: null,
+          shiprocket_order_id: null,
           message: null,
         }))
       )
@@ -80,6 +81,16 @@ function mockShipHooks() {
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useRetryShopifySync>)
+}
+
+/** `navigator.clipboard` must be stubbed AFTER `userEvent.setup()` --
+ * that call installs its own clipboard emulation, which would otherwise
+ * clobber a stub set beforehand.
+ */
+function mockClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
+  return writeText
 }
 
 describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
@@ -94,8 +105,9 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
     vi.clearAllMocks()
   })
 
-  it("renders orders needing shipment with a Ship Order action that opens the real Shiprocket order page", async () => {
+  it("renders orders needing shipment with a Ship Order action that opens the plain Shiprocket Ready to Ship page", async () => {
     const user = userEvent.setup()
+    mockClipboard()
     mockedUseShipmentQueue.mockReturnValue({
       isLoading: false,
       isError: false,
@@ -118,11 +130,7 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
     expect(screen.getByText("Ready to Ship")).toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
-      "_blank",
-      "noopener,noreferrer"
-    )
+    expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
   })
 
   it("shows the unavailable message instead of calling any Shiprocket API when no order id is stored", async () => {
@@ -132,7 +140,7 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
       isError: false,
       error: null,
       data: {
-        data: [{ ...ROW, shiprocket_order_url: null }],
+        data: [{ ...ROW, shiprocket_order_id: null }],
         meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
       },
       refetch: vi.fn(),
@@ -147,7 +155,7 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).not.toHaveBeenCalled()
     expect(toast.error).toHaveBeenCalledWith(
-      "Shiprocket order link is unavailable for this order.",
+      "Shiprocket order ID is unavailable for this order.",
       expect.anything()
     )
   })

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { screen } from "@testing-library/react"
+import { screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -72,7 +72,7 @@ function mockLocate(
       ids.map((id) => ({
         order_id: id,
         status: "not_found",
-        shiprocket_order_url: null,
+        shiprocket_order_id: null,
         message: null,
       }))
     )
@@ -199,6 +199,7 @@ describe("OrderDetailPage — Shopify tags and order note", () => {
 
 describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
   let openSpy: ReturnType<typeof vi.spyOn>
+  let writeText: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     openSpy = vi.spyOn(window, "open").mockReturnValue(null)
@@ -226,20 +227,25 @@ describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
     // when that also finds nothing, the message says so -- never a guess.
     expect(openSpy).not.toHaveBeenCalled()
     expect(toast.error).toHaveBeenCalledWith(
-      "Shiprocket order link is unavailable for this order.",
+      "Shiprocket order ID is unavailable for this order.",
       expect.anything()
     )
   })
 
-  it("opens the real Shiprocket order page when a live locate resolves the id", async () => {
+  it("opens Shiprocket's plain Ready to Ship page and copies the ID when a live locate resolves it", async () => {
     const user = userEvent.setup()
+    writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    })
     setUpQueries(BASE_ORDER)
     mockLocate((ids, opts) =>
       opts?.onSuccess?.(
         ids.map((id) => ({
           order_id: id,
           status: "found",
-          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
+          shiprocket_order_id: "1576398335",
           message: null,
         }))
       )
@@ -252,9 +258,14 @@ describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship",
       "_blank",
       "noopener,noreferrer"
+    )
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("1576398335"))
+    expect(toast.success).toHaveBeenCalledWith(
+      "Shiprocket Order ID 1576398335 copied.",
+      expect.anything()
     )
   })
 

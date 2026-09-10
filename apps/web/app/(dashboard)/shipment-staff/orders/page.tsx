@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
+import { copyToClipboard, SHIPROCKET_READY_TO_SHIP_URL } from "@/lib/shiprocket"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useLocateShiprocketOrdersForMyScope, useMyConfirmedOrders } from "@/services/shipment-staff"
 import { PAYMENT_TYPE_OPTIONS } from "@/types/order"
@@ -59,14 +60,14 @@ export default function ShipmentStaffOrdersPage() {
 function ShipmentStaffOrdersContent() {
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
   const locate = useLocateShiprocketOrdersForMyScope()
-  // Debounces a double-click into one open, not two tabs -- opening the
-  // Shiprocket order page is a read-only `window.open`, never a
-  // mutation, so this is purely a UX guard. Keyed per order id so
-  // opening one row's link never disables another's button.
+  // Debounces a double-click into one open, not two tabs -- opening
+  // Shiprocket's page is a read-only `window.open` (+ a clipboard
+  // write), never a mutation, so this is purely a UX guard. Keyed per
+  // order id so opening one row's link never disables another's button.
   const [openingOrderId, setOpeningOrderId] = React.useState<string | null>(null)
 
   function showUnavailable(message?: string | null) {
-    toast.error("Shiprocket order link is unavailable for this order.", {
+    toast.error("Shiprocket order ID is unavailable for this order.", {
       description:
         message ??
         "The OMS doesn't have a stored Shiprocket order id for this order yet -- it hasn't " +
@@ -75,15 +76,35 @@ function ShipmentStaffOrdersContent() {
     })
   }
 
-  function openShiprocketOrder(orderId: string, url: string | null) {
+  // Opens Shiprocket's plain "Ready to Ship" page and copies `id` to the
+  // clipboard so the operator can paste it into Shiprocket's own
+  // "Multiple Order IDs" filter.
+  async function openAndCopy(id: string) {
+    window.open(SHIPROCKET_READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
+    const copied = await copyToClipboard(id)
+    if (copied) {
+      toast.success(`Shiprocket Order ID ${id} copied.`, {
+        description: "Paste it into Shiprocket's Multiple Order IDs filter to find this order.",
+      })
+    } else {
+      toast.warning(`Shiprocket Order ID: ${id}`, {
+        description:
+          "Couldn't copy automatically -- copy this ID and paste it into Shiprocket's " +
+          "Multiple Order IDs filter to find this order.",
+      })
+    }
+  }
+
+  function openShiprocketOrder(orderId: string, id: string | null) {
     if (openingOrderId === orderId || locate.isPending) return
-    if (url) {
+    if (id) {
       setOpeningOrderId(orderId)
-      window.open(url, "_blank", "noopener,noreferrer")
-      window.setTimeout(
-        () => setOpeningOrderId((current) => (current === orderId ? null : current)),
-        1000
-      )
+      void openAndCopy(id).finally(() => {
+        window.setTimeout(
+          () => setOpeningOrderId((current) => (current === orderId ? null : current)),
+          1000
+        )
+      })
       return
     }
     // No locally-known Shiprocket order id yet -- ask the backend to
@@ -94,8 +115,8 @@ function ShipmentStaffOrdersContent() {
       onSuccess: (results) => {
         setOpeningOrderId(null)
         const result = results[0]
-        if (result?.shiprocket_order_url) {
-          window.open(result.shiprocket_order_url, "_blank", "noopener,noreferrer")
+        if (result?.shiprocket_order_id) {
+          void openAndCopy(result.shiprocket_order_id)
         } else {
           showUnavailable(result?.message)
         }
@@ -171,24 +192,24 @@ function ShipmentStaffOrdersContent() {
     {
       id: "actions",
       header: "",
-      // "Ship Order"/"Process Shipment" open the real Shiprocket
-      // "Ready to Ship" page (pre-filtered to just this order) in a new
-      // tab -- never a Shiprocket
-      // create-shipment API call from here (Shiprocket may already have
-      // this order, e.g. via its own Shopify channel connector,
-      // independent of this OMS, so creating one here risked a real
-      // duplicate-shipment bug). See `ShipmentActionCell` (Fulfillment's
-      // equivalent table) for the identical rule -- kept as a small
-      // local duplicate rather than reusing that component directly,
-      // since it also renders a "View" button pointed at `/orders/{id}`,
-      // a page this Shipment Staff role has no permission to open.
+      // "Ship Order"/"Process Shipment" open Shiprocket's plain "Ready
+      // to Ship" page in a new tab and copy the real Shiprocket order id
+      // to the clipboard -- never a Shiprocket create-shipment API call
+      // from here (Shiprocket may already have this order, e.g. via its
+      // own Shopify channel connector, independent of this OMS, so
+      // creating one here risked a real duplicate-shipment bug). See
+      // `ShipmentActionCell` (Fulfillment's equivalent table) for the
+      // identical rule -- kept as a small local duplicate rather than
+      // reusing that component directly, since it also renders a "View"
+      // button pointed at `/orders/{id}`, a page this Shipment Staff
+      // role has no permission to open.
       cell: (r) =>
         r.shipment_id ? (
           <Button
             size="sm"
             variant="outline"
             disabled={openingOrderId === r.order_id}
-            onClick={() => openShiprocketOrder(r.order_id, r.shiprocket_order_url)}
+            onClick={() => openShiprocketOrder(r.order_id, r.shiprocket_order_id)}
           >
             <ExternalLink className="size-3.5" />
             {openingOrderId === r.order_id && locate.isPending ? "Checking..." : "Process Shipment"}
@@ -197,7 +218,7 @@ function ShipmentStaffOrdersContent() {
           <Button
             size="sm"
             disabled={openingOrderId === r.order_id}
-            onClick={() => openShiprocketOrder(r.order_id, r.shiprocket_order_url)}
+            onClick={() => openShiprocketOrder(r.order_id, r.shiprocket_order_id)}
           >
             <ExternalLink className="size-3.5" />
             {openingOrderId === r.order_id && locate.isPending ? "Checking..." : "Ship Order"}

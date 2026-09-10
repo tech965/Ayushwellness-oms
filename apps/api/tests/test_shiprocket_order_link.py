@@ -1,15 +1,20 @@
-"""Fulfillment Queue "Process Shipment"/"Ship Order" now open the real
-Shiprocket "Ready to Ship" page (pre-filtered to one order via
-`order_ids`) in a new tab, instead of calling `ShiprocketOperationsService.
-create_shipment_for_order` again -- doing so would risk creating a
-second, duplicate Shiprocket order/shipment for one Shiprocket may
-already have (e.g. via its own Shopify channel connector, independent of
-this OMS ever pushing anything). Previously this opened the individual
-order-details page (`.../orders/details/{id}`) -- only the URL template
-changed; the id lookup itself (this whole file) is unchanged.
+"""Fulfillment Queue "Process Shipment"/"Ship Order".
 
-`shiprocket_order_url` (`app.services.shiprocket_service`) is the single
-place this URL is built, from the real Shiprocket order id
+Shiprocket support confirmed there is no officially supported deep-link
+URL for opening one specific order on their "Ready to Ship" page (an
+earlier version of this feature tried `?order_ids={id}` -- Shiprocket's
+own page silently ignores/resets it). The supported alternative: open
+Shiprocket's PLAIN "Ready to Ship" page
+(`SHIPROCKET_READY_TO_SHIP_URL`, no query string, ever) and hand the
+operator the real numeric Shiprocket order id to paste into Shiprocket's
+own "Multiple Order IDs" filter -- never call
+`ShiprocketOperationsService.create_shipment_for_order` again, which
+would risk creating a second, duplicate Shiprocket order/shipment for
+one Shiprocket may already have (e.g. via its own Shopify channel
+connector, independent of this OMS ever pushing anything).
+
+`shiprocket_order_id` (`app.services.shiprocket_service`) is the single
+place this id is resolved/validated, from the real Shiprocket order id
 `create_shipment_for_order` already persists in `Shipment.raw_external_
 payload["order_id"]` -- never derived from the OMS order number, and
 never guessed when that id genuinely isn't stored.
@@ -32,7 +37,7 @@ from app.services.order_service import OrderService
 from app.services.shiprocket_service import (
     SHIPROCKET_READY_TO_SHIP_URL,
     locate_shiprocket_orders,
-    shiprocket_order_url,
+    shiprocket_order_id,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -111,98 +116,99 @@ async def _make_ops_user(db_session: AsyncSession):
     return await make_user(db_session, email="ops@shiprocket-link.example.com", role=role)
 
 
-# --- shiprocket_order_url() unit tests ----------------------------------
+# --- SHIPROCKET_READY_TO_SHIP_URL is always plain, never templated ------
 
 
-def test_shiprocket_order_url_none_for_no_shipment() -> None:
-    assert shiprocket_order_url(None) is None
+def test_ready_to_ship_url_has_no_query_string() -> None:
+    """Shiprocket support confirmed `order_ids` (or any other deep-link
+    filter param) is not officially supported -- this constant must never
+    be templated with one.
+    """
+    assert SHIPROCKET_READY_TO_SHIP_URL == "https://app.shiprocket.in/seller/orders/readytoship"
+    assert "?" not in SHIPROCKET_READY_TO_SHIP_URL
 
 
-def test_shiprocket_order_url_none_when_no_raw_payload_stored() -> None:
+# --- shiprocket_order_id() unit tests ------------------------------------
+
+
+def test_shiprocket_order_id_none_for_no_shipment() -> None:
+    assert shiprocket_order_id(None) is None
+
+
+def test_shiprocket_order_id_none_when_no_raw_payload_stored() -> None:
     shipment = Shipment(shiprocket_shipment_id="5001", raw_external_payload=None)
-    assert shiprocket_order_url(shipment) is None
+    assert shiprocket_order_id(shipment) is None
 
 
-def test_shiprocket_order_url_none_when_payload_has_no_order_id() -> None:
+def test_shiprocket_order_id_none_when_payload_has_no_order_id() -> None:
     """A pulled-in shipment this OMS never created itself (e.g. one
     Shiprocket's own Shopify channel connector already had) -- see
-    `shiprocket_order_url`'s docstring on why this must never guess.
+    `shiprocket_order_id`'s docstring on why this must never guess.
     """
     shipment = Shipment(shiprocket_shipment_id="5001", raw_external_payload={"shipment_id": "5001"})
-    assert shiprocket_order_url(shipment) is None
+    assert shiprocket_order_id(shipment) is None
 
 
-def test_shiprocket_order_url_builds_the_ready_to_ship_url_from_the_stored_order_id() -> None:
-    """Requirement A: a valid, locally-stored Shiprocket order id builds
-    the "Ready to Ship" URL, `order_ids={numeric_id}` -- never the old
-    individual order-details page.
+def test_shiprocket_order_id_returns_the_stored_numeric_id() -> None:
+    """Requirement: a valid, locally-stored Shiprocket order id resolves
+    to the REAL numeric id -- a plain value the frontend copies to the
+    clipboard, never a URL.
     """
     shipment = Shipment(
         shiprocket_shipment_id="5001",
         raw_external_payload={"order_id": "1576398335", "shipment_id": "5001", "status": "NEW"},
     )
-    assert shiprocket_order_url(shipment) == f"{SHIPROCKET_READY_TO_SHIP_URL}?order_ids=1576398335"
-    assert (
-        shiprocket_order_url(shipment)
-        == "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335"
-    )
+    assert shiprocket_order_id(shipment) == "1576398335"
 
 
-def test_shiprocket_order_url_never_derived_from_the_oms_order_number() -> None:
-    """Requirement B: sanity guard against the literal mistake the spec
-    calls out -- the OMS order number (`#AWLxxxxx`) never appears
-    anywhere in the computation, only the stored Shiprocket `order_id`,
-    and it's always passed as the `order_ids` query param, never a path
-    segment.
+def test_shiprocket_order_id_never_derived_from_the_oms_order_number() -> None:
+    """Sanity guard against the literal mistake the spec calls out -- the
+    OMS order number (`#AWLxxxxx`) never appears anywhere in the
+    computation, only the stored Shiprocket `order_id`.
     """
     shipment = Shipment(
         shiprocket_shipment_id="5001",
         raw_external_payload={"order_id": "1576398335"},
     )
-    url = shiprocket_order_url(shipment)
-    assert url is not None
-    assert "AWL" not in url
-    assert "#" not in url
-    assert url == "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335"
+    resolved = shiprocket_order_id(shipment)
+    assert resolved is not None
+    assert "AWL" not in resolved
+    assert "#" not in resolved
+    assert resolved == "1576398335"
 
 
-def test_shiprocket_order_url_never_empty_for_a_whitespace_only_stored_id() -> None:
-    """Regression guard (production incident: `?order_ids=` observed
-    empty in the browser): a truthy-but-degenerate stored value (e.g. a
+def test_shiprocket_order_id_never_empty_for_a_whitespace_only_stored_id() -> None:
+    """Regression guard: a truthy-but-degenerate stored value (e.g. a
     malformed sync record with whitespace instead of a real id) must
-    never produce a URL with an empty `order_ids` -- `None` instead, same
-    as any other unresolvable case.
+    never be handed to the frontend as a usable id -- `None` instead,
+    same as any other unresolvable case.
     """
     shipment = Shipment(shiprocket_shipment_id="5001", raw_external_payload={"order_id": "   "})
-    assert shiprocket_order_url(shipment) is None
+    assert shiprocket_order_id(shipment) is None
 
 
-def test_shiprocket_order_url_never_empty_for_a_non_numeric_stored_id() -> None:
+def test_shiprocket_order_id_never_empty_for_a_non_numeric_stored_id() -> None:
     """Same regression guard -- a stored `order_id` that isn't purely
     digits (never confirmed live for a real Shiprocket order id in this
-    engagement) is rejected rather than blindly interpolated into the
-    URL.
+    engagement) is rejected rather than blindly handed to the operator.
     """
     shipment = Shipment(
         shiprocket_shipment_id="5001", raw_external_payload={"order_id": "not-a-real-id"}
     )
-    assert shiprocket_order_url(shipment) is None
+    assert shiprocket_order_id(shipment) is None
 
 
-def test_shiprocket_order_url_strips_incidental_whitespace_around_a_valid_id() -> None:
+def test_shiprocket_order_id_strips_incidental_whitespace_around_a_valid_id() -> None:
     shipment = Shipment(
         shiprocket_shipment_id="5001", raw_external_payload={"order_id": " 1576398335 "}
     )
-    assert (
-        shiprocket_order_url(shipment)
-        == "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335"
-    )
+    assert shiprocket_order_id(shipment) == "1576398335"
 
 
 # --- Exposed on the Shipment Queue ("Orders Need Shipment") -------------
 
 
-async def test_shipment_queue_exposes_the_real_shiprocket_order_url(
+async def test_shipment_queue_exposes_the_real_shiprocket_order_id(
     db_session: AsyncSession,
 ) -> None:
     ops = await _make_ops_user(db_session)
@@ -225,12 +231,10 @@ async def test_shipment_queue_exposes_the_real_shiprocket_order_url(
         response = await client.get("/api/v1/shipments/queue")
         assert response.status_code == 200
         row = next(r for r in response.json()["data"] if r["order_id"] == str(order.id))
-        assert row["shiprocket_order_url"] == (
-            "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335"
-        )
+        assert row["shiprocket_order_id"] == "1576398335"
 
 
-async def test_shipment_queue_url_is_null_when_no_shipment_exists_yet(
+async def test_shipment_queue_id_is_null_when_no_shipment_exists_yet(
     db_session: AsyncSession,
 ) -> None:
     ops = await _make_ops_user(db_session)
@@ -243,15 +247,15 @@ async def test_shipment_queue_url_is_null_when_no_shipment_exists_yet(
         response = await client.get("/api/v1/shipments/queue")
         assert response.status_code == 200
         row = next(r for r in response.json()["data"] if r["order_id"] == str(order.id))
-        assert row["shiprocket_order_url"] is None
+        assert row["shiprocket_order_id"] is None
 
 
-async def test_shipment_queue_url_is_null_when_shipment_has_no_stored_order_id(
+async def test_shipment_queue_id_is_null_when_shipment_has_no_stored_order_id(
     db_session: AsyncSession,
 ) -> None:
     """A `Shipment` row that exists but was never created via this OMS's
     own push (e.g. pulled in from Shiprocket) -- no order id to read, so
-    no link, never a guess.
+    no id, never a guess.
     """
     ops = await _make_ops_user(db_session)
     customer = await make_customer(db_session)
@@ -273,13 +277,13 @@ async def test_shipment_queue_url_is_null_when_shipment_has_no_stored_order_id(
         response = await client.get("/api/v1/shipments/queue")
         assert response.status_code == 200
         row = next(r for r in response.json()["data"] if r["order_id"] == str(order.id))
-        assert row["shiprocket_order_url"] is None
+        assert row["shiprocket_order_id"] is None
 
 
 # --- Exposed on Confirmed by Telecaller (`GET /orders?confirmed_only`) --
 
 
-async def test_confirmed_by_telecaller_list_exposes_the_real_shiprocket_order_url(
+async def test_confirmed_by_telecaller_list_exposes_the_real_shiprocket_order_id(
     db_session: AsyncSession,
 ) -> None:
     """`OrderListResponse`/`_to_list_response` backs both plain `GET
@@ -311,9 +315,7 @@ async def test_confirmed_by_telecaller_list_exposes_the_real_shiprocket_order_ur
         response = await client.get("/api/v1/orders")
         assert response.status_code == 200
         rows = {r["id"]: r for r in response.json()["data"]}
-        assert rows[str(order.id)]["shiprocket_order_url"] == (
-            "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398400"
-        )
+        assert rows[str(order.id)]["shiprocket_order_id"] == "1576398400"
 
 
 # --- No shipment-creation side effect from merely reading these rows ----
@@ -384,9 +386,7 @@ async def test_locate_resolves_instantly_from_an_existing_shipment_no_api_call(
     register_adapter(ShiprocketAdapter(client=_StubClient([])))
 
     results = await locate_shiprocket_orders(db_session, [order])
-    assert results == {
-        order.id: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000001"
-    }
+    assert results == {order.id: "1600000001"}
 
 
 async def test_locate_finds_a_shipment_via_a_live_bounded_scan_and_persists_it(
@@ -421,9 +421,7 @@ async def test_locate_finds_a_shipment_via_a_live_bounded_scan_and_persists_it(
 
     results = await locate_shiprocket_orders(db_session, [order])
 
-    assert results == {
-        order.id: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000002"
-    }
+    assert results == {order.id: "1600000002"}
     # Never a create-shipment call -- only the read/list endpoints.
     assert all(path != "/orders/create/adhoc" for _method, path, _json in client.calls)
 
@@ -438,7 +436,7 @@ async def test_locate_reports_not_found_when_nothing_matches_never_guesses(
     db_session: AsyncSession,
 ) -> None:
     """A bounded scan that genuinely finds no match reports `None` --
-    never a fabricated URL, and no `Shipment` row is created for this
+    never a fabricated id, and no `Shipment` row is created for this
     order (the unrelated candidate scanned belongs to a different,
     unknown order, so it's simply not persisted at all -- see
     `entity_sync._upsert_shipment`, which raises `NotFoundError` for an
@@ -521,10 +519,7 @@ async def test_locate_resolves_multiple_orders_from_one_shared_scan(
 
     results = await locate_shiprocket_orders(db_session, [order_a, order_b])
 
-    assert results == {
-        order_a.id: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000010",
-        order_b.id: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000011",
-    }
+    assert results == {order_a.id: "1600000010", order_b.id: "1600000011"}
 
 
 # --- POST /shipments/locate-shiprocket-order -----------------------------
@@ -579,11 +574,9 @@ async def test_locate_endpoint_returns_found_and_not_found_per_order(
         assert response.status_code == 200
         results = {r["order_id"]: r for r in response.json()["data"]}
         assert results[str(found_order.id)]["status"] == "found"
-        assert results[str(found_order.id)]["shiprocket_order_url"] == (
-            "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000020"
-        )
+        assert results[str(found_order.id)]["shiprocket_order_id"] == "1600000020"
         assert results[str(unresolvable_order.id)]["status"] == "not_found"
-        assert results[str(unresolvable_order.id)]["shiprocket_order_url"] is None
+        assert results[str(unresolvable_order.id)]["shiprocket_order_id"] is None
         assert results[str(unresolvable_order.id)]["message"]
 
 
@@ -652,28 +645,27 @@ async def test_shipment_staff_locate_endpoint_rejects_an_order_outside_scope(
 # "Confirmed by Telecaller" (`GET /orders?confirmed_only=true` ->
 # `_to_list_response` in `app.api.v1.endpoints.orders`) opened Shiprocket's
 # generic, unfiltered Ready to Ship page instead of the one order --
-# `order_ids` came back empty. Root cause found in `_to_list_response`:
-# `order.shipments[-1]` picked "the" shipment for a list row, but
-# `Order.shipments` is a plain `selectinload` with no `order_by` -- its
-# Python-list order is whatever Postgres happened to return, not a
-# guaranteed "insertion order" (and definitely not "most recently
-# created"). For an order with more than one `Shipment` row, this could
-# silently pick a stale/CANCELLED/no-Shiprocket-id one instead of the
-# genuine current shipment. Fixed by explicitly picking by `created_at`.
-# `shiprocket_order_url` itself was also hardened (see the whitespace/
-# non-digit tests above) as defense in depth, though it was already
-# provably incapable of emitting an empty `order_ids` on its own -- every
-# return is either `None` (never opened at all) or a URL built from an
-# already-validated non-empty value.
+# `order_ids` came back empty. Two compounding causes, both fixed:
+#
+# 1. `_to_list_response` picked "the" shipment for a list row via
+#    `order.shipments[-1]`, but `Order.shipments` is a plain
+#    `selectinload` with no `order_by` -- its Python-list order is
+#    whatever Postgres happened to return, not a guaranteed "insertion
+#    order" (and definitely not "most recently created"). Fixed by
+#    explicitly picking by `created_at`.
+# 2. Shiprocket support subsequently confirmed `order_ids` was never a
+#    supported deep-link parameter in the first place -- fixed by
+#    dropping URL templating entirely (`shiprocket_order_id()` now
+#    returns a plain id; the frontend opens `SHIPROCKET_READY_TO_SHIP_URL`
+#    unmodified and copies the id to the clipboard instead).
 
 
 async def test_confirmed_by_telecaller_list_resolves_a_real_order_number_to_a_numeric_id(
     db_session: AsyncSession,
 ) -> None:
-    """Requirement 13: the exact production scenario -- an order whose
-    number looks like the real one reported (`#AWL95498`) must resolve to
-    a Ready to Ship URL carrying the REAL numeric Shiprocket order id,
-    never the OMS order number and never an empty `order_ids`.
+    """The exact production scenario -- an order whose number looks like
+    the real one reported (`#AWL95498`) must resolve to the REAL numeric
+    Shiprocket order id, never the OMS order number and never empty.
     """
     role = await make_role(db_session, name="OPS_REGRESSION", permission_codes=["orders.read"])
     user = await make_user(
@@ -698,21 +690,21 @@ async def test_confirmed_by_telecaller_list_resolves_a_real_order_number_to_a_nu
         response = await client.get("/api/v1/orders")
         assert response.status_code == 200
         rows = {r["id"]: r for r in response.json()["data"]}
-        url = rows[str(order.id)]["shiprocket_order_url"]
+        resolved_id = rows[str(order.id)]["shiprocket_order_id"]
 
-        assert url is not None
-        assert url == "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600006001"
-        # Requirement B/14: never empty, never the OMS order number.
-        assert not url.endswith("order_ids=")
-        assert "order_ids=&" not in url
-        assert "AWL" not in url
+        assert resolved_id is not None
+        assert resolved_id != ""
+        assert resolved_id == "1600006001"
+        assert resolved_id.isdigit()
+        # Never the OMS order number.
+        assert "AWL" not in resolved_id
 
 
 async def test_confirmed_by_telecaller_list_picks_the_shipment_by_created_at_not_relation_order(
     db_session: AsyncSession,
 ) -> None:
-    """Regression test for the actual root cause: an order with TWO
-    `Shipment` rows, inserted in an order that would defeat a naive
+    """Regression test for root cause #1: an order with TWO `Shipment`
+    rows, inserted in an order that would defeat a naive
     `order.shipments[-1]` pick. `created_at` is set explicitly so the
     genuinely-most-recent shipment (the one with a real Shiprocket order
     id) is NOT the one insertion order would put last -- proving the
@@ -758,22 +750,18 @@ async def test_confirmed_by_telecaller_list_picks_the_shipment_by_created_at_not
         rows = {r["id"]: r for r in response.json()["data"]}
         row = rows[str(order.id)]
 
-        assert row["shiprocket_order_url"] == (
-            "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600006002"
-        )
+        assert row["shiprocket_order_id"] == "1600006002"
         # Confirms the *correct* (most recently created) shipment was
-        # picked for the row's other fields too, not just the URL.
+        # picked for the row's other fields too, not just the id.
         assert row["shipment_status"] == "pending"
 
 
-async def test_locate_endpoint_never_returns_a_url_with_empty_order_ids(
+async def test_locate_endpoint_never_returns_an_empty_shiprocket_order_id(
     db_session: AsyncSession,
 ) -> None:
-    """Requirement 14: an order the live scan genuinely cannot resolve
-    reports `not_found` with `shiprocket_order_url: null` -- never a URL
-    string with an empty `order_ids`, which would silently open
-    Shiprocket's generic, unfiltered Ready to Ship page instead of
-    surfacing the existing "could not be located" error.
+    """An order the live scan genuinely cannot resolve reports
+    `not_found` with `shiprocket_order_id: null` -- never an empty
+    string, which the frontend could otherwise mistake for a usable id.
     """
     ops = await _make_ops_user(db_session)
     customer = await make_customer(db_session)
@@ -790,7 +778,7 @@ async def test_locate_endpoint_never_returns_a_url_with_empty_order_ids(
         assert response.status_code == 200
         result = response.json()["data"][0]
         assert result["status"] == "not_found"
-        assert result["shiprocket_order_url"] is None
+        assert result["shiprocket_order_id"] is None
         assert result["message"]
 
     assert all(path != "/orders/create/adhoc" for _method, path, _json in client.calls)

@@ -126,15 +126,15 @@ async def locate_shiprocket_order_for_my_scope(
     order_ids = [order.id for order in orders]
     resolved = await locate_shiprocket_orders(session, orders)
     for order_id in order_ids:
-        url = resolved.get(order_id)
+        found_id = resolved.get(order_id)
         results.append(
             LocateShiprocketOrderResult(
                 order_id=order_id,
-                status="found" if url else "not_found",
-                shiprocket_order_url=url,
+                status="found" if found_id else "not_found",
+                shiprocket_order_id=found_id,
                 message=(
                     None
-                    if url
+                    if found_id
                     else "Existing Shiprocket order could not be located for this order."
                 ),
             )
