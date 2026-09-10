@@ -49,8 +49,8 @@ import uuid
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select  # pyright: ignore[reportMissingImports]
+from sqlalchemy.exc import IntegrityError  # pyright: ignore[reportMissingImports]
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
