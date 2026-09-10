@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest"
-import { screen, within } from "@testing-library/react"
+import { fireEvent, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -87,6 +87,7 @@ function line(
     packets_per_box: 1,
     total_packets: 100,
     stock_status: "in_stock",
+    image_url: null,
     ...over,
   }
 }
@@ -107,6 +108,7 @@ function omsVariant(
     stock_status: "in_stock",
     packets_per_box_uniform: new Set(underlying.map((u) => u.packets_per_box)).size <= 1,
     underlying_variant_count: underlying.length,
+    image_url: null,
     ...over,
     underlying_variants: underlying,
   }
@@ -118,6 +120,7 @@ const HERBAL_MASALA: InventoryProductStock = {
   product_name: "Aayush Wellness Herbal Masala",
   title: "आयुष हर्बल मसाला",
   title_override: "Aayush Wellness Herbal Masala",
+  image_url: "https://cdn.shopify.com/s/files/1/herbal-masala.jpg",
   available_boxes: 630,
   total_packets: 630,
   stock_status: "in_stock",
@@ -129,6 +132,7 @@ const HERBAL_MASALA: InventoryProductStock = {
       catalog_variant_id: "cv-royal",
       name: "Royal Tobacco Flavour",
       display_order: 0,
+      image_url: "https://cdn.shopify.com/s/files/1/royal-tobacco.jpg",
       underlying_variants: [
         line({
           id: "v-rg60",
@@ -148,6 +152,10 @@ const HERBAL_MASALA: InventoryProductStock = {
       catalog_variant_id: "cv-gutka",
       name: "Ghutka Flavour",
       display_order: 1,
+      // No distinct variant image -- the API already resolved this to
+      // the product's featured image server-side (see backend
+      // `_resolve_oms_variant_image`); the frontend just renders it.
+      image_url: "https://cdn.shopify.com/s/files/1/herbal-masala.jpg",
       underlying_variants: [
         line({
           id: "v-gu60",
@@ -191,6 +199,7 @@ const VAJRASHAKTI: InventoryProductStock = {
   product_name: "Vajrashakti",
   title: "Vajrashakti",
   title_override: null,
+  image_url: null,
   available_boxes: 900,
   total_packets: 900,
   stock_status: "in_stock",
@@ -231,6 +240,7 @@ const IMPLICIT: InventoryProductStock = {
   product_name: "Ungrouped Product",
   title: "Ungrouped Product",
   title_override: null,
+  image_url: null,
   available_boxes: 5,
   total_packets: 5,
   stock_status: "low_stock",
@@ -331,6 +341,41 @@ describe("InventoryProductPage — OMS-visible variants only", () => {
     renderWithProviders(<InventoryProductPage />)
     expect(screen.getByText("Ghutka Flavour")).toBeInTheDocument()
     expect(screen.queryByText("आयुष हर्बल मसाला")).not.toBeInTheDocument()
+  })
+})
+
+describe("InventoryProductPage — CatalogVariant images", () => {
+  it("renders an OMS variant's resolved image", () => {
+    const { container } = renderWithProviders(<InventoryProductPage />)
+    const img = container.querySelector('img[alt="Royal Tobacco Flavour"]')
+    expect(img).toHaveAttribute("src", "https://cdn.shopify.com/s/files/1/royal-tobacco.jpg")
+  })
+
+  it("falls back to the product image when a group has no distinct variant image", () => {
+    const { container } = renderWithProviders(<InventoryProductPage />)
+    // Ghutka Flavour has no image_url of its own -- the API already
+    // resolved this to the product's featured image server-side.
+    const img = container.querySelector('img[alt="Ghutka Flavour"]')
+    expect(img).toHaveAttribute("src", "https://cdn.shopify.com/s/files/1/herbal-masala.jpg")
+  })
+
+  it("renders a neutral placeholder, never a broken <img>, when image_url is null", () => {
+    setProduct(VAJRASHAKTI)
+    const { container } = renderWithProviders(<InventoryProductPage />)
+    // VAJRASHAKTI's OMS variant and product image are both null.
+    expect(container.querySelector('img[alt="Vajrashakti"]')).toBeNull()
+    expect(screen.getByRole("img", { name: "Vajrashakti" })).toBeInTheDocument()
+  })
+
+  it("falls back to the placeholder when the image URL fails to load", () => {
+    const { container } = renderWithProviders(<InventoryProductPage />)
+    const img = container.querySelector('img[alt="Royal Tobacco Flavour"]') as HTMLImageElement
+    expect(img).not.toBeNull()
+    fireEvent.error(img)
+    // After the load error, the <img> is replaced by the placeholder --
+    // no broken-image icon, still findable by the same accessible name.
+    expect(container.querySelector('img[alt="Royal Tobacco Flavour"]')).toBeNull()
+    expect(screen.getByRole("img", { name: "Royal Tobacco Flavour" })).toBeInTheDocument()
   })
 })
 

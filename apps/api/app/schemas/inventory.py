@@ -43,6 +43,11 @@ class InventoryProductSummaryResponse(BaseModel):
     title_override: str | None
     display_title: str
     vendor: str | None
+    # Shopify's featured product image (`Product.image_url`), or null if
+    # Shopify has none / the product was never synced. Source of truth is
+    # Shopify -- never an OMS-hosted copy; the frontend renders this URL
+    # directly and falls back to a placeholder when null.
+    image_url: str | None
     # Number of OMS-VISIBLE catalog variants (not the raw Shopify
     # ProductVariant count): declared `CatalogVariant`s + any variant not
     # yet grouped (each of those counts as its own implicit OMS variant).
@@ -77,6 +82,10 @@ class ProductVariantStockLine(BaseModel):
     packets_per_box: int
     total_packets: int
     stock_status: StockStatus
+    # This row's OWN Shopify image (`ProductVariant.image_url`), if
+    # Shopify assigned one distinct from the product's featured image.
+    # Usually null -- most variants share the product photo.
+    image_url: str | None
 
 
 class OmsCatalogVariantResponse(BaseModel):
@@ -94,6 +103,14 @@ class OmsCatalogVariantResponse(BaseModel):
     `catalog_variant_id` is None for an implicit OMS variant (a
     `ProductVariant` not yet grouped -- 1:1 with its single underlying
     row); a real UUID for a declared `CatalogVariant`.
+
+    `image_url` is RESOLVED, not stored: the lowest-SKU underlying
+    variant's own `image_url` if Shopify gave one of its members a
+    distinct image (e.g. a real per-flavour photo) -- a deterministic
+    tie-break, not "whichever the DB happened to return first" -- else
+    the product's featured image, else null. Never guessed from
+    position/filename/colour -- only an explicit Shopify variant/image
+    association, or the product fallback.
     """
 
     catalog_variant_id: uuid.UUID | None
@@ -106,6 +123,7 @@ class OmsCatalogVariantResponse(BaseModel):
     packets_per_box_uniform: bool
     underlying_variant_count: int
     underlying_variants: list[ProductVariantStockLine]
+    image_url: str | None
 
 
 class InventoryProductStockResponse(BaseModel):
@@ -124,6 +142,7 @@ class InventoryProductStockResponse(BaseModel):
     product_name: str  # display name: title_override or Shopify title
     title: str
     title_override: str | None
+    image_url: str | None  # Shopify's featured product image, or null
     available_boxes: int
     total_packets: int
     stock_status: StockStatus

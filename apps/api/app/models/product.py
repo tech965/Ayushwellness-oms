@@ -180,6 +180,18 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
     catalog_variant_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("catalog_variants.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # Shopify's per-variant image (`ProductVariant.image.url` on the
+    # GraphQL Admin API, or the matching entry in a REST webhook's
+    # `images[]` looked up by `image_id`) -- set only when Shopify has
+    # actually assigned a distinct image to THIS variant (e.g. one photo
+    # per flavour). `None` for a variant that shares the product's
+    # featured image; the read side (`InventoryService`/the Inventory API)
+    # falls back to `Product.image_url` in that case, never guessing an
+    # association Shopify didn't provide. Same sync contract as
+    # `Product.image_url`: updated when Shopify has a value, left alone
+    # (never nulled) when a sync payload has none, so a transient missing
+    # image never erases a previously-known one.
+    image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
     product: Mapped[Product] = relationship(back_populates="variants")
     catalog_variant: Mapped[CatalogVariant | None] = relationship(back_populates="product_variants")

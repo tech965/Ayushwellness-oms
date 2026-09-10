@@ -85,10 +85,36 @@ def _variant_stock_line(variant, *, threshold: int) -> ProductVariantStockLine: 
         packets_per_box=variant.packets_per_box,
         total_packets=variant.available_quantity * variant.packets_per_box,
         stock_status=InventoryService.compute_stock_status(variant.available_quantity, threshold),
+        image_url=variant.image_url,
     )
 
 
-def _oms_variant_response(group: OmsVariantGroup, *, threshold: int) -> OmsCatalogVariantResponse:
+def _resolve_oms_variant_image(
+    members, product_image_url: str | None
+) -> str | None:  # noqa: ANN001
+    """Explicit Shopify variant/image association ONLY -- the underlying
+    `ProductVariant` with the lexicographically smallest `sku` among
+    those that have their own `image_url` (Shopify actually assigned one
+    a distinct photo), else the product's featured image, else null.
+    Never infers which member "should" own an image from ordering,
+    filename, or any other guess.
+
+    Sorted by `sku` rather than iterated in whatever order `members`
+    arrives in: `ProductVariantRepository.list_for_product` has no
+    `ORDER BY`, so raw DB scan order is not guaranteed stable across
+    reads/engines. `sku` is unique and always present, so this makes
+    "the first one with an image" a well-defined, reproducible rule
+    instead of one that could vary between two reads of identical data.
+    """
+    candidates = [v for v in members if v.image_url]
+    if not candidates:
+        return product_image_url
+    return min(candidates, key=lambda v: v.sku).image_url
+
+
+def _oms_variant_response(
+    group: OmsVariantGroup, *, threshold: int, product_image_url: str | None
+) -> OmsCatalogVariantResponse:
     """Aggregate ONE OMS-visible variant from its underlying Shopify
     `ProductVariant` rows. `available_boxes` is a plain SUM of boxes (the
     common unit); `total_packets` sums each row's own
@@ -110,6 +136,7 @@ def _oms_variant_response(group: OmsVariantGroup, *, threshold: int) -> OmsCatal
         packets_per_box_uniform=len(pack_sizes) <= 1,
         underlying_variant_count=len(members),
         underlying_variants=[_variant_stock_line(v, threshold=threshold) for v in members],
+        image_url=_resolve_oms_variant_image(members, product_image_url),
     )
 
 
@@ -131,13 +158,17 @@ def _product_stock_response(  # noqa: ANN001
         product_name=_product_display_title(product),
         title=product.title,
         title_override=product.title_override,
+        image_url=product.image_url,
         available_boxes=available_boxes,
         total_packets=total_packets,
         stock_status=InventoryService.compute_stock_status(available_boxes, threshold),
         packets_per_box_uniform=len(pack_sizes) <= 1,
         oms_variant_count=len(oms_groups),
         underlying_variant_count=len(all_underlying),
-        oms_variants=[_oms_variant_response(g, threshold=threshold) for g in oms_groups],
+        oms_variants=[
+            _oms_variant_response(g, threshold=threshold, product_image_url=product.image_url)
+            for g in oms_groups
+        ],
     )
 
 
@@ -228,6 +259,7 @@ async def list_product_stock(
                 title_override=product.title_override,
                 display_title=_product_display_title(product),
                 vendor=product.vendor,
+                image_url=product.image_url,
                 variant_count=oms_variant_count,
                 total_available_boxes=total_boxes,
                 total_packets=total_packets,
@@ -461,8 +493,9 @@ async def set_catalog_variant_name(
         catalog_variant_id, name=payload.name, actor=current_user
     )
     threshold = await service.get_low_stock_threshold()
-    _product, oms_groups = await service.get_oms_variants_for_product(cv.product_id)
+    product, oms_groups = await service.get_oms_variants_for_product(cv.product_id)
     group = next(g for g in oms_groups if g.catalog_variant_id == cv.id)
     return ApiResponse(
-        data=_oms_variant_response(group, threshold=threshold), message="Catalog variant renamed."
+        data=_oms_variant_response(group, threshold=threshold, product_image_url=product.image_url),
+        message="Catalog variant renamed.",
     )

@@ -9,6 +9,7 @@ import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import { FilterBar } from "@/components/shared/filter-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
+import { ProductThumbnail } from "@/components/shared/product-thumbnail"
 import { QueryStates } from "@/components/shared/query-states"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -114,6 +115,14 @@ export default function InventoryPage() {
   const query = useInventoryProducts({ page, pageSize, q: search })
 
   const columns: DataTableColumn<InventoryProductSummary>[] = [
+    {
+      id: "image",
+      header: "",
+      className: "w-12",
+      cell: (product) => (
+        <ProductThumbnail src={product.image_url} alt={product.display_title} size="size-8" />
+      ),
+    },
     {
       id: "title",
       header: "Product",

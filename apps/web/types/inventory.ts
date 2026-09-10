@@ -19,6 +19,10 @@ export interface InventoryProductSummary {
   /** What the UI shows: `title_override` if set, else `title`. */
   display_title: string
   vendor: string | null
+  /** Shopify's featured product image, or null. Source of truth is
+   * Shopify -- rendered directly, never re-hosted by the OMS.
+   */
+  image_url: string | null
   variant_count: number
   total_available_boxes: number
   total_packets: number
@@ -64,6 +68,10 @@ export interface ProductVariantStockLine {
   packets_per_box: number
   total_packets: number
   stock_status: StockStatus
+  /** This row's OWN Shopify image, if Shopify assigned one distinct from
+   * the product's featured image. Usually null.
+   */
+  image_url: string | null
 }
 
 /** ONE OMS-visible variant on the product detail page. Groups one or more
@@ -82,6 +90,11 @@ export interface OmsCatalogVariant {
   packets_per_box_uniform: boolean
   underlying_variant_count: number
   underlying_variants: ProductVariantStockLine[]
+  /** Resolved server-side: an underlying variant's own image if Shopify
+   * gave one a distinct photo, else the product's featured image, else
+   * null. Never guessed client-side.
+   */
+  image_url: string | null
 }
 
 /** Product detail payload. `oms_variants` is the ONLY variant view shown
@@ -94,6 +107,8 @@ export interface InventoryProductStock {
   product_name: string
   title: string
   title_override: string | null
+  /** Shopify's featured product image, or null. */
+  image_url: string | null
   available_boxes: number
   total_packets: number
   stock_status: StockStatus

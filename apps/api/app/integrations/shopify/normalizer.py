@@ -212,14 +212,13 @@ class ShopifyProductNormalizer(ProductNormalizer):
             for edge in (raw.get("variants", {}).get("edges") or [])
         ]
         tags = raw.get("tags")
-        image_url = (raw.get("featuredImage") or {}).get("url")
+        image_url = _clean_text((raw.get("featuredImage") or {}).get("url"), max_len=2048)
 
-        return {
+        normalized: dict[str, Any] = {
             "source_system": SourceSystem.SHOPIFY,
             "external_id": _gid_to_external_id(raw.get("id")),
             "shopify_product_id": _gid_to_external_id(raw.get("id")),
             "title": raw.get("title") or "Untitled product",
-            "image_url": _clean_text(image_url, max_len=2048),
             "description": raw.get("descriptionHtml"),
             "vendor": raw.get("vendor"),
             "product_type": raw.get("productType"),
@@ -230,6 +229,17 @@ class ShopifyProductNormalizer(ProductNormalizer):
             "raw_external_payload": _sanitize_raw_payload(raw),
             "variants": variants,
         }
+        # Shopify's CURRENT featured image, when it has one. Omitted
+        # entirely (not set to None) when Shopify has none -- `upsert_
+        # synced_product`/`BaseRepository.update` blind-`setattr`s every
+        # key present in this dict, so an omitted key is never touched,
+        # preserving a previously-known image instead of erasing it on a
+        # sync where Shopify momentarily reports no image (same
+        # protection-by-omission pattern as `title_override`, just
+        # conditional here instead of permanent).
+        if image_url:
+            normalized["image_url"] = image_url
+        return normalized
 
     @staticmethod
     def _normalize_variant(raw: dict[str, Any]) -> dict[str, Any]:
@@ -238,7 +248,7 @@ class ShopifyProductNormalizer(ProductNormalizer):
             for opt in (raw.get("selectedOptions") or [])
             if opt.get("name")
         }
-        return {
+        normalized: dict[str, Any] = {
             "source_system": SourceSystem.SHOPIFY,
             "external_id": _gid_to_external_id(raw.get("id")),
             "shopify_variant_id": _gid_to_external_id(raw.get("id")),
@@ -261,6 +271,18 @@ class ShopifyProductNormalizer(ProductNormalizer):
             "status": ProductStatus.ACTIVE,
             "raw_external_payload": _sanitize_raw_payload(raw),
         }
+        # This variant's OWN Shopify image, ONLY when Shopify has actually
+        # assigned it a distinct one (e.g. one photo per flavour) -- an
+        # explicit variant/image association read straight off the
+        # payload, never inferred from position/filename/colour. Omitted
+        # (not None) when absent, same reasoning as the product-level
+        # `image_url` above: a later sync where this variant happens to
+        # have no distinct image must not erase one it had before; the
+        # read side falls back to the product's image regardless.
+        variant_image_url = _clean_text((raw.get("image") or {}).get("url"), max_len=2048)
+        if variant_image_url:
+            normalized["image_url"] = variant_image_url
+        return normalized
 
 
 # --- Order ----------------------------------------------------------------

@@ -91,6 +91,9 @@ query Products($first: Int!, $after: String, $query: String) {
               inventoryQuantity
               barcode
               selectedOptions { name value }
+              image {
+                url
+              }
             }
           }
         }

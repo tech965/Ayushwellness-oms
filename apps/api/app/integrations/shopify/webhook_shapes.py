@@ -198,6 +198,18 @@ def product_webhook_to_graphql_shape(raw: dict[str, Any]) -> dict[str, Any]:
     # product's `options` array wasn't included on this payload).
     option_names = {opt.get("position"): opt.get("name") for opt in (raw.get("options") or [])}
 
+    # REST represents images very differently from GraphQL: a top-level
+    # `image` is the product's featured image; each variant carries only
+    # an `image_id` referencing one entry of the product-level `images[]`
+    # array (never its own inline URL) — so a per-variant image has to be
+    # resolved by id lookup here, once, rather than in the normalizer.
+    featured_image = raw.get("image") or {}
+    images_by_id = {
+        img.get("id"): img.get("src")
+        for img in (raw.get("images") or [])
+        if img.get("id") is not None
+    }
+
     return {
         "id": _gid("Product", raw.get("id")),
         "title": raw.get("title"),
@@ -210,9 +222,10 @@ def product_webhook_to_graphql_shape(raw: dict[str, Any]) -> dict[str, Any]:
         "status": raw.get("status"),
         "createdAt": raw.get("created_at"),
         "updatedAt": raw.get("updated_at"),
+        "featuredImage": {"url": featured_image.get("src")} if featured_image.get("src") else None,
         "variants": {
             "edges": [
-                {"node": _product_variant_to_graphql_shape(v, option_names)}
+                {"node": _product_variant_to_graphql_shape(v, option_names, images_by_id)}
                 for v in (raw.get("variants") or [])
             ]
         },
@@ -220,7 +233,7 @@ def product_webhook_to_graphql_shape(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _product_variant_to_graphql_shape(
-    raw: dict[str, Any], option_names: dict[int, str]
+    raw: dict[str, Any], option_names: dict[int, str], images_by_id: dict[Any, str | None]
 ) -> dict[str, Any]:
     selected_options = [
         {
@@ -230,6 +243,7 @@ def _product_variant_to_graphql_shape(
         for position in (1, 2, 3)
         if raw.get(f"option{position}") is not None
     ]
+    variant_image_src = images_by_id.get(raw.get("image_id"))
 
     return {
         "id": _gid("ProductVariant", raw.get("id")),
@@ -241,6 +255,7 @@ def _product_variant_to_graphql_shape(
         "weight": raw.get("weight") or raw.get("grams"),
         "barcode": raw.get("barcode"),
         "selectedOptions": selected_options,
+        "image": {"url": variant_image_src} if variant_image_src else None,
     }
 
 

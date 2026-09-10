@@ -8,6 +8,7 @@ import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import { FilterBar } from "@/components/shared/filter-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
+import { ProductThumbnail } from "@/components/shared/product-thumbnail"
 import { QueryStates } from "@/components/shared/query-states"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -532,12 +533,15 @@ function UnderlyingShopifyVariants({
             key={v.id}
             className="flex flex-wrap items-center justify-between gap-2 p-2 text-sm"
           >
-            <div>
-              <span className="font-medium">{v.display_title}</span>
-              <span className="text-muted-foreground">
-                {" "}
-                · SKU {v.sku} · {v.available_boxes} boxes · {v.packets_per_box}/box
-              </span>
+            <div className="flex items-center gap-2">
+              <ProductThumbnail src={v.image_url} alt={v.display_title} size="size-8" />
+              <div>
+                <span className="font-medium">{v.display_title}</span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  · SKU {v.sku} · {v.available_boxes} boxes · {v.packets_per_box}/box
+                </span>
+              </div>
             </div>
             {canManage && (
               <div className="flex gap-1">
@@ -671,16 +675,19 @@ function OmsVariantCard({ group }: { group: OmsCatalogVariant }) {
   return (
     <Card>
       <CardHeader className="flex-row items-start justify-between">
-        <div>
-          <CardTitle>{group.name}</CardTitle>
-          <p className="text-muted-foreground text-sm">
-            {group.underlying_variant_count} Shopify SKU
-            {group.underlying_variant_count === 1 ? "" : "s"}
-            {" · "}
-            {group.packets_per_box_uniform && group.underlying_variants[0]
-              ? `${group.underlying_variants[0].packets_per_box} packets/box`
-              : "mixed pack sizes"}
-          </p>
+        <div className="flex items-start gap-3">
+          <ProductThumbnail src={group.image_url} alt={group.name} size="size-14" />
+          <div>
+            <CardTitle>{group.name}</CardTitle>
+            <p className="text-muted-foreground text-sm">
+              {group.underlying_variant_count} Shopify SKU
+              {group.underlying_variant_count === 1 ? "" : "s"}
+              {" · "}
+              {group.packets_per_box_uniform && group.underlying_variants[0]
+                ? `${group.underlying_variants[0].packets_per_box} packets/box`
+                : "mixed pack sizes"}
+            </p>
+          </div>
         </div>
         <StockStatusBadge status={group.stock_status} />
       </CardHeader>
