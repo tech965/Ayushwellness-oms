@@ -157,8 +157,9 @@ class OrderListResponse(OrderResponse):
     # when `shipment_status` is `None` (no shipment yet).
     shipment_id: uuid.UUID | None = None
     shopify_sync_status: str | None = None
-    # The real Shiprocket order-details page for the most recent shipment
-    # above -- see `app.services.shiprocket_service.shiprocket_order_url`.
+    # The real Shiprocket "Ready to Ship" page for the most recent
+    # shipment above -- see `app.services.shiprocket_service.
+    # shiprocket_order_url`.
     # `None` exactly when `shipment_id` is `None`, or when the OMS has no
     # reliably-stored Shiprocket order id for that shipment.
     shiprocket_order_url: str | None = None

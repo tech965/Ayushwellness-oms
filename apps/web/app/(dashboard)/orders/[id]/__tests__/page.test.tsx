@@ -239,7 +239,7 @@ describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
         ids.map((id) => ({
           order_id: id,
           status: "found",
-          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
           message: null,
         }))
       )
@@ -252,7 +252,7 @@ describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )

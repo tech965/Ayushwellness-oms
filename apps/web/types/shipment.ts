@@ -111,11 +111,12 @@ export interface ShipmentQueueRow {
   shopify_sync_status: string | null
   awb: string | null
   courier_name: string | null
-  // The real Shiprocket order-details page for this row's shipment --
-  // `null` exactly when `shipment_id` is `null`, or when the OMS has no
-  // reliably-stored Shiprocket order id for it. "Process Shipment"/"Ship
-  // Order" open this directly in a new tab instead of calling any
-  // Shiprocket create-shipment API.
+  // The real Shiprocket "Ready to Ship" page for this row's shipment
+  // (pre-filtered to just this order via `order_ids`) -- `null` exactly
+  // when `shipment_id` is `null`, or when the OMS has no reliably-stored
+  // Shiprocket order id for it. "Process Shipment"/"Ship Order" open this
+  // directly in a new tab instead of calling any Shiprocket
+  // create-shipment API.
   shiprocket_order_url: string | null
 }
 

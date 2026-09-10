@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 class LocateShiprocketOrderRequest(BaseModel):
     """One or many OMS order ids to resolve to their existing Shiprocket
-    order-details page -- never creates anything, see
+    "Ready to Ship" page -- never creates anything, see
     `app.services.shiprocket_service.locate_shiprocket_orders`.
     """
 

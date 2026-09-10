@@ -142,7 +142,7 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     mockQuery([
       {
         ...ROW,
-        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       },
     ])
     mockShipHooks()
@@ -151,7 +151,7 @@ describe("FulfillmentConfirmedOrdersPage", () => {
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )
@@ -219,7 +219,7 @@ describe("FulfillmentConfirmedOrdersPage", () => {
         {
           order_id: "order-1",
           status: "found",
-          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/order-1",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=order-1",
           message: null,
         },
       ],
@@ -241,7 +241,7 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     ).not.toBeInTheDocument()
     await user.click(within(dialog).getByRole("button", { name: /^Open All Found/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/order-1",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=order-1",
       "_blank",
       "noopener,noreferrer"
     )

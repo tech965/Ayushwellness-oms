@@ -172,7 +172,8 @@ function ShipmentStaffOrdersContent() {
       id: "actions",
       header: "",
       // "Ship Order"/"Process Shipment" open the real Shiprocket
-      // order-details page in a new tab -- never a Shiprocket
+      // "Ready to Ship" page (pre-filtered to just this order) in a new
+      // tab -- never a Shiprocket
       // create-shipment API call from here (Shiprocket may already have
       // this order, e.g. via its own Shopify channel connector,
       // independent of this OMS, so creating one here risked a real

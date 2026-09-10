@@ -1,9 +1,12 @@
 """Fulfillment Queue "Process Shipment"/"Ship Order" now open the real
-Shiprocket order-details page in a new tab, instead of calling
-`ShiprocketOperationsService.create_shipment_for_order` again -- doing so
-would risk creating a second, duplicate Shiprocket order/shipment for one
-Shiprocket may already have (e.g. via its own Shopify channel connector,
-independent of this OMS ever pushing anything).
+Shiprocket "Ready to Ship" page (pre-filtered to one order via
+`order_ids`) in a new tab, instead of calling `ShiprocketOperationsService.
+create_shipment_for_order` again -- doing so would risk creating a
+second, duplicate Shiprocket order/shipment for one Shiprocket may
+already have (e.g. via its own Shopify channel connector, independent of
+this OMS ever pushing anything). Previously this opened the individual
+order-details page (`.../orders/details/{id}`) -- only the URL template
+changed; the id lookup itself (this whole file) is unchanged.
 
 `shiprocket_order_url` (`app.services.shiprocket_service`) is the single
 place this URL is built, from the real Shiprocket order id
@@ -27,7 +30,7 @@ from app.models.shipment import Shipment
 from app.repositories.shipment import ShipmentRepository
 from app.services.order_service import OrderService
 from app.services.shiprocket_service import (
-    SHIPROCKET_ORDER_DASHBOARD_BASE_URL,
+    SHIPROCKET_READY_TO_SHIP_URL,
     locate_shiprocket_orders,
     shiprocket_order_url,
 )
@@ -129,22 +132,28 @@ def test_shiprocket_order_url_none_when_payload_has_no_order_id() -> None:
     assert shiprocket_order_url(shipment) is None
 
 
-def test_shiprocket_order_url_builds_from_the_stored_order_id() -> None:
+def test_shiprocket_order_url_builds_the_ready_to_ship_url_from_the_stored_order_id() -> None:
+    """Requirement A: a valid, locally-stored Shiprocket order id builds
+    the "Ready to Ship" URL, `order_ids={numeric_id}` -- never the old
+    individual order-details page.
+    """
     shipment = Shipment(
         shiprocket_shipment_id="5001",
         raw_external_payload={"order_id": "1576398335", "shipment_id": "5001", "status": "NEW"},
     )
-    assert shiprocket_order_url(shipment) == f"{SHIPROCKET_ORDER_DASHBOARD_BASE_URL}/1576398335"
+    assert shiprocket_order_url(shipment) == f"{SHIPROCKET_READY_TO_SHIP_URL}?order_ids=1576398335"
     assert (
         shiprocket_order_url(shipment)
-        == "https://app.shiprocket.in/seller/orders/details/1576398335"
+        == "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335"
     )
 
 
 def test_shiprocket_order_url_never_derived_from_the_oms_order_number() -> None:
-    """Sanity guard against the literal mistake the spec calls out --
-    the OMS order number (`#AWLxxxxx`) never appears anywhere in the
-    computation, only the stored Shiprocket `order_id`.
+    """Requirement B: sanity guard against the literal mistake the spec
+    calls out -- the OMS order number (`#AWLxxxxx`) never appears
+    anywhere in the computation, only the stored Shiprocket `order_id`,
+    and it's always passed as the `order_ids` query param, never a path
+    segment.
     """
     shipment = Shipment(
         shiprocket_shipment_id="5001",
@@ -153,6 +162,8 @@ def test_shiprocket_order_url_never_derived_from_the_oms_order_number() -> None:
     url = shiprocket_order_url(shipment)
     assert url is not None
     assert "AWL" not in url
+    assert "#" not in url
+    assert url == "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335"
 
 
 # --- Exposed on the Shipment Queue ("Orders Need Shipment") -------------
@@ -182,7 +193,7 @@ async def test_shipment_queue_exposes_the_real_shiprocket_order_url(
         assert response.status_code == 200
         row = next(r for r in response.json()["data"] if r["order_id"] == str(order.id))
         assert row["shiprocket_order_url"] == (
-            "https://app.shiprocket.in/seller/orders/details/1576398335"
+            "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335"
         )
 
 
@@ -268,7 +279,7 @@ async def test_confirmed_by_telecaller_list_exposes_the_real_shiprocket_order_ur
         assert response.status_code == 200
         rows = {r["id"]: r for r in response.json()["data"]}
         assert rows[str(order.id)]["shiprocket_order_url"] == (
-            "https://app.shiprocket.in/seller/orders/details/1576398400"
+            "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398400"
         )
 
 
@@ -340,7 +351,9 @@ async def test_locate_resolves_instantly_from_an_existing_shipment_no_api_call(
     register_adapter(ShiprocketAdapter(client=_StubClient([])))
 
     results = await locate_shiprocket_orders(db_session, [order])
-    assert results == {order.id: "https://app.shiprocket.in/seller/orders/details/1600000001"}
+    assert results == {
+        order.id: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000001"
+    }
 
 
 async def test_locate_finds_a_shipment_via_a_live_bounded_scan_and_persists_it(
@@ -375,7 +388,9 @@ async def test_locate_finds_a_shipment_via_a_live_bounded_scan_and_persists_it(
 
     results = await locate_shiprocket_orders(db_session, [order])
 
-    assert results == {order.id: "https://app.shiprocket.in/seller/orders/details/1600000002"}
+    assert results == {
+        order.id: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000002"
+    }
     # Never a create-shipment call -- only the read/list endpoints.
     assert all(path != "/orders/create/adhoc" for _method, path, _json in client.calls)
 
@@ -474,8 +489,8 @@ async def test_locate_resolves_multiple_orders_from_one_shared_scan(
     results = await locate_shiprocket_orders(db_session, [order_a, order_b])
 
     assert results == {
-        order_a.id: "https://app.shiprocket.in/seller/orders/details/1600000010",
-        order_b.id: "https://app.shiprocket.in/seller/orders/details/1600000011",
+        order_a.id: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000010",
+        order_b.id: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000011",
     }
 
 
@@ -532,7 +547,7 @@ async def test_locate_endpoint_returns_found_and_not_found_per_order(
         results = {r["order_id"]: r for r in response.json()["data"]}
         assert results[str(found_order.id)]["status"] == "found"
         assert results[str(found_order.id)]["shiprocket_order_url"] == (
-            "https://app.shiprocket.in/seller/orders/details/1600000020"
+            "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1600000020"
         )
         assert results[str(unresolvable_order.id)]["status"] == "not_found"
         assert results[str(unresolvable_order.id)]["shiprocket_order_url"] is None

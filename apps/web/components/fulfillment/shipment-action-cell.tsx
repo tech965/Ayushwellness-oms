@@ -17,11 +17,12 @@ export interface ShipmentActionCellProps {
   shopifySyncStatus: string | null | undefined
   orderStatus: string
   fulfillmentStatus: string
-  // The real Shiprocket order-details page for this order's (most
-  // recent) shipment -- `null`/`undefined` whenever the OMS has no
-  // reliably-stored Shiprocket order id for it (including "no shipment
-  // yet"). See `app.services.shiprocket_service.shiprocket_order_url`
-  // on the backend for exactly how/when this is computed.
+  // The real Shiprocket "Ready to Ship" page (pre-filtered to just this
+  // order via `order_ids`) for this order's (most recent) shipment --
+  // `null`/`undefined` whenever the OMS has no reliably-stored Shiprocket
+  // order id for it (including "no shipment yet"). See
+  // `app.services.shiprocket_service.shiprocket_order_url` on the
+  // backend for exactly how/when this is computed.
   shiprocketOrderUrl: string | null | undefined
 }
 
@@ -29,14 +30,15 @@ export interface ShipmentActionCellProps {
  * by Telecaller" -- one source of truth for "what button(s) make sense
  * for this row right now," so the two tables can never drift apart.
  *
- * "Ship Order"/"Process Shipment" open the real Shiprocket order-details
- * page in a new tab -- they never call any Shiprocket create-shipment
- * API from here. Shiprocket may already have this order (e.g. via its
- * own Shopify channel connector, entirely independent of this OMS), so
- * blindly creating a shipment on click risked a real, confirmed
- * duplicate-shipment bug; opening Shiprocket's own page instead lets the
- * operator review/assign courier/Ship Now there directly, using
- * whichever Shiprocket order already exists. When the OMS has no
+ * "Ship Order"/"Process Shipment" open the real Shiprocket "Ready to
+ * Ship" page (pre-filtered to just this order) in a new tab -- they
+ * never call any Shiprocket create-shipment API from here. Shiprocket
+ * may already have this order (e.g. via its own Shopify channel
+ * connector, entirely independent of this OMS), so blindly creating a
+ * shipment on click risked a real, confirmed duplicate-shipment bug;
+ * opening Shiprocket's own page instead lets the operator review/assign
+ * courier/Ship Now there directly, using whichever Shiprocket order
+ * already exists. When the OMS has no
  * locally-stored Shiprocket order id for this row (`shiprocketOrderUrl`
  * is `null`/`undefined`), a click triggers a live, bounded lookup
  * (`useLocateShiprocketOrders` -- see `app.services.shiprocket_service.

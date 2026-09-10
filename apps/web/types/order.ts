@@ -93,7 +93,7 @@ export interface Order {
   // `shipment_status` is `null` (no shipment yet).
   shipment_id?: string | null
   shopify_sync_status?: string | null
-  // The real Shiprocket order-details page for that same shipment --
+  // The real Shiprocket "Ready to Ship" page for that same shipment --
   // `null` under the exact same conditions as `shipment_id` above (no
   // shipment yet, or one with no reliably-stored Shiprocket order id).
   // "Process Shipment"/"Ship Order" open this directly in a new tab

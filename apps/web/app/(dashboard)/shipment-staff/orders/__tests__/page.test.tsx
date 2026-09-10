@@ -64,7 +64,7 @@ const ROW = {
   shipment_id: null,
   shipment_status: null,
   shopify_sync_status: null,
-  shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+  shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
   awb: null,
   courier_name: null,
 }
@@ -109,7 +109,7 @@ describe("ShipmentStaffOrdersPage", () => {
     // as the Fulfillment/Admin queue's `ShipmentActionCell`).
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )
@@ -145,7 +145,7 @@ describe("ShipmentStaffOrdersPage", () => {
         ids.map((id) => ({
           order_id: id,
           status: "found",
-          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
           message: null,
         }))
       )
@@ -165,7 +165,7 @@ describe("ShipmentStaffOrdersPage", () => {
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )
@@ -188,7 +188,7 @@ describe("ShipmentStaffOrdersPage", () => {
 
     await user.click(screen.getByRole("button", { name: /^Process Shipment$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )

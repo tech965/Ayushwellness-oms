@@ -42,21 +42,26 @@ from app.services.ndr_service import NDRService
 from app.services.shipment_service import ShipmentService
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
-# The Shiprocket seller-dashboard order-details page. Takes Shiprocket's
-# own numeric order id -- NEVER the OMS order number (`#AWLxxxxx`), which
-# has no relationship to it, and never `shiprocket_shipment_id` either
-# (a different id, for a different Shiprocket object -- `/orders/create/
+# The Shiprocket seller-dashboard "Ready to Ship" page, pre-filtered to
+# one order via the `order_ids` query param -- what "Process Shipment"/
+# "Ship Order" open now (previously the individual order-details page,
+# `.../orders/details/{id}`; changed here only -- the id lookup itself is
+# unchanged, see `shiprocket_order_url` below). Takes Shiprocket's own
+# numeric order id -- NEVER the OMS order number (`#AWLxxxxx`), which has
+# no relationship to it, and never `shiprocket_shipment_id` either (a
+# different id, for a different Shiprocket object -- `/orders/create/
 # adhoc`'s response has both `order_id` and `shipment_id` as separate
 # fields; this URL takes the former).
-SHIPROCKET_ORDER_DASHBOARD_BASE_URL = "https://app.shiprocket.in/seller/orders/details"
+SHIPROCKET_READY_TO_SHIP_URL = "https://app.shiprocket.in/seller/orders/readytoship"
 
 
 def shiprocket_order_url(shipment: Shipment | None) -> str | None:
-    """The exact Shiprocket order-details page for `shipment`, or `None`
-    when the OMS has no reliably-stored Shiprocket order id for it --
-    never fabricated from the OMS order number or any other guess (see
-    the Fulfillment Queue's "Process Shipment"/"Ship Order" actions,
-    which open this URL directly rather than calling `create_shipment_
+    """The exact Shiprocket "Ready to Ship" page for `shipment`
+    (`{SHIPROCKET_READY_TO_SHIP_URL}?order_ids={id}`), or `None` when the
+    OMS has no reliably-stored Shiprocket order id for it -- never
+    fabricated from the OMS order number or any other guess (see the
+    Fulfillment Queue's "Process Shipment"/"Ship Order" actions, which
+    open this URL directly rather than calling `create_shipment_
     for_order` again -- creating a second Shiprocket order for one this
     account may already have, e.g. via Shiprocket's own Shopify channel
     connector, is exactly the duplicate-shipment risk this exists to
@@ -86,7 +91,7 @@ def shiprocket_order_url(shipment: Shipment | None) -> str | None:
     order_id = payload.get("order_id")
     if not order_id:
         return None
-    return f"{SHIPROCKET_ORDER_DASHBOARD_BASE_URL}/{order_id}"
+    return f"{SHIPROCKET_READY_TO_SHIP_URL}?order_ids={order_id}"
 
 
 # Bounds on the live, on-demand scan `locate_shiprocket_orders` runs when
@@ -108,9 +113,9 @@ _LOCATE_MAX_CANDIDATES = 30
 async def locate_shiprocket_orders(
     session: AsyncSession, orders: list[Order]
 ) -> dict[uuid.UUID, str | None]:
-    """Resolves each of `orders` to its existing Shiprocket order-details
-    URL -- NEVER creates a Shiprocket order (no `orders/create/adhoc`
-    call anywhere in this function or anything it calls).
+    """Resolves each of `orders` to its existing Shiprocket "Ready to
+    Ship" URL -- NEVER creates a Shiprocket order (no `orders/create/
+    adhoc` call anywhere in this function or anything it calls).
 
     Two steps, in order:
 

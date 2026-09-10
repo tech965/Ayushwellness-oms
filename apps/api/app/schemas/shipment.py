@@ -127,7 +127,7 @@ class ShipmentQueueRowResponse(BaseModel):
     # queue table offer "Retry Shopify Sync" directly, without opening
     # the shipment. `None` exactly when `shipment_id` is `None`.
     shopify_sync_status: ShopifySyncStatus | None = None
-    # The real Shiprocket order-details page for this shipment (see
+    # The real Shiprocket "Ready to Ship" page for this shipment (see
     # `app.services.shiprocket_service.shiprocket_order_url`) -- `None`
     # when the OMS has no reliably-stored Shiprocket order id, including
     # whenever `shipment_id` is `None`. The Fulfillment Queue's "Process

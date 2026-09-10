@@ -56,7 +56,7 @@ const ROW = {
   shipment_id: null,
   shipment_status: null,
   shopify_sync_status: null,
-  shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+  shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
   awb: null,
   courier_name: null,
 }
@@ -119,7 +119,7 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )

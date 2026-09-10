@@ -148,7 +148,7 @@ describe("FulfillmentOrdersPage", () => {
         ids.map((id) => ({
           order_id: id,
           status: "found",
-          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
           message: null,
         }))
       )
@@ -162,7 +162,7 @@ describe("FulfillmentOrdersPage", () => {
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )
@@ -173,7 +173,7 @@ describe("FulfillmentOrdersPage", () => {
     mockQueue([
       {
         ...ROW,
-        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       },
     ])
     mockShipHooks()
@@ -182,7 +182,7 @@ describe("FulfillmentOrdersPage", () => {
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )
@@ -196,7 +196,7 @@ describe("FulfillmentOrdersPage", () => {
         ...ROW,
         shipment_id: "ship-1",
         shipment_status: "pending",
-        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       },
     ])
     mockShipHooks()
@@ -206,7 +206,7 @@ describe("FulfillmentOrdersPage", () => {
     expect(screen.queryByRole("button", { name: /^Ship Order$/i })).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: /^Process Shipment$/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       "_blank",
       "noopener,noreferrer"
     )
@@ -218,7 +218,7 @@ describe("FulfillmentOrdersPage", () => {
     mockQueue([
       {
         ...ROW,
-        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
       },
     ])
     mockShipHooks()
@@ -239,7 +239,7 @@ describe("FulfillmentOrdersPage", () => {
         ids.map((id) => ({
           order_id: id,
           status: "found",
-          shiprocket_order_url: `https://app.shiprocket.in/seller/orders/details/${id}`,
+          shiprocket_order_url: `https://app.shiprocket.in/seller/orders/readytoship?order_ids=${id}`,
           message: null,
         }))
       )
@@ -251,7 +251,7 @@ describe("FulfillmentOrdersPage", () => {
         {
           order_id: "order-1",
           status: "found",
-          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/order-1",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=order-1",
           message: null,
         },
       ],
@@ -277,7 +277,7 @@ describe("FulfillmentOrdersPage", () => {
     expect(within(dialog).queryByRole("button", { name: /create shipment/i })).not.toBeInTheDocument()
     await user.click(within(dialog).getByRole("button", { name: /^Open All Found/i }))
     expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/details/order-1",
+      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=order-1",
       "_blank",
       "noopener,noreferrer"
     )
@@ -292,7 +292,7 @@ describe("FulfillmentOrdersPage", () => {
         {
           order_id: "order-1",
           status: "found",
-          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/order-1",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=order-1",
           message: null,
         },
         {
