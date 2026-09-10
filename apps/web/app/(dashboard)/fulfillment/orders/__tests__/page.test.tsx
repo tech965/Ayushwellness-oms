@@ -151,9 +151,9 @@ describe("FulfillmentOrdersPage", () => {
     expect(mockPush).not.toHaveBeenCalled()
   })
 
-  it("opens Shiprocket's plain Ready to Ship page and copies the ID when a live locate resolves it", async () => {
+  it("opens the plain Ready to Ship page and shows the resolved ID in a dialog when a live locate finds it", async () => {
     const user = userEvent.setup()
-    const writeText = mockClipboard()
+    mockClipboard()
     mockQueue()
     mockLocateHook((ids, opts) =>
       opts?.onSuccess?.(
@@ -173,8 +173,56 @@ describe("FulfillmentOrdersPage", () => {
     renderWithProviders(<FulfillmentOrdersPage />)
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    // Ready to Ship opens with no query string -- no automatic clipboard
+    // attempt is chained after it.
     expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith("1576398335"))
+
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByDisplayValue("1576398335")).toBeInTheDocument()
+  })
+
+  it("copies the ID directly from the dialog's own Copy Order ID button click, not automatically", async () => {
+    const user = userEvent.setup()
+    const writeText = mockClipboard()
+    mockQueue([{ ...ROW, shiprocket_order_id: "1576398335" }])
+    mockShipHooks()
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    const dialog = await screen.findByRole("dialog")
+    // Not copied yet -- only the dialog's own button click does that.
+    expect(writeText).not.toHaveBeenCalled()
+
+    await user.click(within(dialog).getByRole("button", { name: /^Copy Order ID$/i }))
+    expect(writeText).toHaveBeenCalledWith("1576398335")
+    expect(toast.success).toHaveBeenCalledWith("Shiprocket Order ID 1576398335 copied.")
+  })
+
+  it("leaves the ID selected in the dialog when the clipboard API fails, instead of silently doing nothing", async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockRejectedValue(new DOMException("Document is not focused."))
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
+    mockQueue([{ ...ROW, shiprocket_order_id: "1576398335" }])
+    mockShipHooks()
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    const dialog = await screen.findByRole("dialog")
+    const field = within(dialog).getByDisplayValue("1576398335") as HTMLInputElement
+
+    await user.click(within(dialog).getByRole("button", { name: /^Copy Order ID$/i }))
+
+    expect(toast.warning).toHaveBeenCalledWith(
+      "Couldn't copy automatically.",
+      expect.anything()
+    )
+    // The field is still there, still holding the real id, and selected
+    // (its value is never cleared) -- a manual Ctrl+C always works.
+    expect(field).toBeInTheDocument()
+    expect(field.value).toBe("1576398335")
+    expect(field.readOnly).toBe(true)
   })
 
   it("opens the plain Ready to Ship page directly when the id is already on the row", async () => {
@@ -211,7 +259,7 @@ describe("FulfillmentOrdersPage", () => {
     expect(mockPush).not.toHaveBeenCalled()
   })
 
-  it("does not open a second tab on a rapid double-click", async () => {
+  it("does not open a second tab on a rapid double-click -- the dialog itself blocks re-clicking the button", async () => {
     const user = userEvent.setup()
     mockClipboard()
     mockQueue([{ ...ROW, shiprocket_order_id: "1576398335" }])
@@ -221,8 +269,11 @@ describe("FulfillmentOrdersPage", () => {
 
     const button = screen.getByRole("button", { name: /^Ship Order$/i })
     await user.click(button)
-    await user.click(button)
+    await screen.findByRole("dialog")
 
+    // The open dialog makes the underlying table inert -- a second click
+    // on the same button can't even be delivered, so at most one tab is
+    // ever opened per dialog.
     expect(openSpy).toHaveBeenCalledTimes(1)
   })
 

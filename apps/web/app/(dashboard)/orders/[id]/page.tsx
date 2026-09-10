@@ -7,6 +7,7 @@ import { ExternalLink, Mail, MapPin, Phone, PhoneCall, Tag, Truck } from "lucide
 import { toast } from "sonner"
 
 import { CashfreePaymentCard } from "@/components/orders/cashfree-payment-card"
+import { ShiprocketOrderIdDialog } from "@/components/fulfillment/shiprocket-order-id-dialog"
 import { Breadcrumbs } from "@/components/shared/breadcrumbs"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
@@ -34,7 +35,7 @@ import {
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
 import { formatDateTime, formatMoney } from "@/lib/format"
-import { copyToClipboard, SHIPROCKET_READY_TO_SHIP_URL } from "@/lib/shiprocket"
+import { SHIPROCKET_READY_TO_SHIP_URL } from "@/lib/shiprocket"
 import { usePaymentsForOrder } from "@/services/payments"
 import { useRefundsForOrder } from "@/services/refunds"
 import { useReturnsForOrder } from "@/services/returns"
@@ -80,43 +81,36 @@ function OrderDetailContent() {
   const locate = useLocateShiprocketOrders()
 
   const [nextStatus, setNextStatus] = React.useState<OrderStatus | undefined>(undefined)
+  const [dialogOpen, setDialogOpen] = React.useState(false)
+  const [dialogOrderId, setDialogOrderId] = React.useState<string | null>(null)
 
   // "Ship Order" opens Shiprocket's plain "Ready to Ship" page in a new
-  // tab and copies the real Shiprocket order id to the clipboard --
-  // never a Shiprocket create-shipment API call from here. Shiprocket
-  // may already have this order (e.g. via its own Shopify channel
-  // connector, independent of this OMS), so creating one here risked a
-  // real, confirmed duplicate-shipment bug -- see the identical rule on
+  // tab, then shows the real Shiprocket order id via
+  // `ShiprocketOrderIdDialog` for the operator to copy -- never a
+  // Shiprocket create-shipment API call from here. Shiprocket may already
+  // have this order (e.g. via its own Shopify channel connector,
+  // independent of this OMS), so creating one here risked a real,
+  // confirmed duplicate-shipment bug -- see the identical rule on
   // `ShipmentActionCell`, the Fulfillment Queue's equivalent action.
   // This card only ever shows the button while no `Shipment` row exists
   // yet for this order (`!shipmentsQuery.data?.length` below), so the
   // OMS never has a stored Shiprocket order id to use here locally -- a
   // click asks the backend to locate the EXISTING Shiprocket order live
   // (`useLocateShiprocketOrders`, never creates one) before falling back
-  // to the "unavailable" message.
-  async function openAndCopy(id: string) {
-    window.open(SHIPROCKET_READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
-    const copied = await copyToClipboard(id)
-    if (copied) {
-      toast.success(`Shiprocket Order ID ${id} copied.`, {
-        description: "Paste it into Shiprocket's Multiple Order IDs filter to find this order.",
-      })
-    } else {
-      toast.warning(`Shiprocket Order ID: ${id}`, {
-        description:
-          "Couldn't copy automatically -- copy this ID and paste it into Shiprocket's " +
-          "Multiple Order IDs filter to find this order.",
-      })
-    }
-  }
-
+  // to the "unavailable" message. The dialog's own "Copy Order ID"
+  // button is the only place a clipboard write is ever attempted -- see
+  // its docstring for why a copy chained right after `window.open()`/
+  // this network lookup reliably fails the browser's clipboard
+  // focus/activation check instead.
   function openShiprocketOrder() {
     if (locate.isPending) return
     locate.mutate([orderId], {
       onSuccess: (results) => {
         const result = results[0]
         if (result?.shiprocket_order_id) {
-          void openAndCopy(result.shiprocket_order_id)
+          window.open(SHIPROCKET_READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
+          setDialogOrderId(result.shiprocket_order_id)
+          setDialogOpen(true)
         } else {
           toast.error("Shiprocket order ID is unavailable for this order.", {
             description:
@@ -587,6 +581,7 @@ function OrderDetailContent() {
           </div>
         )}
       </QueryStates>
+      <ShiprocketOrderIdDialog open={dialogOpen} onOpenChange={setDialogOpen} orderId={dialogOrderId} />
     </>
   )
 }

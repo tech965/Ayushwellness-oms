@@ -5,9 +5,10 @@ import { useRouter } from "next/navigation"
 import { ExternalLink } from "lucide-react"
 import { toast } from "sonner"
 
+import { ShiprocketOrderIdDialog } from "@/components/fulfillment/shiprocket-order-id-dialog"
 import { Button } from "@/components/ui/button"
 import { getApiErrorMessage } from "@/lib/api-client"
-import { copyToClipboard, SHIPROCKET_READY_TO_SHIP_URL } from "@/lib/shiprocket"
+import { SHIPROCKET_READY_TO_SHIP_URL } from "@/lib/shiprocket"
 import { useLocateShiprocketOrders } from "@/services/shipment-queue"
 import { useRetryShopifySync } from "@/services/shipments"
 
@@ -31,23 +32,26 @@ export interface ShipmentActionCellProps {
  * for this row right now," so the two tables can never drift apart.
  *
  * "Ship Order"/"Process Shipment" open Shiprocket's plain "Ready to
- * Ship" page in a new tab and copy the order's real Shiprocket order id
- * to the clipboard -- they never call any Shiprocket create-shipment API
- * from here. Shiprocket support confirmed there is no supported deep-
- * link URL for one specific order (an earlier version of this tried
- * `?order_ids={id}`; Shiprocket's own page silently ignored it), so the
- * id is handed to the operator to paste into Shiprocket's own "Multiple
- * Order IDs" filter instead. Shiprocket may already have this order
- * (e.g. via its own Shopify channel connector, entirely independent of
- * this OMS), so blindly creating a shipment on click risked a real,
- * confirmed duplicate-shipment bug. When the OMS has no locally-stored
- * Shiprocket order id for this row (`shiprocketOrderId` is `null`/
- * `undefined`), a click triggers a live, bounded lookup
- * (`useLocateShiprocketOrders` -- see `app.services.shiprocket_service.
- * locate_shiprocket_orders`) that resolves the order's EXISTING
- * Shiprocket order by exact identifier, never a guess and never a
- * create-shipment call; only if that also finds nothing does the button
- * say the id is unavailable.
+ * Ship" page in a new tab, then show `ShiprocketOrderIdDialog` with the
+ * order's real Shiprocket order id -- they never call any Shiprocket
+ * create-shipment API from here. Shiprocket support confirmed there is
+ * no supported deep-link URL for one specific order (an earlier version
+ * of this tried `?order_ids={id}`; Shiprocket's own page silently
+ * ignored it), so the id is handed to the operator via that dialog to
+ * paste into Shiprocket's own "Multiple Order IDs" filter instead --
+ * copying happens only from a direct click on the dialog's own "Copy
+ * Order ID" button, never automatically right after `window.open()` or
+ * the live lookup below (see that dialog's docstring for why). Shiprocket
+ * may already have this order (e.g. via its own Shopify channel
+ * connector, entirely independent of this OMS), so blindly creating a
+ * shipment on click risked a real, confirmed duplicate-shipment bug.
+ * When the OMS has no locally-stored Shiprocket order id for this row
+ * (`shiprocketOrderId` is `null`/`undefined`), a click triggers a live,
+ * bounded lookup (`useLocateShiprocketOrders` -- see
+ * `app.services.shiprocket_service.locate_shiprocket_orders`) that
+ * resolves the order's EXISTING Shiprocket order by exact identifier,
+ * never a guess and never a create-shipment call; only if that also
+ * finds nothing does the button say the id is unavailable.
  */
 export function ShipmentActionCell({
   orderId,
@@ -61,9 +65,11 @@ export function ShipmentActionCell({
   const router = useRouter()
   const retrySync = useRetryShopifySync(shipmentId ?? "")
   const locate = useLocateShiprocketOrders()
-  // Debounces a double-click into one open, not two tabs -- the click
-  // itself is a read-only `window.open` (+ a clipboard write), never a
-  // mutation, so this is purely a UX guard, not a correctness one.
+  const [dialogOpen, setDialogOpen] = React.useState(false)
+  const [dialogOrderId, setDialogOrderId] = React.useState<string | null>(null)
+  // Debounces a double-click into one `window.open`, not two tabs -- the
+  // dialog itself staying open is not enough of a guard on its own,
+  // since the button underneath it remains clickable.
   const [opening, setOpening] = React.useState(false)
 
   const noBlockingShipment = !shipmentStatus || shipmentStatus === "cancelled"
@@ -80,35 +86,22 @@ export function ShipmentActionCell({
     })
   }
 
-  // Opens Shiprocket's plain "Ready to Ship" page and copies `id` to the
-  // clipboard so the operator can paste it into Shiprocket's own
-  // "Multiple Order IDs" filter -- `window.open` fires first (still
-  // within the click's own synchronous call stack, so it's never
-  // blocked as a popup) and the clipboard write follows.
-  async function openAndCopy(id: string) {
+  // Opens Shiprocket's plain "Ready to Ship" page and hands the id to
+  // the operator via `ShiprocketOrderIdDialog` -- never an automatic
+  // clipboard write here (see that dialog's docstring for exactly why).
+  function openReadyToShipAndShowId(id: string) {
+    setOpening(true)
     window.open(SHIPROCKET_READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
-    const copied = await copyToClipboard(id)
-    if (copied) {
-      toast.success(`Shiprocket Order ID ${id} copied.`, {
-        description: "Paste it into Shiprocket's Multiple Order IDs filter to find this order.",
-      })
-    } else {
-      toast.warning(`Shiprocket Order ID: ${id}`, {
-        description:
-          "Couldn't copy automatically -- copy this ID and paste it into Shiprocket's " +
-          "Multiple Order IDs filter to find this order.",
-      })
-    }
+    setDialogOrderId(id)
+    setDialogOpen(true)
+    window.setTimeout(() => setOpening(false), 1000)
   }
 
   function openShiprocketOrder(e: React.MouseEvent) {
     e.stopPropagation()
     if (opening || locate.isPending) return
     if (shiprocketOrderId) {
-      setOpening(true)
-      void openAndCopy(shiprocketOrderId).finally(() => {
-        window.setTimeout(() => setOpening(false), 1000)
-      })
+      openReadyToShipAndShowId(shiprocketOrderId)
       return
     }
     // No locally-known Shiprocket order id yet -- ask the backend to
@@ -118,7 +111,7 @@ export function ShipmentActionCell({
       onSuccess: (results) => {
         const result = results[0]
         if (result?.shiprocket_order_id) {
-          void openAndCopy(result.shiprocket_order_id)
+          openReadyToShipAndShowId(result.shiprocket_order_id)
         } else {
           showUnavailable(result?.message)
         }
@@ -142,6 +135,10 @@ export function ShipmentActionCell({
     </Button>
   )
 
+  const dialog = (
+    <ShiprocketOrderIdDialog open={dialogOpen} onOpenChange={setDialogOpen} orderId={dialogOrderId} />
+  )
+
   if (eligibleToShip) {
     return (
       <div className="flex items-center gap-1.5">
@@ -150,6 +147,7 @@ export function ShipmentActionCell({
           {locate.isPending ? "Checking..." : "Ship Order"}
         </Button>
         {viewButton}
+        {dialog}
       </div>
     )
   }
@@ -165,6 +163,7 @@ export function ShipmentActionCell({
           {locate.isPending ? "Checking..." : "Process Shipment"}
         </Button>
         {viewButton}
+        {dialog}
       </div>
     )
   }

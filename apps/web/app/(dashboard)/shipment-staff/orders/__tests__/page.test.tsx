@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { screen, waitFor } from "@testing-library/react"
+import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -146,7 +146,7 @@ describe("ShipmentStaffOrdersPage", () => {
     )
   })
 
-  it("opens the plain Ready to Ship page and copies the ID when the scoped live locate resolves it", async () => {
+  it("opens the plain Ready to Ship page and shows the resolved ID in a dialog when the scoped live locate resolves it", async () => {
     const user = userEvent.setup()
     const writeText = mockClipboard()
     mockLocate((ids, opts) =>
@@ -174,7 +174,57 @@ describe("ShipmentStaffOrdersPage", () => {
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
+    // Not copied yet -- only the dialog's own button click does that.
+    expect(writeText).not.toHaveBeenCalled()
+
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByDisplayValue("1576398335")).toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole("button", { name: /^Copy Order ID$/i }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("1576398335"))
+    expect(toast.success).toHaveBeenCalledWith("Shiprocket Order ID 1576398335 copied.")
+  })
+
+  it("leaves the ID selectable in the dialog when the clipboard API fails", async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockRejectedValue(new DOMException("Document is not focused."))
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
+    mockLocate((ids, opts) =>
+      opts?.onSuccess?.(
+        ids.map((id) => ({
+          order_id: id,
+          status: "found",
+          shiprocket_order_id: "1576398335",
+          message: null,
+        }))
+      )
+    )
+    mockedUseMyConfirmedOrders.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: {
+        data: [{ ...ROW, shiprocket_order_id: null }],
+        meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+      },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useMyConfirmedOrders>)
+
+    renderWithProviders(<ShipmentStaffOrdersPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    const dialog = await screen.findByRole("dialog")
+    const field = within(dialog).getByDisplayValue("1576398335") as HTMLInputElement
+
+    await user.click(within(dialog).getByRole("button", { name: /^Copy Order ID$/i }))
+
+    expect(toast.warning).toHaveBeenCalledWith(
+      "Couldn't copy automatically.",
+      expect.anything()
+    )
+    expect(field).toBeInTheDocument()
+    expect(field.value).toBe("1576398335")
+    expect(field.readOnly).toBe(true)
   })
 
   it("opens the plain Ready to Ship page for Process Shipment once a shipment already exists", async () => {

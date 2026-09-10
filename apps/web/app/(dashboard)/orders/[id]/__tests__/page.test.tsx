@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { screen, waitFor } from "@testing-library/react"
+import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -232,7 +232,7 @@ describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
     )
   })
 
-  it("opens Shiprocket's plain Ready to Ship page and copies the ID when a live locate resolves it", async () => {
+  it("opens Shiprocket's plain Ready to Ship page and shows the resolved ID in a dialog when a live locate resolves it", async () => {
     const user = userEvent.setup()
     writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, "clipboard", {
@@ -257,16 +257,60 @@ describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
     renderWithProviders(<OrderDetailPage />)
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    // Ready to Ship opens with no query string -- no automatic clipboard
+    // attempt is chained after the live locate's async response.
     expect(openSpy).toHaveBeenCalledWith(
       "https://app.shiprocket.in/seller/orders/readytoship",
       "_blank",
       "noopener,noreferrer"
     )
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith("1576398335"))
-    expect(toast.success).toHaveBeenCalledWith(
-      "Shiprocket Order ID 1576398335 copied.",
+    expect(writeText).not.toHaveBeenCalled()
+
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByDisplayValue("1576398335")).toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole("button", { name: /^Copy Order ID$/i }))
+    expect(writeText).toHaveBeenCalledWith("1576398335")
+    expect(toast.success).toHaveBeenCalledWith("Shiprocket Order ID 1576398335 copied.")
+  })
+
+  it("leaves the ID selectable in the dialog when the clipboard API fails", async () => {
+    const user = userEvent.setup()
+    writeText = vi.fn().mockRejectedValue(new DOMException("Document is not focused."))
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    })
+    setUpQueries(BASE_ORDER)
+    mockLocate((ids, opts) =>
+      opts?.onSuccess?.(
+        ids.map((id) => ({
+          order_id: id,
+          status: "found",
+          shiprocket_order_id: "1576398335",
+          message: null,
+        }))
+      )
+    )
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    const dialog = await screen.findByRole("dialog")
+    const field = within(dialog).getByDisplayValue("1576398335") as HTMLInputElement
+
+    await user.click(within(dialog).getByRole("button", { name: /^Copy Order ID$/i }))
+
+    expect(toast.warning).toHaveBeenCalledWith(
+      "Couldn't copy automatically.",
       expect.anything()
     )
+    expect(field).toBeInTheDocument()
+    expect(field.value).toBe("1576398335")
+    expect(field.readOnly).toBe(true)
   })
 
   it("hides Ship Order entirely without shipments.update permission", () => {
