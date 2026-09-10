@@ -209,6 +209,33 @@ class OrderRepository(BaseRepository[Order]):
     def for_customer_query(self, customer_id: uuid.UUID):
         return self._base_query().where(Order.customer_id == customer_id)
 
+    async def orders_for_customers(
+        self, customer_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, list[Order]]:
+        """Every `Order` for this page of customer ids, newest first per
+        customer -- the one follow-up query `CustomerRepository.
+        search_repeat_customers` needs for `order_numbers`/the latest
+        order's status/payment status, kept to exactly one query for the
+        whole page rather than one per customer.
+        """
+        if not customer_ids:
+            return {}
+        stmt = (
+            select(Order)
+            .where(Order.customer_id.in_(customer_ids))
+            .order_by(Order.customer_id, Order.order_datetime.desc())
+        )
+        rows = (await self.session.execute(stmt)).scalars().all()
+        by_customer: dict[uuid.UUID, list[Order]] = {}
+        for order in rows:
+            # `.in_(customer_ids)` above already guarantees a non-None
+            # `customer_id` on every row -- `Order.customer_id` is only
+            # `| None` in the type because a different order can be
+            # customer-less, not this filtered set.
+            assert order.customer_id is not None
+            by_customer.setdefault(order.customer_id, []).append(order)
+        return by_customer
+
     def shipment_queue_query(
         self,
         *,

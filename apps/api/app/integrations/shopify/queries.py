@@ -77,6 +77,9 @@ query Products($first: Int!, $after: String, $query: String) {
         tags
         createdAt
         updatedAt
+        featuredImage {
+          url
+        }
         variants(first: 100) {
           edges {
             node {

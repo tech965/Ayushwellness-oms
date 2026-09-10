@@ -13,13 +13,16 @@ import {
   useMyOrder,
   useScheduleFollowUp,
   useUnconfirmOrder,
+  useUpdateOrderAddress,
 } from "@/services/telecaller"
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ id: "order-1" }),
 }))
 
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+}))
 
 vi.mock("@/services/telecaller", () => ({
   useMyOrder: vi.fn(),
@@ -30,6 +33,7 @@ vi.mock("@/services/telecaller", () => ({
   useDeleteCallAttempt: vi.fn(),
   useConfirmOrder: vi.fn(),
   useUnconfirmOrder: vi.fn(),
+  useUpdateOrderAddress: vi.fn(),
 }))
 
 const mockedUseMyOrder = vi.mocked(useMyOrder)
@@ -40,6 +44,7 @@ const mockedUseEditCallAttempt = vi.mocked(useEditCallAttempt)
 const mockedUseDeleteCallAttempt = vi.mocked(useDeleteCallAttempt)
 const mockedUseConfirmOrder = vi.mocked(useConfirmOrder)
 const mockedUseUnconfirmOrder = vi.mocked(useUnconfirmOrder)
+const mockedUseUpdateOrderAddress = vi.mocked(useUpdateOrderAddress)
 
 const ORDER = {
   order_id: "order-1",
@@ -55,7 +60,30 @@ const ORDER = {
   confirmed_at: null,
   confirmed_by_telecaller_id: null,
   order_datetime: "2026-08-01T00:00:00Z",
-  shipping_address: null,
+  shipping_address: {
+    line1: "221B New Colony Road",
+    line2: null,
+    city: "Pune",
+    state: "Maharashtra",
+    pin_code: "411001",
+    country: "India",
+    contact_name: "Alice",
+    contact_phone: "9990000001",
+  },
+  shipping_address_sync_status: "synced",
+  shipping_address_sync_error: null,
+  items: [
+    {
+      id: "item-1",
+      sku: "AW-HM-PN-100g",
+      product_name: "Ayush Wellness Herbal Masala",
+      variant_title: "Pan Masala Flavor / 100 Grams Pouches",
+      image_url: "https://cdn.shopify.com/example.jpg",
+      quantity: 2,
+      unit_price: "249.50",
+      total_amount: "499.00",
+    },
+  ],
   assignment_id: "assign-1",
   assigned_to: "tc-1",
   assigned_to_name: "Telecaller One",
@@ -107,6 +135,10 @@ function mockCommonHooks() {
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useUnconfirmOrder>)
+  mockedUseUpdateOrderAddress.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useUpdateOrderAddress>)
 }
 
 describe("TelecallerOrderDetailPage", () => {
@@ -322,5 +354,84 @@ describe("TelecallerOrderDetailPage", () => {
     renderWithProviders(<TelecallerOrderDetailPage />)
 
     expect(screen.queryByText("Revert to Pending")).not.toBeInTheDocument()
+  })
+
+  it("shows product image, variant title, and SKU for each line item", () => {
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("Ayush Wellness Herbal Masala")).toBeInTheDocument()
+    expect(screen.getByText("Pan Masala Flavor / 100 Grams Pouches")).toBeInTheDocument()
+    expect(screen.getByText("SKU: AW-HM-PN-100g")).toBeInTheDocument()
+    const image = screen.getByRole("img")
+    expect(image).toHaveAttribute("src", "https://cdn.shopify.com/example.jpg")
+  })
+
+  it("opens the Edit Address dialog pre-filled with the current address and saves", async () => {
+    const user = userEvent.setup()
+    const updateMutate = vi.fn((_vars, opts) =>
+      opts.onSuccess({ ...ORDER, shipping_address_sync_status: "synced" })
+    )
+
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseUpdateOrderAddress.mockReturnValue({
+      mutate: updateMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateOrderAddress>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Edit Address$/i }))
+    expect(
+      screen.getByText("Updates the shipping address in OMS and on the corresponding Shopify order.")
+    ).toBeInTheDocument()
+    expect(screen.getByDisplayValue("221B New Colony Road")).toBeInTheDocument()
+    expect(screen.getByDisplayValue("Pune")).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /^Save Address$/i }))
+    expect(updateMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ line1: "221B New Colony Road", city: "Pune" }),
+      expect.anything()
+    )
+  })
+
+  it("shows a warning instead of success when the address saves but Shopify sync fails", async () => {
+    const user = userEvent.setup()
+    const { toast } = await import("sonner")
+    const updateMutate = vi.fn((_vars, opts) =>
+      opts.onSuccess({
+        ...ORDER,
+        shipping_address_sync_status: "failed",
+        shipping_address_sync_error: "Shopify is down.",
+      })
+    )
+
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseUpdateOrderAddress.mockReturnValue({
+      mutate: updateMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateOrderAddress>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Edit Address$/i }))
+    await user.click(screen.getByRole("button", { name: /^Save Address$/i }))
+
+    expect(toast.warning).toHaveBeenCalledWith(
+      expect.stringContaining("Shopify sync failed")
+    )
   })
 })

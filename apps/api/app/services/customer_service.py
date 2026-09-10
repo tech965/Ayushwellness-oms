@@ -20,7 +20,7 @@ from app.models.rto import RTO
 from app.repositories.customer import CustomerAddressRepository, CustomerRepository
 from app.repositories.order import OrderRepository
 from app.schemas.common import PageParams, SortParams
-from app.schemas.customer import CustomerSummaryResponse
+from app.schemas.customer import CustomerSummaryResponse, RepeatCustomerResponse
 
 
 class CustomerService:
@@ -108,6 +108,40 @@ class CustomerService:
             average_order_value=average_order_value,
             last_order_at=last_order_at,
         )
+
+    async def list_repeat_customers(
+        self, *, page_params: PageParams, q: str | None = None
+    ) -> tuple[list[RepeatCustomerResponse], int]:
+        """Customers with more than one real order -- see
+        `app.repositories.customer.REPEAT_CUSTOMER_MIN_ORDERS` for the
+        exact definition. Exactly two queries total, regardless of how
+        many customers/orders exist: `search_repeat_customers` for this
+        page of customers + their aggregate counts, then one follow-up
+        `orders_for_customers` for their individual order numbers/latest
+        status -- never one query per customer (N+1).
+        """
+        rows, total = await self.customers.search_repeat_customers(q=q, page_params=page_params)
+        customer_ids = [customer.id for customer, _, _, _ in rows]
+        orders_by_customer = await self.orders.orders_for_customers(customer_ids)
+
+        results = []
+        for customer, order_count, latest_order_at, total_value in rows:
+            customer_orders = orders_by_customer.get(customer.id, [])
+            latest = customer_orders[0] if customer_orders else None
+            results.append(
+                RepeatCustomerResponse(
+                    customer_id=customer.id,
+                    customer_name=customer.full_name,
+                    phone=customer.phone,
+                    order_count=order_count,
+                    order_numbers=[o.order_number for o in customer_orders],
+                    latest_order_at=latest_order_at,
+                    latest_order_status=latest.status if latest else None,
+                    latest_payment_status=latest.payment_status if latest else None,
+                    total_order_value=total_value,
+                )
+            )
+        return results, total
 
     async def upsert_synced_customer(self, **data) -> tuple[Customer, bool]:  # noqa: ANN003
         """Idempotent create-or-update from a sync adapter's normalized

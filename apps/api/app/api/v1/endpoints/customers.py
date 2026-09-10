@@ -18,6 +18,7 @@ from app.schemas.customer import (
     CustomerResponse,
     CustomerSummaryResponse,
     CustomerUpdateRequest,
+    RepeatCustomerResponse,
 )
 from app.schemas.order import OrderResponse
 from app.schemas.response import ApiResponse, PaginatedResponse
@@ -40,6 +41,28 @@ async def list_customers(
     return PaginatedResponse(
         data=[CustomerResponse.model_validate(c) for c in items],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
+
+
+@router.get("/repeat", response_model=PaginatedResponse[RepeatCustomerResponse])
+async def list_repeat_customers(
+    q: str | None = Query(default=None),
+    page_params: PageParams = Depends(pagination_params),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("customers.read")),
+) -> PaginatedResponse[RepeatCustomerResponse]:
+    """Admin "Repeat Customers" view -- customers with more than one real
+    order (`app.repositories.customer.REPEAT_CUSTOMER_MIN_ORDERS`), most
+    orders first. Registered before `/{customer_id}` so "repeat" is never
+    parsed as a customer id (same reason `orders.py` registers `bulk-
+    ship/validate` before `/{order_id}`). Same `customers.read` permission
+    as the rest of this router -- no new/broader access.
+    """
+    items, total = await CustomerService(session).list_repeat_customers(
+        page_params=page_params, q=q
+    )
+    return PaginatedResponse(
+        data=items, meta=build_pagination_meta(total_items=total, page_params=page_params)
     )
 
 

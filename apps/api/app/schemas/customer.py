@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from app.models.enums import AddressType
+from app.models.enums import AddressType, OrderStatus, PaymentStatus
 
 
 class CustomerAddressCreateRequest(BaseModel):
@@ -94,3 +94,22 @@ class CustomerSummaryResponse(BaseModel):
     rto_orders: int
     average_order_value: Decimal
     last_order_at: datetime | None
+
+
+class RepeatCustomerResponse(BaseModel):
+    """One row of the Admin "Repeat Customers" view -- a customer with
+    `>= app.repositories.customer.REPEAT_CUSTOMER_MIN_ORDERS` real
+    `Order` rows. Every field is derived from data already in the OMS
+    (`Order`/`Customer`); nothing here is pulled from Shopify on demand
+    or fabricated.
+    """
+
+    customer_id: uuid.UUID
+    customer_name: str | None
+    phone: str | None
+    order_count: int
+    order_numbers: list[str]
+    latest_order_at: datetime | None
+    latest_order_status: OrderStatus | None
+    latest_payment_status: PaymentStatus | None
+    total_order_value: Decimal

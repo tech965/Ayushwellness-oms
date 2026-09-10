@@ -58,6 +58,28 @@ export const LEAD_PRIORITY_LABELS: Record<LeadPriority, string> = {
   low: "Low",
 }
 
+export interface AssignedOrderAddress {
+  line1?: string
+  line2?: string
+  city?: string
+  state?: string
+  pin_code?: string
+  country?: string
+  contact_name?: string
+  contact_phone?: string
+}
+
+export interface AssignedOrderItem {
+  id: string
+  sku: string
+  product_name: string
+  variant_title: string | null
+  image_url: string | null
+  quantity: number
+  unit_price: string
+  total_amount: string
+}
+
 export interface AssignedOrder {
   order_id: string
   order_number: string
@@ -74,16 +96,16 @@ export interface AssignedOrder {
   confirmed_at: string | null
   confirmed_by_telecaller_id: string | null
   order_datetime: string
-  shipping_address: {
-    line1?: string
-    line2?: string
-    city?: string
-    state?: string
-    pin_code?: string
-    country?: string
-    contact_name?: string
-    contact_phone?: string
-  } | null
+  shipping_address: AssignedOrderAddress | null
+  // Outbound OMS -> Shopify sync state for `shipping_address` -- "synced"
+  // is the only status that means the Telecaller's last address edit
+  // actually reached Shopify; `null`/"not_applicable" for a manually-
+  // created order with no Shopify order behind it.
+  shipping_address_sync_status: string | null
+  shipping_address_sync_error: string | null
+  // Only populated on the single-order detail response, never the list
+  // (see the backend's `include_items`) — `[]` on a list row.
+  items: AssignedOrderItem[]
   assignment_id: string | null
   assigned_to: string | null
   assigned_to_name: string | null
@@ -285,6 +307,7 @@ export interface TelecallerDetailSummary {
   cancelled: number
   fulfilled: number
   total_attempts: number
+  average_call_attempts: number
   conversion_rate: number
   orders_confirmed: number
   shipped: number

@@ -20,6 +20,7 @@ from app.integrations.shopify.mutations import (
     FULFILLMENT_CREATE_MUTATION,
     FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
     OPEN_FULFILLMENT_ORDERS_QUERY,
+    ORDER_UPDATE_SHIPPING_ADDRESS_MUTATION,
     TAGS_ADD_MUTATION,
     TAGS_REMOVE_MUTATION,
 )
@@ -375,6 +376,45 @@ class ShopifyAdapter(IntegrationAdapter):
                 details={"error_type": "validation_error"},
             )
         return fulfillment
+
+    async def update_order_shipping_address(
+        self, shopify_order_gid: str, *, address: dict[str, str | None]
+    ) -> dict[str, Any]:
+        """Sets the Shopify order's shipping address in place via
+        `orderUpdate` -- used only for a Telecaller-initiated address
+        correction (`ShopifyFulfillmentService.sync_shipping_address`).
+        `address` keys match Shopify's `MailingAddressInput` directly
+        (`firstName`/`lastName`/`address1`/`address2`/`city`/`province`/
+        `country`/`zip`/`phone`); the caller is responsible for mapping
+        the OMS's own `Order.shipping_address` shape onto these.
+        """
+        client = self._get_client()
+        try:
+            data = await client.execute(
+                ORDER_UPDATE_SHIPPING_ADDRESS_MUTATION,
+                {"input": {"id": shopify_order_gid, "shippingAddress": address}},
+            )
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+        result = data.get("orderUpdate") or {}
+        user_errors = result.get("userErrors") or []
+        if user_errors:
+            message = "; ".join(
+                f"{','.join(e.get('field') or [])}: {e.get('message')}" for e in user_errors
+            )
+            raise IntegrationError(
+                f"Shopify rejected the address update: {message}",
+                details={"error_type": "validation_error"},
+            )
+
+        order = result.get("order")
+        if order is None:
+            raise IntegrationError(
+                "Shopify orderUpdate response had no order and no userErrors.",
+                details={"error_type": "validation_error"},
+            )
+        return order
 
     def normalize(self, entity_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         normalizer = ENTITY_NORMALIZERS.get(entity_type)

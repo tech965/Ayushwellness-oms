@@ -57,9 +57,12 @@ import {
   useMyOrder,
   useScheduleFollowUp,
   useUnconfirmOrder,
+  useUpdateOrderAddress,
+  type UpdateOrderAddressInput,
 } from "@/services/telecaller"
 import {
   CALL_OUTCOME_OPTIONS,
+  type AssignedOrderAddress,
   type CallAttempt,
   type TelecallingStatus,
 } from "@/types/telecalling"
@@ -98,9 +101,54 @@ export default function TelecallerOrderDetailPage() {
   const deleteCallAttempt = useDeleteCallAttempt(orderId)
   const confirmOrder = useConfirmOrder(orderId)
   const unconfirmOrder = useUnconfirmOrder(orderId)
+  const updateAddress = useUpdateOrderAddress(orderId)
 
   const [confirmOrderOpen, setConfirmOrderOpen] = React.useState(false)
   const [unconfirmOrderOpen, setUnconfirmOrderOpen] = React.useState(false)
+
+  const [addressDialogOpen, setAddressDialogOpen] = React.useState(false)
+  const [addressForm, setAddressForm] = React.useState<UpdateOrderAddressInput>({
+    contact_name: "",
+    contact_phone: "",
+    line1: "",
+    line2: "",
+    city: "",
+    state: "",
+    pin_code: "",
+    country: "India",
+  })
+
+  function openAddressDialog(current: AssignedOrderAddress | null) {
+    setAddressForm({
+      contact_name: current?.contact_name ?? "",
+      contact_phone: current?.contact_phone ?? "",
+      line1: current?.line1 ?? "",
+      line2: current?.line2 ?? "",
+      city: current?.city ?? "",
+      state: current?.state ?? "",
+      pin_code: current?.pin_code ?? "",
+      country: current?.country ?? "India",
+    })
+    setAddressDialogOpen(true)
+  }
+
+  function handleSaveAddress() {
+    updateAddress.mutate(addressForm, {
+      onSuccess: (updated) => {
+        setAddressDialogOpen(false)
+        if (updated?.shipping_address_sync_status === "synced") {
+          toast.success("Address updated and synced to Shopify.")
+        } else if (updated?.shipping_address_sync_status === "failed") {
+          toast.warning(
+            "Address saved in OMS, but the Shopify sync failed. Save again to retry."
+          )
+        } else {
+          toast.success("Address updated.")
+        }
+      },
+      onError: (error) => toast.error(getApiErrorMessage(error)),
+    })
+  }
 
   function handleConfirmOrder() {
     confirmOrder.mutate(undefined, {
@@ -254,22 +302,41 @@ export default function TelecallerOrderDetailPage() {
                 <CardContent className="grid grid-cols-2 gap-4">
                   <SummaryStat label="Customer" value={order.customer_name ?? "—"} />
                   <SummaryStat label="Phone" value={order.customer_phone ?? "—"} />
-                  <SummaryStat
-                    label="Address"
-                    value={
-                      order.shipping_address
+                  <div className="col-span-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+                        Address
+                      </p>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-1.5 text-xs"
+                        onClick={() => openAddressDialog(order.shipping_address)}
+                      >
+                        <Pencil className="size-3" />
+                        Edit Address
+                      </Button>
+                    </div>
+                    <p className="text-sm font-medium">
+                      {order.shipping_address
                         ? [
                             order.shipping_address.line1,
+                            order.shipping_address.line2,
                             order.shipping_address.city,
                             order.shipping_address.state,
                             order.shipping_address.pin_code,
                           ]
                             .filter(Boolean)
                             .join(", ")
-                        : "—"
-                    }
-                  />
-                  <SummaryStat label="Product" value={order.item_summary ?? "—"} />
+                        : "—"}
+                    </p>
+                    {order.shipping_address_sync_status === "failed" && (
+                      <p className="text-destructive mt-1 text-xs">
+                        Shopify sync failed{order.shipping_address_sync_error ? ":" : "."}{" "}
+                        {order.shipping_address_sync_error}
+                      </p>
+                    )}
+                  </div>
                   <SummaryStat label="Amount" value={formatMoney(order.total_amount)} />
                   <SummaryStat
                     label="Payment Type"
@@ -398,6 +465,57 @@ export default function TelecallerOrderDetailPage() {
                 </CardContent>
               </Card>
             </div>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Products</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {order.items.length === 0 ? (
+                  <p className="text-muted-foreground text-sm">
+                    {order.item_summary ?? "No line items."}
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    {order.items.map((item) => (
+                      <div key={item.id} className="flex items-center gap-3">
+                        {item.image_url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={item.image_url}
+                            alt={item.product_name}
+                            className="bg-muted size-12 shrink-0 rounded-md object-cover"
+                          />
+                        ) : (
+                          <div className="bg-muted text-muted-foreground flex size-12 shrink-0 items-center justify-center rounded-md text-[10px]">
+                            No image
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{item.product_name}</p>
+                          {item.variant_title && (
+                            <p className="text-muted-foreground truncate text-xs">
+                              {item.variant_title}
+                            </p>
+                          )}
+                          <p className="text-muted-foreground text-xs">
+                            SKU: {item.sku || "—"}
+                          </p>
+                        </div>
+                        <div className="shrink-0 text-right text-sm">
+                          <p>
+                            {item.quantity} × {formatMoney(item.unit_price)}
+                          </p>
+                          <p className="text-muted-foreground text-xs">
+                            {formatMoney(item.total_amount)}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
 
             <Card>
               <CardHeader>
@@ -554,6 +672,103 @@ export default function TelecallerOrderDetailPage() {
               disabled={scheduleFollowUp.isPending || !followUpOnly}
             >
               {scheduleFollowUp.isPending ? "Saving..." : "Schedule"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={addressDialogOpen} onOpenChange={setAddressDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Address</DialogTitle>
+            <DialogDescription>
+              Updates the shipping address in OMS and on the corresponding Shopify order.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2">
+              <label className="text-muted-foreground mb-1 block text-xs">Name</label>
+              <Input
+                value={addressForm.contact_name}
+                onChange={(e) =>
+                  setAddressForm((f) => ({ ...f, contact_name: e.target.value }))
+                }
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="text-muted-foreground mb-1 block text-xs">Phone</label>
+              <Input
+                value={addressForm.contact_phone}
+                onChange={(e) =>
+                  setAddressForm((f) => ({ ...f, contact_phone: e.target.value }))
+                }
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="text-muted-foreground mb-1 block text-xs">
+                Address Line 1
+              </label>
+              <Input
+                value={addressForm.line1}
+                onChange={(e) => setAddressForm((f) => ({ ...f, line1: e.target.value }))}
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="text-muted-foreground mb-1 block text-xs">
+                Address Line 2
+              </label>
+              <Input
+                value={addressForm.line2}
+                onChange={(e) => setAddressForm((f) => ({ ...f, line2: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="text-muted-foreground mb-1 block text-xs">City</label>
+              <Input
+                value={addressForm.city}
+                onChange={(e) => setAddressForm((f) => ({ ...f, city: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="text-muted-foreground mb-1 block text-xs">
+                State / Province
+              </label>
+              <Input
+                value={addressForm.state}
+                onChange={(e) => setAddressForm((f) => ({ ...f, state: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="text-muted-foreground mb-1 block text-xs">Postal Code</label>
+              <Input
+                value={addressForm.pin_code}
+                onChange={(e) =>
+                  setAddressForm((f) => ({ ...f, pin_code: e.target.value }))
+                }
+              />
+            </div>
+            <div>
+              <label className="text-muted-foreground mb-1 block text-xs">Country</label>
+              <Input
+                value={addressForm.country}
+                onChange={(e) => setAddressForm((f) => ({ ...f, country: e.target.value }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAddressDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveAddress}
+              disabled={
+                updateAddress.isPending ||
+                !addressForm.line1.trim() ||
+                !addressForm.city.trim() ||
+                !addressForm.pin_code.trim()
+              }
+            >
+              {updateAddress.isPending ? "Saving..." : "Save Address"}
             </Button>
           </DialogFooter>
         </DialogContent>

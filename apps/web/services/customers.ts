@@ -2,7 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
-import type { Customer, CustomerListFilters, CustomerSummary } from "@/types/customer"
+import type {
+  Customer,
+  CustomerListFilters,
+  CustomerSummary,
+  RepeatCustomer,
+} from "@/types/customer"
 import type { Order } from "@/types/order"
 
 interface ListParams extends CustomerListFilters {
@@ -21,6 +26,21 @@ export function useCustomers(params: ListParams) {
   return useQuery({
     queryKey: ["customers", params],
     queryFn: () => fetchCustomers(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchRepeatCustomers(params: ListParams): Promise<PaginatedResponse<RepeatCustomer>> {
+  const response = await apiClient.get<PaginatedResponse<RepeatCustomer>>("/customers/repeat", {
+    params: { page: params.page, page_size: params.pageSize, q: params.q || undefined },
+  })
+  return response.data
+}
+
+export function useRepeatCustomers(params: ListParams) {
+  return useQuery({
+    queryKey: ["customers", "repeat", params],
+    queryFn: () => fetchRepeatCustomers(params),
     placeholderData: (previous) => previous,
   })
 }

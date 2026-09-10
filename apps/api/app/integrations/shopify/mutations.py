@@ -153,3 +153,36 @@ mutation FulfillmentTrackingInfoUpdate(
   }
 }
 """
+
+# Updates the shipping address already on an existing Shopify order --
+# `orderUpdate`'s `shippingAddress` sets the order's `MailingAddress` in
+# place (no new object, no id to track), so re-sending the OMS's current
+# `Order.shipping_address` is always safe/idempotent; there is no
+# "already synced" guard the way the Fulfillment pushes need one. Used
+# only for a Telecaller-initiated address correction
+# (`ShopifyFulfillmentService.sync_shipping_address`) -- never touches
+# `lineItems`/financial fields/tags, so it can't be confused with any
+# other outbound push in this file.
+ORDER_UPDATE_SHIPPING_ADDRESS_MUTATION = """
+mutation OrderUpdateShippingAddress($input: OrderInput!) {
+  orderUpdate(input: $input) {
+    order {
+      id
+      shippingAddress {
+        name
+        address1
+        address2
+        city
+        province
+        country
+        zip
+        phone
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}
+"""

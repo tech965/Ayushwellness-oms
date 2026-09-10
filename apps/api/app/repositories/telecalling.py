@@ -8,7 +8,7 @@ from sqlalchemy.orm import aliased, selectinload
 
 from app.models.abandoned_checkout import AbandonedCheckout
 from app.models.enums import AssignmentStatus, FulfillmentStatus, LeadCategory, PaymentType
-from app.models.order import Order
+from app.models.order import Order, OrderItem
 from app.models.telecalling import (
     CallAttempt,
     CheckoutAssignment,
@@ -249,13 +249,18 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
         return list(result.scalars().all())
 
     def _base_scope_query(self) -> Select:
+        from app.models.product import ProductVariant
+
         return (
             select(OrderAssignment)
             .join(Order, Order.id == OrderAssignment.order_id)
             .where(OrderAssignment.assignment_status == AssignmentStatus.ACTIVE)
             .options(
                 selectinload(OrderAssignment.order).selectinload(Order.customer),
-                selectinload(OrderAssignment.order).selectinload(Order.items),
+                selectinload(OrderAssignment.order)
+                .selectinload(Order.items)
+                .selectinload(OrderItem.product_variant)
+                .selectinload(ProductVariant.product),
                 selectinload(OrderAssignment.order).selectinload(Order.shipments),
                 selectinload(OrderAssignment.telecaller),
             )
@@ -384,6 +389,29 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
             OrderAssignment.assigned_to == telecaller_id,
         )
         return int(await self.session.scalar(stmt) or 0)
+
+    async def attempt_averaging_stats(self, *, telecaller_id: uuid.UUID) -> tuple[int, int]:
+        """`(total_attempts, orders_with_attempts)` for "Average Call
+        Attempts" (`total_attempts / orders_with_attempts`) -- same scope
+        as `total_attempt_count` (currently ACTIVE assignments for this
+        telecaller, all-time, no date filter -- the dashboard's stat
+        tiles have never been date-scoped) and the same correction-
+        resolved `attempt_count` column, so the average is never inflated
+        by a since-edited/deleted attempt. `orders_with_attempts` counts
+        only assignments that have actually been called at least once
+        (`attempt_count > 0`) -- an order still sitting at 0 attempts
+        would otherwise silently drag the average down even though
+        nobody has called it yet.
+        """
+        stmt = select(
+            func.coalesce(func.sum(OrderAssignment.attempt_count), 0),
+            func.count(case((OrderAssignment.attempt_count > 0, 1))),
+        ).where(
+            OrderAssignment.assignment_status == AssignmentStatus.ACTIVE,
+            OrderAssignment.assigned_to == telecaller_id,
+        )
+        total_attempts, orders_with_attempts = (await self.session.execute(stmt)).one()
+        return int(total_attempts or 0), int(orders_with_attempts or 0)
 
     async def fulfilled_counts(
         self, *, team_leader_id: uuid.UUID | None = None, telecaller_id: uuid.UUID | None = None

@@ -18,6 +18,23 @@ from app.models.enums import (
 )
 
 
+class OrderAddressUpdateRequest(BaseModel):
+    """Editable shipping-address fields — exactly `Order.shipping_
+    address`'s existing dict shape (see `app.integrations.shopify.
+    normalizer.normalize_address`), never a new/duplicate address
+    concept. Field widths match that same normalizer's `max_len` values.
+    """
+
+    contact_name: str | None = Field(default=None, max_length=255)
+    contact_phone: str | None = Field(default=None, max_length=32)
+    line1: str = Field(min_length=1, max_length=255)
+    line2: str | None = Field(default=None, max_length=255)
+    city: str = Field(min_length=1, max_length=120)
+    state: str | None = Field(default=None, max_length=120)
+    pin_code: str = Field(min_length=1, max_length=16)
+    country: str = Field(min_length=1, max_length=120, default="India")
+
+
 class AssignOrdersRequest(BaseModel):
     order_ids: list[uuid.UUID] = Field(min_length=1)
     mode: Literal["manual", "equal"]
@@ -129,6 +146,28 @@ class OrderAssignmentResponse(BaseModel):
     updated_at: datetime
 
 
+class AssignedOrderItemResponse(BaseModel):
+    """One order line item, enough to show "[image] product name /
+    variant title, SKU: ..." on the Telecaller order detail page — see
+    `app.api.v1.endpoints.team.to_assigned_order_response`. `sku`/
+    `product_name`/quantity/price fields are `OrderItem` columns
+    (verbatim, never invented); `variant_title`/`image_url` come from the
+    related `ProductVariant`/`Product` (via `OrderItem.product_variant`)
+    and are `None` whenever that relationship never resolved (unsynced
+    SKU, manual order, or — for `image_url` — a product with no Shopify
+    image) rather than a data gap.
+    """
+
+    id: uuid.UUID
+    sku: str
+    product_name: str
+    variant_title: str | None = None
+    image_url: str | None = None
+    quantity: int
+    unit_price: Decimal
+    total_amount: Decimal
+
+
 class AssignedOrderResponse(BaseModel):
     """One row of a Team Leader's/Telecaller's order list — flattens the
     order + its active assignment into the exact columns the spec's
@@ -153,6 +192,16 @@ class AssignedOrderResponse(BaseModel):
     confirmed_by_telecaller_id: uuid.UUID | None = None
     order_datetime: datetime
     shipping_address: dict | None = None
+    # Outbound OMS -> Shopify sync state for `shipping_address` above
+    # (`ShopifyFulfillmentService.sync_shipping_address`) -- lets the
+    # frontend tell "saved and synced to Shopify" apart from "saved in
+    # OMS, Shopify sync failed" after an address edit, rather than
+    # reporting blanket success either way.
+    shipping_address_sync_status: str | None = None
+    shipping_address_sync_error: str | None = None
+    # Line items for the Product section (image + name + variant + SKU) —
+    # see `AssignedOrderItemResponse`.
+    items: list[AssignedOrderItemResponse] = []
     # Null across this whole block means "not yet assigned to anyone" —
     # only possible in the Team Leader's unfulfilled-orders *pool* view
     # (`GET /team/orders/unfulfilled` with no `telecaller_id` filter),
@@ -316,6 +365,10 @@ class TelecallerDetailSummaryResponse(BaseModel):
     # this order been called at least once" count. See
     # `OrderAssignmentRepository.total_attempt_count`'s docstring.
     total_attempts: int = 0
+    # `total_attempts / orders_with_attempts` -- the dashboard's "Average
+    # Call Attempts" tile. 0.0 when nothing has been called yet. See
+    # `OrderAssignmentRepository.attempt_averaging_stats`'s docstring.
+    average_call_attempts: float = 0.0
     conversion_rate: float = 0.0
     # Live snapshot counts from `Order.confirmed_by_telecaller_id` /
     # `Shipment.current_status` — see

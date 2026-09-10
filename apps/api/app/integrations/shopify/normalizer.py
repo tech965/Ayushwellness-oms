@@ -212,12 +212,14 @@ class ShopifyProductNormalizer(ProductNormalizer):
             for edge in (raw.get("variants", {}).get("edges") or [])
         ]
         tags = raw.get("tags")
+        image_url = (raw.get("featuredImage") or {}).get("url")
 
         return {
             "source_system": SourceSystem.SHOPIFY,
             "external_id": _gid_to_external_id(raw.get("id")),
             "shopify_product_id": _gid_to_external_id(raw.get("id")),
             "title": raw.get("title") or "Untitled product",
+            "image_url": _clean_text(image_url, max_len=2048),
             "description": raw.get("descriptionHtml"),
             "vendor": raw.get("vendor"),
             "product_type": raw.get("productType"),

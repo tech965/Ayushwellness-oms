@@ -132,6 +132,24 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     # retroactively if the customer later edits their saved address).
     shipping_address: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     billing_address: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    # Outbound OMS -> Shopify push for a Telecaller-edited `shipping_
+    # address` (`ShopifyFulfillmentService.sync_shipping_address`) --
+    # distinct from every other `shopify_*_sync_status` column on this
+    # model (confirmation Fulfillment) or `Shipment` (shipping
+    # Fulfillment): there's no id to track here, since `orderUpdate` sets
+    # Shopify's shipping address in place rather than creating a new
+    # object, so re-pushing the current `shipping_address` is always
+    # safe/idempotent -- no "already synced, never re-push" guard is
+    # needed the way the Fulfillment pushes have one.
+    shipping_address_sync_status: Mapped[ShopifySyncStatus] = mapped_column(
+        sa_enum(ShopifySyncStatus, "shopify_sync_status"),
+        nullable=False,
+        default=ShopifySyncStatus.NOT_APPLICABLE,
+    )
+    shipping_address_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shipping_address_synced_at: Mapped[datetime | None] = mapped_column(
+        AwareDateTime(), nullable=True
+    )
 
     # Telecaller attribution for the PENDING->CONFIRMED transition (see
     # `OrderService.confirm_order`) — deliberately NOT the same as

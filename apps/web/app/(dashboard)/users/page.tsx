@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { PasswordInput } from "@/components/ui/password-input"
 import {
   Select,
   SelectContent,
@@ -225,9 +226,8 @@ function CreateUserDialog({
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="user-password">Password</Label>
-            <Input
+            <PasswordInput
               id="user-password"
-              type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="At least 8 characters"

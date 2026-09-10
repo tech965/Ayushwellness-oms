@@ -246,10 +246,72 @@ async def test_telecaller_detail_summary_and_daily_performance_empty_history(
         assert summary.json()["data"]["assigned"] == 0
         assert summary.json()["data"]["fulfilled"] == 0
         assert summary.json()["data"]["conversion_rate"] == 0.0
+        # Zero orders (let alone zero orders actually called) must never
+        # raise a division error -- 0.0, not a 500.
+        assert summary.json()["data"]["average_call_attempts"] == 0.0
 
         daily = await leader_client.get(f"/api/v1/team/telecallers/{telecaller.id}/daily")
         assert daily.status_code == 200
         assert daily.json()["data"] == []
+
+
+async def test_average_call_attempts_excludes_orders_never_called(
+    db_session: AsyncSession,
+) -> None:
+    """An order assigned but never called must not drag the average down
+    to 0 -- it hasn't been reached yet, it wasn't "called 0 times." The
+    denominator is orders actually called at least once, not every
+    assigned order.
+    """
+    leader, telecaller, _other, order = await _setup(db_session)
+    never_called_order = await make_order(db_session, order_number="CORR-AVG-UNCALLED")
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+        await _assign(leader_client, str(never_called_order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        await tc_client.post(
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "not_received"}
+        )
+
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        summary = await leader_client.get(f"/api/v1/team/telecallers/{telecaller.id}/summary")
+        data = summary.json()["data"]
+        assert data["assigned"] == 2
+        assert data["total_attempts"] == 1
+        # 1 attempt / 1 order actually called -- not / 2 assigned orders.
+        assert data["average_call_attempts"] == 1.0
+
+
+async def test_average_call_attempts_real_calculation_across_multiple_orders(
+    db_session: AsyncSession,
+) -> None:
+    """25 orders, 100 attempts -> 4.0, per the spec's own worked example
+    -- proven here at a smaller, exactly-checkable scale: 2 called orders,
+    4 total attempts (3 + 1) -> 2.0.
+    """
+    leader, telecaller, _other, order_a = await _setup(db_session)
+    order_b = await make_order(db_session, order_number="CORR-AVG-B")
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order_a.id), str(telecaller.id))
+        await _assign(leader_client, str(order_b.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        for outcome in ("not_received", "not_received", "connected"):
+            response = await tc_client.post(
+                f"/api/v1/telecaller/orders/{order_a.id}/calls", json={"outcome": outcome}
+            )
+            assert response.status_code == 201
+        response = await tc_client.post(
+            f"/api/v1/telecaller/orders/{order_b.id}/calls", json={"outcome": "not_interested"}
+        )
+        assert response.status_code == 201
+
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        summary = await leader_client.get(f"/api/v1/team/telecallers/{telecaller.id}/summary")
+        data = summary.json()["data"]
+        assert data["total_attempts"] == 4
+        assert data["average_call_attempts"] == 2.0
 
 
 async def test_telecaller_detail_summary_reflects_real_calls_and_fulfillment(
@@ -279,6 +341,7 @@ async def test_telecaller_detail_summary_reflects_real_calls_and_fulfillment(
         assert data["confirmed"] == 1
         assert data["fulfilled"] == 1
         assert data["total_attempts"] == 1
+        assert data["average_call_attempts"] == 1.0
 
         daily = await leader_client.get(f"/api/v1/team/telecallers/{telecaller.id}/daily")
         points = daily.json()["data"]

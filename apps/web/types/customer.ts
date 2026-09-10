@@ -32,3 +32,16 @@ export interface CustomerSummary {
 export interface CustomerListFilters {
   q?: string
 }
+
+// Mirrors RepeatCustomerResponse in app/schemas/customer.py
+export interface RepeatCustomer {
+  customer_id: string
+  customer_name: string | null
+  phone: string | null
+  order_count: number
+  order_numbers: string[]
+  latest_order_at: string | null
+  latest_order_status: string | null
+  latest_payment_status: string | null
+  total_order_value: string
+}

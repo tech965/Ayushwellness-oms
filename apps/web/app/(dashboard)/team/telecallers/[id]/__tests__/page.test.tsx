@@ -40,6 +40,7 @@ const SUMMARY = {
   cancelled: 2,
   fulfilled: 6,
   total_attempts: 52,
+  average_call_attempts: 4.0,
   conversion_rate: 20.0,
   orders_confirmed: 12,
   shipped: 7,
@@ -80,7 +81,7 @@ describe("TeamTelecallerWorkloadPage (individual telecaller performance)", () =>
 
     expect(screen.getByText("Sourabh — Telecaller Performance")).toBeInTheDocument()
     expect(screen.getByText("40")).toBeInTheDocument() // Total Assigned
-    expect(screen.getByText("52")).toBeInTheDocument() // Total Attempts
+    expect(screen.getByText("4.0")).toBeInTheDocument() // Average Call Attempts
     expect(screen.getByText("6")).toBeInTheDocument() // Orders Fulfilled
     expect(screen.getByText("20%")).toBeInTheDocument() // Conversion Rate
     expect(screen.getByText("12")).toBeInTheDocument() // Orders Confirmed

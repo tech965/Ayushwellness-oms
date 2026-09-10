@@ -34,11 +34,16 @@ from app.schemas.telecalling import (
     CallHistoryEntryResponse,
     CheckoutCallAttemptResponse,
     LogCallRequest,
+    OrderAddressUpdateRequest,
     OrderAssignmentResponse,
     ScheduleFollowUpRequest,
     TelecallingSummaryResponse,
 )
-from app.services.telecalling_service import TelecallingService, resolve_telecaller_scope
+from app.services.telecalling_service import (
+    ScopeFilter,
+    TelecallingService,
+    resolve_telecaller_scope,
+)
 
 router = APIRouter()
 
@@ -77,7 +82,9 @@ async def get_my_order(
     assignment = await service.get_scoped_assignment(
         order_id, scope=resolve_telecaller_scope(current_user)
     )
-    return ApiResponse(data=to_assigned_order_response(assignment.order, assignment))
+    return ApiResponse(
+        data=to_assigned_order_response(assignment.order, assignment, include_items=True)
+    )
 
 
 @router.get("/orders/{order_id}/calls", response_model=ApiResponse[list[CallAttemptResponse]])
@@ -200,6 +207,49 @@ async def unconfirm_order(
     )
     return ApiResponse(
         data=OrderDetailResponse.model_validate(order), message="Order reverted to pending."
+    )
+
+
+@router.patch("/orders/{order_id}/address", response_model=ApiResponse[AssignedOrderResponse])
+async def update_order_address(
+    order_id: uuid.UUID,
+    payload: OrderAddressUpdateRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("orders.confirm")),
+) -> ApiResponse[AssignedOrderResponse]:
+    """Edits `Order.shipping_address` and pushes it to the corresponding
+    Shopify order. Same `orders.confirm` permission + `assigned_to ==
+    current_user.id` ownership check as confirm/unconfirm above — a
+    Telecaller can only edit the address of an order actually assigned to
+    them (`TelecallingService.update_assigned_order_address`).
+
+    Always 200 once the OMS write succeeds, regardless of whether the
+    Shopify push did — never touches `Order.status`, confirmation
+    attribution, `fulfillment_status`, Shiprocket, or inventory. The
+    response's `shipping_address_sync_status`/`shipping_address_sync_
+    error` tell the caller whether Shopify actually got the update;
+    "synced" is the only status that means full success — a Shopify
+    failure never rolls back or hides the OMS change. Simply saving the
+    address again (even unchanged) retries the Shopify push, since
+    `orderUpdate` is idempotent — no separate retry endpoint exists.
+    """
+    service = TelecallingService(session)
+    await service.update_assigned_order_address(
+        order_id, actor=current_user, address=payload.model_dump()
+    )
+    # Ownership (or the superuser bypass) was already enforced inside
+    # `update_assigned_order_address` above -- re-fetching the response
+    # through `resolve_telecaller_scope` (always self-only, even for an
+    # admin, by design -- see its docstring) would wrongly 403 a
+    # superuser who just successfully edited someone else's order. An
+    # unscoped fetch here is safe precisely because the write already
+    # proved the caller was allowed to touch this order.
+    assignment = await service.get_scoped_assignment(
+        order_id, scope=ScopeFilter(assigned_to=None, team_leader_id=None)
+    )
+    return ApiResponse(
+        data=to_assigned_order_response(assignment.order, assignment, include_items=True),
+        message="Address updated.",
     )
 
 

@@ -22,13 +22,14 @@ from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.abandoned_checkout import AbandonedCheckout
 from app.models.auth import User
 from app.models.enums import LeadCategory
-from app.models.order import Order
+from app.models.order import Order, OrderItem
 from app.models.telecalling import CheckoutAssignment, OrderAssignment
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.response import ApiResponse, PaginatedResponse
 from app.schemas.telecalling import (
     AssignCheckoutsRequest,
     AssignedCheckoutResponse,
+    AssignedOrderItemResponse,
     AssignedOrderResponse,
     AssignOrdersRequest,
     CallAttemptResponse,
@@ -49,14 +50,44 @@ from app.services.telecalling_service import ScopeFilter, TelecallingService, re
 router = APIRouter()
 
 
+def _to_assigned_order_item_response(item: OrderItem) -> AssignedOrderItemResponse:
+    """`AssignedOrderItemResponse` from a real `OrderItem` + its (possibly
+    unresolved) `product_variant`/`product` relationships -- mirrors
+    `orders.py`'s `_to_detail_response` item-enrichment pattern. Never
+    invents a SKU/variant/image: each is `None`/the item's own column
+    exactly when the underlying data doesn't exist.
+    """
+    variant = item.product_variant
+    return AssignedOrderItemResponse(
+        id=item.id,
+        sku=item.sku,
+        product_name=item.product_name,
+        variant_title=variant.title if variant else None,
+        image_url=variant.product.image_url if variant and variant.product else None,
+        quantity=item.quantity,
+        unit_price=item.unit_price,
+        total_amount=item.total_amount,
+    )
+
+
 def to_assigned_order_response(
-    order: Order, assignment: OrderAssignment | None = None, *, telecaller_name: str | None = None
+    order: Order,
+    assignment: OrderAssignment | None = None,
+    *,
+    telecaller_name: str | None = None,
+    include_items: bool = False,
 ) -> AssignedOrderResponse:
     """Flattens an `Order` + its (possibly absent) active `OrderAssignment`
     into one row. `assignment=None` only ever happens in the Team Leader's
     unfulfilled-orders *pool* view — every other caller passes a real
     assignment (`assignment.order` for the assignment-driven list/detail
     endpoints).
+
+    `include_items`: the per-line-item breakdown (image/variant/SKU, see
+    `AssignedOrderItemResponse`) that only the order DETAIL page needs --
+    left off (`[]`) by every *list*/pool call site so a page of 20-50
+    orders never carries every one of their line items' payloads for
+    data nothing renders.
     """
     items = order.items
     item_summary = None
@@ -92,6 +123,9 @@ def to_assigned_order_response(
         confirmed_by_telecaller_id=order.confirmed_by_telecaller_id,
         order_datetime=order.order_datetime,
         shipping_address=order.shipping_address,
+        shipping_address_sync_status=order.shipping_address_sync_status.value,
+        shipping_address_sync_error=order.shipping_address_sync_error,
+        items=[_to_assigned_order_item_response(item) for item in items] if include_items else [],
         assignment_id=assignment.id if assignment else None,
         assigned_to=assignment.assigned_to if assignment else None,
         assigned_to_name=telecaller_name,
@@ -253,7 +287,10 @@ async def get_team_order(
     )
     return ApiResponse(
         data=to_assigned_order_response(
-            assignment.order, assignment, telecaller_name=assignment.telecaller.name
+            assignment.order,
+            assignment,
+            telecaller_name=assignment.telecaller.name,
+            include_items=True,
         )
     )
 

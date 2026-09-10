@@ -502,6 +502,66 @@ class OrderService:
         await self.session.commit()
         return await self.get_order(order_id)
 
+    async def update_shipping_address(
+        self, order_id: uuid.UUID, *, actor: User, address: dict
+    ) -> Order:
+        """Edits `Order.shipping_address` only -- the one place this OMS
+        stores an order's shipping address (a point-in-time snapshot, not
+        a `CustomerAddress` FK; see that column's docstring). Only
+        caller is `TelecallingService.update_assigned_order_address`,
+        which does its own ownership check first, same separation
+        `confirm_order`/`unconfirm_order` already have from their caller.
+
+        Deliberately narrow: never touches `Order.status` (no
+        `transition_status` call), `confirmed_by_telecaller_id`/
+        `confirmed_at`, `fulfillment_status`, inventory, or Shiprocket --
+        an address correction is not a confirmation/shipping event, and
+        must never be mistaken for one by any of those systems. Call
+        attempts/history are untouched for the same reason.
+
+        The OMS write commits first and unconditionally; the Shopify push
+        (`ShopifyFulfillmentService.sync_shipping_address`) only ever
+        runs after that, and its own failure-isolation means it can never
+        undo or roll back this commit -- see that method's docstring for
+        why a plain re-save is already this operation's retry mechanism,
+        with no separate retry endpoint needed.
+
+        Audited (`AuditService.record`, previous/new address) and written
+        to the append-only `OrderEvent` timeline (`event_type=
+        "address_updated"`) -- the existing pattern for "what changed and
+        who changed it," reused unchanged rather than inventing a second
+        mechanism.
+        """
+        order = await self.get_order(order_id)
+        previous_address = order.shipping_address
+        await self.orders.update(order, shipping_address=address)
+        await self.order_events.create(
+            order_id=order_id,
+            event_type="address_updated",
+            status=None,
+            description="Shipping address updated.",
+            source="user",
+            actor_user_id=actor.id,
+        )
+        await self.audit.record(
+            user=actor,
+            action="order.shipping_address_updated",
+            entity_type="order",
+            entity_id=str(order_id),
+            previous_value={"shipping_address": previous_address},
+            new_value={"shipping_address": address},
+        )
+        await self.session.commit()
+
+        # Local import: avoids a module-load-order dependency between
+        # `order_service` and `shopify_fulfillment_service` for the one
+        # code path that needs it, matching this codebase's existing
+        # convention for occasional cross-service calls.
+        from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
+
+        await ShopifyFulfillmentService(self.session).sync_shipping_address(order_id, actor=actor)
+        return await self.get_order(order_id)
+
     async def add_event(
         self,
         order_id: uuid.UUID,

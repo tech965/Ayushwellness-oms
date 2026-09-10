@@ -442,7 +442,18 @@ class TelecallingService:
         fulfilled_by_telecaller = await self.assignments.fulfilled_counts(
             telecaller_id=telecaller_id
         )
-        total_attempts = await self.assignments.total_attempt_count(telecaller_id=telecaller_id)
+        total_attempts, orders_with_attempts = await self.assignments.attempt_averaging_stats(
+            telecaller_id=telecaller_id
+        )
+        # "Average Call Attempts" -- total attempts / unique orders that
+        # have been called at least once, never divided by every assigned
+        # order (an untouched order isn't a "0-attempt call," it just
+        # hasn't been reached yet, and would otherwise drag the average
+        # down for no operationally meaningful reason). 0.0 when nothing
+        # has been called yet, not a division error.
+        average_call_attempts = (
+            round(total_attempts / orders_with_attempts, 1) if orders_with_attempts else 0.0
+        )
         confirmation = (
             await self.orders.telecaller_confirmation_counts(telecaller_id=telecaller_id)
         ).get(telecaller_id, {"confirmed": 0, "shipped": 0, "delivered": 0, "ndr": 0, "rto": 0})
@@ -452,6 +463,7 @@ class TelecallingService:
             "cancelled": merged.get(TelecallingStatus.CANCELLED.value, 0),
             "fulfilled": fulfilled_by_telecaller.get(telecaller_id, 0),
             "total_attempts": total_attempts,
+            "average_call_attempts": average_call_attempts,
             "orders_confirmed": confirmation["confirmed"],
             "shipped": confirmation["shipped"],
             "delivered": confirmation["delivered"],
@@ -1047,6 +1059,26 @@ class TelecallingService:
         if not actor.is_superuser and assignment.assigned_to != actor.id:
             raise AuthorizationError("This order is not assigned to you.")
         return await self.order_service.unconfirm_order(order_id, actor=actor)
+
+    async def update_assigned_order_address(
+        self, order_id: uuid.UUID, *, actor: User, address: dict
+    ) -> Order:
+        """Telecaller-scoped shipping-address edit. Same ownership check
+        as `confirm_assigned_order`/`unconfirm_assigned_order`
+        (`assigned_to == actor.id` unless superuser) -- a Telecaller can
+        only edit the address of an order actually assigned to them, and
+        never gains any broader order-edit access through this method.
+        The actual OMS write + Shopify sync is `OrderService.
+        update_shipping_address`'s job.
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+        return await self.order_service.update_shipping_address(
+            order_id, actor=actor, address=address
+        )
 
     # ------------------------------------------------------------------
     # Checkout calling / follow-up mutations — `log_call`/

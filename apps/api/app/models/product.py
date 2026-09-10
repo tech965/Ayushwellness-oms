@@ -44,6 +44,14 @@ class Product(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     # so `upsert_synced_product` can't overwrite a staff edit (same
     # protection-by-omission as `ProductVariant.available_quantity`).
     title_override: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Shopify's `featuredImage.url` -- pulled by the same product pull-
+    # sync as everything else above (`ShopifyProductNormalizer`), used to
+    # show a real product thumbnail next to order line items (e.g. the
+    # Telecaller order detail page) instead of just a SKU/name. `None`
+    # for a product with no Shopify image set, or one never synced from
+    # Shopify (a manually-created OMS product) -- the UI falls back to a
+    # placeholder, never a broken image.
+    image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[ProductStatus] = mapped_column(
         sa_enum(ProductStatus, "product_status"), nullable=False, default=ProductStatus.ACTIVE

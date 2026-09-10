@@ -205,6 +205,41 @@ export function useUnconfirmOrder(orderId: string) {
   })
 }
 
+export interface UpdateOrderAddressInput {
+  contact_name?: string
+  contact_phone?: string
+  line1: string
+  line2?: string
+  city: string
+  state?: string
+  pin_code: string
+  country?: string
+}
+
+/** Updates `Order.shipping_address` and pushes it to Shopify. Always
+ * resolves on a 200 (the OMS write succeeding) -- the caller must check
+ * `shipping_address_sync_status` on the returned order to tell "saved
+ * and synced" apart from "saved, Shopify sync failed" rather than
+ * assuming success from the mutation not throwing. Saving again (even
+ * unchanged) is itself the retry for a failed Shopify push -- there's no
+ * separate retry endpoint.
+ */
+export function useUpdateOrderAddress(orderId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: UpdateOrderAddressInput) => {
+      const response = await apiClient.patch<ApiResponse<AssignedOrder>>(
+        `/telecaller/orders/${orderId}/address`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+    },
+  })
+}
+
 /** Confirms every selected order independently -- the response always
  * reports a per-order result, never an all-or-nothing failure.
  */

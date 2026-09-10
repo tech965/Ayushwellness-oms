@@ -86,6 +86,36 @@ _MAX_ERROR_MESSAGE_LENGTH = 2000
 CONFIRMATION_TAG = "OMS Confirmed"
 
 
+def _to_shopify_address_input(address: dict) -> dict[str, str | None]:
+    """Maps the OMS's own `Order.shipping_address` shape (`line1`/
+    `line2`/`city`/`state`/`country`/`pin_code`/`contact_name`/
+    `contact_phone` -- see `app.integrations.shopify.normalizer.
+    normalize_address`, the same shape this was originally populated
+    from) onto Shopify's `MailingAddressInput` field names. Shopify has
+    no single "full name" input field, only `firstName`/`lastName`, so
+    `contact_name` is split on its first space -- a reasonable, harmless
+    best-effort mapping for how Shopify itself displays these two fields
+    concatenated back into one name; never blocks the update if there's
+    no space (the whole name goes to `lastName`, `firstName` left unset).
+    """
+    contact_name = (address.get("contact_name") or "").strip()
+    if " " in contact_name:
+        first_name, last_name = contact_name.split(" ", 1)
+    else:
+        first_name, last_name = None, (contact_name or None)
+    return {
+        "firstName": first_name or None,
+        "lastName": last_name or None,
+        "address1": address.get("line1"),
+        "address2": address.get("line2"),
+        "city": address.get("city"),
+        "province": address.get("state"),
+        "country": address.get("country"),
+        "zip": address.get("pin_code"),
+        "phone": address.get("contact_phone"),
+    }
+
+
 class ShopifyFulfillmentService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -515,6 +545,102 @@ class ShopifyFulfillmentService:
         )
         await self.session.commit()
         logger.info("shopify_confirmation_fulfillment_reversed", order_id=str(order_id))
+        return order
+
+    async def sync_shipping_address(self, order_id: uuid.UUID, *, actor: User | None) -> Order:
+        """Pushes `Order.shipping_address` (the OMS's current, already-
+        saved value) to the corresponding Shopify order via `orderUpdate`
+        -- called by `OrderService.update_shipping_address` right after a
+        Telecaller edit commits. Always OMS-first: by the time this runs,
+        the OMS's own address has already been saved and committed, so a
+        Shopify-side failure here can never leave the OMS out of sync
+        with what the Telecaller actually entered.
+
+        No "already synced" idempotency guard, unlike `sync_confirmation_
+        fulfillment`/`sync_fulfillment_for_shipment`: `orderUpdate` sets
+        Shopify's address in place rather than creating a new object, so
+        calling this again (a retry, or simply saving the same address
+        form a second time) just re-sends the same values -- always safe,
+        never a duplicate. That also means there is no dedicated retry
+        endpoint for this one: re-opening "Edit Address" and saving again
+        (even unchanged) IS the retry.
+
+        Never raises: same failure-isolation contract as every other
+        outbound push here -- a Shopify failure is recorded on `Order.
+        shipping_address_sync_status`/`shipping_address_sync_error` and
+        never undoes or blocks the OMS address change that already
+        committed. The caller (`OrderService.update_shipping_address`)
+        returns this status in its response so the API/frontend can tell
+        the difference between "saved and synced" and "saved, Shopify
+        sync failed" rather than reporting blanket success.
+        """
+        order = await self.orders.get_by_id(order_id)
+        if order is None:
+            raise NotFoundError("Order not found.")
+
+        if not order.shopify_order_id:
+            if order.shipping_address_sync_status != ShopifySyncStatus.NOT_APPLICABLE:
+                await self.orders.update(
+                    order, shipping_address_sync_status=ShopifySyncStatus.NOT_APPLICABLE
+                )
+                await self.session.commit()
+            return order
+
+        if not order.shipping_address:
+            return order
+
+        adapter = self._get_adapter()
+        order_gid = f"gid://shopify/Order/{order.shopify_order_id}"
+        address_input = _to_shopify_address_input(order.shipping_address)
+
+        try:
+            await adapter.update_order_shipping_address(order_gid, address=address_input)
+        except IntegrationError as exc:
+            return await self._record_address_sync_failure(order, actor=actor, message=exc.message)
+        except Exception as exc:  # noqa: BLE001 - never let an unexpected error corrupt state
+            await self.session.rollback()
+            order = await self.orders.get_by_id(order_id)
+            assert order is not None
+            return await self._record_address_sync_failure(
+                order, actor=actor, message=f"Unexpected error syncing to Shopify: {exc}"
+            )
+
+        await self.orders.update(
+            order,
+            shipping_address_sync_status=ShopifySyncStatus.SYNCED,
+            shipping_address_sync_error=None,
+            shipping_address_synced_at=datetime.now(UTC),
+        )
+        await self.audit.record(
+            user=actor,
+            action="order.shopify_shipping_address_synced",
+            entity_type="order",
+            entity_id=str(order_id),
+        )
+        await self.session.commit()
+        logger.info("shopify_shipping_address_synced", order_id=str(order_id))
+        return order
+
+    async def _record_address_sync_failure(
+        self, order: Order, *, actor: User | None, message: str
+    ) -> Order:
+        truncated = message[:_MAX_ERROR_MESSAGE_LENGTH]
+        await self.orders.update(
+            order,
+            shipping_address_sync_status=ShopifySyncStatus.FAILED,
+            shipping_address_sync_error=truncated,
+        )
+        await self.audit.record(
+            user=actor,
+            action="order.shopify_shipping_address_sync_failed",
+            entity_type="order",
+            entity_id=str(order.id),
+            new_value={"error": truncated},
+        )
+        await self.session.commit()
+        logger.warning(
+            "shopify_shipping_address_sync_failed", order_id=str(order.id), error=truncated
+        )
         return order
 
     async def _record_confirmation_failure(

@@ -113,8 +113,8 @@ function TeamTelecallerWorkloadContent() {
           accent="slate"
         />
         <StatTile
-          label="Total Attempts"
-          value={summary?.total_attempts ?? "—"}
+          label="Average Call Attempts"
+          value={summary ? summary.average_call_attempts.toFixed(1) : "—"}
           icon={PhoneCall}
           accent="blue"
         />
