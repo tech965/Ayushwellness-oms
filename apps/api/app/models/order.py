@@ -165,19 +165,17 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
 
-    # Outbound OMS -> Shopify push for the Telecaller-confirmation event
-    # itself (`ShopifyFulfillmentService.sync_confirmation_fulfillment`) --
-    # a real Shopify `Fulfillment` created purely to reflect "OMS says this
-    # order is confirmed," with no AWB/tracking and no Shiprocket shipment
-    # behind it. Deliberately a separate id from any `Shipment.
-    # shopify_fulfillment_id` (the real shipping-time push on AWB
-    # assignment): this one is OMS-owned from the moment it's created, so
-    # `unconfirm_order` can safely `fulfillmentCancel` exactly this id and
-    # never anything created independently outside the OMS. `NULL` means
-    # "nothing to reverse" -- never synced, already reversed, or (the one
-    # edge case) synced by a retry that couldn't recover the real
-    # fulfillment id, which is instead recorded as `SYNCED` with this
-    # column left `NULL` -- see that method's docstring.
+    # LEGACY: Telecaller confirmation no longer creates a Shopify
+    # `Fulfillment` -- it only adds/removes `CONFIRMATION_TAG` (see
+    # `ShopifyFulfillmentService.sync_confirmation_tag`/
+    # `reverse_confirmation_tag`, called by `OrderService.confirm_order`/
+    # `unconfirm_order`). This column (and `sync_confirmation_fulfillment`/
+    # `reverse_confirmation_fulfillment`, still present but no longer
+    # wired into the confirm/unconfirm flow) is retained, unmigrated, so
+    # `sync_fulfillment_for_shipment`'s fallback keeps working for any
+    # order fulfilled for confirmation under the PREVIOUS behaviour.
+    # Always `NULL` for an order confirmed under the current, tag-only
+    # flow.
     shopify_confirmation_fulfillment_id: Mapped[str | None] = mapped_column(
         String(64), unique=True, nullable=True, index=True
     )

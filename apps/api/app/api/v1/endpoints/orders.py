@@ -285,25 +285,20 @@ async def retry_shopify_confirmation_sync(
     session: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("orders.update")),
 ) -> ApiResponse[OrderDetailResponse]:
-    """Manually retries the outbound Shopify push for a Telecaller
-    confirmation -- the tag and the confirmation Fulfillment, independent
-    of each other so a retry never redoes whichever half already
-    succeeded (`ShopifyFulfillmentService.sync_confirmation_tag`/
-    `sync_confirmation_fulfillment`). Mirrors `POST /shipments/{id}/
-    shopify/retry-sync`'s contract: safe to call whenever, a no-op for
-    whichever half is already synced, and never raises on a Shopify-side
-    failure -- the response is always 200 with the order's current
-    `shopify_confirmation_sync_status`, which the frontend reads to show
-    success/still-failed.
+    """Manually re-pushes the `CONFIRMATION_TAG` to the Shopify order for
+    a Telecaller confirmation (`ShopifyFulfillmentService.
+    sync_confirmation_tag`) -- the only Shopify-side effect of a
+    confirmation now (no `fulfillmentCreate`). Mirrors `POST
+    /shipments/{id}/shopify/retry-sync`'s contract: safe to call whenever
+    (`tagsAdd` is a set-union no-op if already present), and never raises
+    on a Shopify-side failure -- the response is always 200 with the
+    order's current state.
     """
-    shopify_sync = ShopifyFulfillmentService(session)
-    await shopify_sync.sync_confirmation_tag(order_id, actor=current_user)
-    await shopify_sync.sync_confirmation_fulfillment(order_id, actor=current_user)
-    # Re-fetched via `OrderService.get_order` (not the plain, unrelated-
-    # loaded row `sync_confirmation_fulfillment` returns) -- `_to_detail_
-    # response` needs `items`/`customer`/`confirmed_by_telecaller` eager-
-    # loaded, same reason every other route in this file re-fetches
-    # through it after a mutation.
+    await ShopifyFulfillmentService(session).sync_confirmation_tag(order_id, actor=current_user)
+    # Re-fetched via `OrderService.get_order` -- `_to_detail_response`
+    # needs `items`/`customer`/`confirmed_by_telecaller` eager-loaded,
+    # same reason every other route in this file re-fetches through it
+    # after a mutation.
     order = await OrderService(session).get_order(order_id)
     return ApiResponse(
         data=_to_detail_response(order), message="Shopify confirmation sync retried."

@@ -771,11 +771,11 @@ async def test_unconfirm_blocked_when_shopify_already_shows_order_fulfilled(
 class _StubShopifyClient:
     """Matches `ShopifyClient.execute`'s interface -- see
     `test_shopify_fulfillment.py` for the identical pattern used against
-    the outbound fulfillment push. Confirming now issues up to three
-    calls in order (`tagsAdd`, then the open-fulfillment-orders lookup,
-    then `fulfillmentCreate`); unconfirming issues up to two
-    (`tagsRemove`, then `fulfillmentCancel`) -- tests below queue exactly
-    the responses each scenario needs.
+    the outbound fulfillment push. IMPORTANT CORRECTION (see this file's
+    git history): confirming now issues EXACTLY ONE call (`tagsAdd`);
+    unconfirming issues EXACTLY ONE call (`tagsRemove`) -- NEVER
+    `fulfillmentCreate`/`fulfillmentCancel` for either. Tests below queue
+    exactly the responses each scenario needs.
     """
 
     def __init__(self, responses: list) -> None:
@@ -798,41 +798,25 @@ def _tags_remove_success(order_gid: str = "gid://shopify/Order/900001") -> dict:
     return {"tagsRemove": {"node": {"id": order_gid}, "userErrors": []}}
 
 
-def _open_fulfillment_orders_response(fulfillment_order_id: str | None) -> dict:
-    edges = (
-        [{"node": {"id": fulfillment_order_id, "status": "OPEN"}}] if fulfillment_order_id else []
+def _assert_no_fulfillment_calls(client: _StubShopifyClient) -> None:
+    """Requirements 3/6: neither confirm nor unconfirm may ever call
+    `fulfillmentCreate`/`fulfillmentCancel`.
+    """
+    assert not any(
+        "fulfillmentCreate" in query or "fulfillmentCancel" in query
+        for query, _variables in client.calls
     )
-    return {"order": {"id": "gid://shopify/Order/900001", "fulfillmentOrders": {"edges": edges}}}
 
 
-def _fulfillment_create_success(fulfillment_id: str = "gid://shopify/Fulfillment/7001") -> dict:
-    return {
-        "fulfillmentCreate": {
-            "fulfillment": {"id": fulfillment_id, "status": "SUCCESS", "trackingInfo": {}},
-            "userErrors": [],
-        }
-    }
-
-
-def _fulfillment_cancel_success(fulfillment_id: str = "gid://shopify/Fulfillment/7001") -> dict:
-    return {
-        "fulfillmentCancel": {
-            "fulfillment": {"id": fulfillment_id, "status": "CANCELLED"},
-            "userErrors": [],
-        }
-    }
-
-
-async def test_confirm_creates_a_real_shopify_fulfillment_and_pushes_the_tag(
+async def test_confirm_pushes_the_tag_and_never_creates_a_fulfillment(
     db_session: AsyncSession,
 ) -> None:
-    """Confirming a Shopify-sourced order now (a) tags it and (b) creates
-    a real Shopify `Fulfillment` for the order -- no AWB, no tracking,
-    and no Shiprocket call at all (shipping stays a separate, explicit
-    action). `Order.fulfillment_status` itself stays whatever it was
-    locally (only the next inbound Shopify sync/webhook updates that
-    coarse summary) -- what changes here is the real Shopify-side state
-    plus the OMS's own record of which Fulfillment it created.
+    """Requirements 1/2/3: confirming a Shopify-sourced order sets it
+    CONFIRMED in the OMS and tags it `CONFIRMATION_TAG` in Shopify --
+    NOTHING else on the Shopify side. No `fulfillmentCreate`, no
+    fulfillment-status change: `Order.fulfillment_status` stays whatever
+    it was locally (Shopify's own order remains Unfulfilled until real
+    shipping happens).
     """
     from app.integrations.registry import clear_adapters, register_adapter
     from app.integrations.shopify.adapter import ShopifyAdapter
@@ -841,13 +825,7 @@ async def test_confirm_creates_a_real_shopify_fulfillment_and_pushes_the_tag(
     from app.services.shopify_fulfillment_service import CONFIRMATION_TAG
     from sqlalchemy import select
 
-    client = _StubShopifyClient(
-        [
-            _tags_add_success(),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
-            _fulfillment_create_success(),
-        ]
-    )
+    client = _StubShopifyClient([_tags_add_success()])
     register_adapter(ShopifyAdapter(client=client))
     try:
         leader, telecaller, _other, customer = await _setup(db_session)
@@ -868,17 +846,20 @@ async def test_confirm_creates_a_real_shopify_fulfillment_and_pushes_the_tag(
             data = response.json()["data"]
             assert data["status"] == "confirmed"
             assert data["fulfillment_status"] == "unfulfilled"
-            assert data["shopify_confirmation_sync_status"] == "synced"
 
-        assert len(client.calls) == 3
+        # Exactly one Shopify call, and it's the tag.
+        assert len(client.calls) == 1
         tag_query, tag_variables = client.calls[0]
         assert "tagsAdd" in tag_query
         assert tag_variables == {"id": "gid://shopify/Order/900001", "tags": [CONFIRMATION_TAG]}
-        create_query, _ = client.calls[2]
-        assert "fulfillmentCreate" in create_query
+        _assert_no_fulfillment_calls(client)
 
         await db_session.refresh(order)
-        assert order.shopify_confirmation_fulfillment_id == "gid://shopify/Fulfillment/7001"
+        # The legacy confirmation-Fulfillment column (still present for
+        # `sync_fulfillment_for_shipment`'s backward-compat fallback --
+        # see `Order.shopify_confirmation_fulfillment_id`) is never set by
+        # a tag-only confirm.
+        assert order.shopify_confirmation_fulfillment_id is None
 
         # Still no Shiprocket shipment -- shipping is a separate, explicit
         # action, never triggered by confirming.
@@ -892,8 +873,7 @@ async def test_confirm_creates_a_real_shopify_fulfillment_and_pushes_the_tag(
 
 async def test_confirm_skips_shopify_push_for_a_manual_order(db_session: AsyncSession) -> None:
     """An order with no `shopify_order_id` (created directly in the OMS)
-    has nothing to tag or fulfill -- confirming it never calls Shopify at
-    all.
+    has nothing to tag -- confirming it never calls Shopify at all.
     """
     from app.integrations.registry import clear_adapters, register_adapter
     from app.integrations.shopify.adapter import ShopifyAdapter
@@ -921,21 +901,22 @@ async def test_confirm_skips_shopify_push_for_a_manual_order(db_session: AsyncSe
         clear_adapters()
 
 
-async def test_confirm_succeeds_even_when_the_shopify_fulfillment_push_fails(
+async def test_confirm_succeeds_even_when_the_shopify_tag_push_fails(
     db_session: AsyncSession,
 ) -> None:
     """OMS confirmation is authoritative -- a Shopify-side failure while
-    creating the confirmation Fulfillment must never block, delay, or
-    roll back an already-successful OMS confirmation. The failure is
-    recorded as retryable, and a retry recovers without duplicating.
+    pushing the tag must never block, delay, or roll back an
+    already-successful OMS confirmation. There is no per-order failure
+    status for a tag-only push (see `sync_confirmation_tag`'s docstring)
+    -- the next successful confirm or a manual retry naturally re-pushes
+    it, and it's never a `fulfillmentCreate` call either way.
     """
     from app.core.exceptions import IntegrationError
     from app.integrations.registry import clear_adapters, register_adapter
     from app.integrations.shopify.adapter import ShopifyAdapter
+    from app.services.shopify_fulfillment_service import CONFIRMATION_TAG
 
-    client = _StubShopifyClient(
-        [_tags_add_success(), IntegrationError("Shopify is down.", details={})]
-    )
+    client = _StubShopifyClient([IntegrationError("Shopify is down.", details={})])
     register_adapter(ShopifyAdapter(client=client))
     try:
         leader, telecaller, _other, customer = await _setup(db_session)
@@ -952,49 +933,44 @@ async def test_confirm_succeeds_even_when_the_shopify_fulfillment_push_fails(
         async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
             response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
             assert response.status_code == 200
-            data = response.json()["data"]
-            assert data["status"] == "confirmed"
-            assert data["shopify_confirmation_sync_status"] == "failed"
-            assert data["shopify_confirmation_sync_error"]
+            assert response.json()["data"]["status"] == "confirmed"
 
         # A manual retry (OPERATIONS/ADMIN-only, see the RBAC test below)
-        # recovers cleanly and never calls fulfillmentCreate a second
-        # time -- only the still-missing fulfillment half is retried; the
-        # tag (already a set-union no-op) is safe to re-issue too.
+        # re-pushes just the tag -- `tagsAdd` is a set-union, so this is
+        # always safe to repeat.
         ops_role = await make_role(
             db_session, name="OPERATIONS", permission_codes=["orders.update"]
         )
         ops_user = await make_user(
             db_session, email="ops-retry-d@confirm.example.com", role=ops_role
         )
-        client._responses = [
-            _tags_add_success(),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/2"),
-            _fulfillment_create_success("gid://shopify/Fulfillment/7004"),
-        ]
+        client._responses = [_tags_add_success("gid://shopify/Order/900004")]
         async with bearer_client(app, get_db, db_session, ops_user.id) as ops_client:
             retry = await ops_client.post(
                 f"/api/v1/orders/{order.id}/shopify/retry-confirmation-sync"
             )
             assert retry.status_code == 200
-            assert retry.json()["data"]["shopify_confirmation_sync_status"] == "synced"
 
-        await db_session.refresh(order)
-        assert order.shopify_confirmation_fulfillment_id == "gid://shopify/Fulfillment/7004"
+        assert len(client.calls) == 2
+        assert "tagsAdd" in client.calls[0][0]
+        assert "tagsAdd" in client.calls[1][0]
+        assert client.calls[1][1] == {
+            "id": "gid://shopify/Order/900004",
+            "tags": [CONFIRMATION_TAG],
+        }
+        _assert_no_fulfillment_calls(client)
     finally:
         clear_adapters()
 
 
-async def test_repeated_confirm_retries_never_duplicate_the_shopify_fulfillment(
-    db_session: AsyncSession,
-) -> None:
-    """Re-confirming after an unconfirm (or a bulk-confirm retry hitting
-    an already-confirmed order via the real endpoint) never creates a
-    second Shopify Fulfillment for the second confirm -- the idempotency
-    guard is `Order.shopify_confirmation_fulfillment_id` already being
-    set, exactly mirroring the shipment-level guard `test_shopify_
-    fulfillment.py::test_already_synced_shipment_is_never_pushed_twice`
-    exercises for real shipping.
+async def test_confirm_unconfirm_cycle_is_idempotent_tag_only(db_session: AsyncSession) -> None:
+    """Requirement 9: re-confirming after an unconfirm just re-adds the
+    tag (`tagsAdd` is a set-union, so this is always safe even if a
+    previous `tagsRemove` never actually landed) -- never a
+    `fulfillmentCreate`/`fulfillmentCancel` anywhere in the cycle. A third
+    confirm attempt WITHOUT an intervening unconfirm is blocked by
+    `transition_status` itself (already CONFIRMED) before the Shopify
+    push is ever reached, so nothing duplicates there either.
     """
     from app.integrations.registry import clear_adapters, register_adapter
     from app.integrations.shopify.adapter import ShopifyAdapter
@@ -1002,14 +978,9 @@ async def test_repeated_confirm_retries_never_duplicate_the_shopify_fulfillment(
 
     client = _StubShopifyClient(
         [
-            _tags_add_success(),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
-            _fulfillment_create_success(),
-            _tags_remove_success(),
-            _fulfillment_cancel_success(),
-            _tags_add_success(),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/2"),
-            _fulfillment_create_success("gid://shopify/Fulfillment/7002"),
+            _tags_add_success("gid://shopify/Order/900005"),
+            _tags_remove_success("gid://shopify/Order/900005"),
+            _tags_add_success("gid://shopify/Order/900005"),
         ]
     )
     register_adapter(ShopifyAdapter(client=client))
@@ -1033,44 +1004,39 @@ async def test_repeated_confirm_retries_never_duplicate_the_shopify_fulfillment(
             second = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
             assert second.status_code == 200
 
-        assert len(client.calls) == 8
-        tag_calls = [v for q, v in client.calls if "tagsAdd" in q or "tagsRemove" in q]
-        assert len(tag_calls) == 3
-        for variables in tag_calls:
+        assert len(client.calls) == 3
+        for query, variables in client.calls:
+            assert "tagsAdd" in query or "tagsRemove" in query
             assert variables == {"id": "gid://shopify/Order/900005", "tags": [CONFIRMATION_TAG]}
-        create_calls = [v for q, v in client.calls if "fulfillmentCreate" in q]
-        assert len(create_calls) == 2
+        _assert_no_fulfillment_calls(client)
 
-        # A third confirm attempt WITHOUT an intervening unconfirm is
-        # blocked by `transition_status` itself (already CONFIRMED) --
-        # never reaches the Shopify push at all, so nothing duplicates.
+        # A third confirm attempt WITHOUT an intervening unconfirm never
+        # reaches the Shopify push at all -- blocked by transition_status.
         client._responses = []
         async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
             third = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
             assert third.status_code == 409
-        assert client.calls[8:] == []
+        assert client.calls[3:] == []
     finally:
         clear_adapters()
 
 
-async def test_unconfirm_reverses_the_shopify_confirmation_fulfillment(
+async def test_unconfirm_removes_the_tag_and_never_cancels_a_fulfillment(
     db_session: AsyncSession,
 ) -> None:
-    """The exact inverse of confirm: `tagsRemove` and `fulfillmentCancel`
-    against the SAME Fulfillment id the OMS itself created at confirm
-    time -- never a generic "cancel whatever's open" call. Shiprocket is
-    never touched (no shipment exists yet at this point in the flow).
+    """Requirements 4/5/6: unconfirming reverts the order to PENDING in
+    the OMS and removes `CONFIRMATION_TAG` from the Shopify order --
+    NOTHING else. No `fulfillmentCancel`, no fulfillment-status change.
+    Shiprocket is never touched (no shipment exists yet at this point in
+    the flow).
     """
     from app.integrations.registry import clear_adapters, register_adapter
     from app.integrations.shopify.adapter import ShopifyAdapter
 
     client = _StubShopifyClient(
         [
-            _tags_add_success(),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
-            _fulfillment_create_success("gid://shopify/Fulfillment/7003"),
-            _tags_remove_success(),
-            _fulfillment_cancel_success("gid://shopify/Fulfillment/7003"),
+            _tags_add_success("gid://shopify/Order/900006"),
+            _tags_remove_success("gid://shopify/Order/900006"),
         ]
     )
     register_adapter(ShopifyAdapter(client=client))
@@ -1094,26 +1060,22 @@ async def test_unconfirm_reverses_the_shopify_confirmation_fulfillment(
             assert response.status_code == 200
             assert response.json()["data"]["status"] == "pending"
 
-        cancel_query, cancel_variables = client.calls[4]
-        assert "fulfillmentCancel" in cancel_query
-        assert cancel_variables == {"id": "gid://shopify/Fulfillment/7003"}
-
-        await db_session.refresh(order)
-        assert order.shopify_confirmation_fulfillment_id is None
-        assert order.shopify_confirmation_sync_status.value == "not_applicable"
+        assert len(client.calls) == 2
+        remove_query, remove_variables = client.calls[1]
+        assert "tagsRemove" in remove_query
+        assert remove_variables == {"id": "gid://shopify/Order/900006", "tags": ["OMS Confirmed"]}
+        _assert_no_fulfillment_calls(client)
     finally:
         clear_adapters()
 
 
-async def test_unconfirm_blocked_and_retryable_when_shopify_cancellation_fails(
+async def test_unconfirm_succeeds_even_when_the_tag_removal_fails(
     db_session: AsyncSession,
 ) -> None:
-    """If Shopify rejects the fulfillment cancellation, the whole revert
-    aborts -- same "external state first" rule as a failed Shiprocket
-    cancellation: the order stays CONFIRMED (never silently claims
-    Shopify is unfulfilled), the failure is recorded so a retry has
-    something to act on, and OMS confirmation history
-    (confirmed_by_telecaller_id/confirmed_at) is untouched.
+    """Tag removal is best-effort -- unlike the previous fulfillment-
+    cancel reversal (which could block the revert), a Shopify failure
+    here must never block the OMS revert. The order still reverts to
+    PENDING and attribution is still cleared.
     """
     from app.core.exceptions import IntegrationError
     from app.integrations.registry import clear_adapters, register_adapter
@@ -1121,11 +1083,8 @@ async def test_unconfirm_blocked_and_retryable_when_shopify_cancellation_fails(
 
     client = _StubShopifyClient(
         [
-            _tags_add_success(),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
-            _fulfillment_create_success("gid://shopify/Fulfillment/7005"),
-            _tags_remove_success(),
-            IntegrationError("Shopify rejected the cancellation.", details={}),
+            _tags_add_success("gid://shopify/Order/900007"),
+            IntegrationError("Shopify rejected the tag removal.", details={}),
         ]
     )
     register_adapter(ShopifyAdapter(client=client))
@@ -1146,24 +1105,25 @@ async def test_unconfirm_blocked_and_retryable_when_shopify_cancellation_fails(
             assert confirm.status_code == 200
 
             response = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
-            assert response.status_code == 409
-            assert "Shopify fulfillment cancellation failed" in response.json()["error"]["message"]
+            assert response.status_code == 200
+            assert response.json()["data"]["status"] == "pending"
 
             order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
             data = order_view.json()["data"]
-            assert data["status"] == "confirmed"
-            assert data["confirmed_by_telecaller_id"] == str(telecaller.id)
+            assert data["status"] == "pending"
+            assert data["confirmed_by_telecaller_id"] is None
 
-        await db_session.refresh(order)
-        assert order.shopify_confirmation_fulfillment_id == "gid://shopify/Fulfillment/7005"
-        assert order.shopify_confirmation_sync_status.value == "failed"
+        _assert_no_fulfillment_calls(client)
     finally:
         clear_adapters()
 
 
-async def test_bulk_confirm_syncs_every_order_to_shopify(db_session: AsyncSession) -> None:
-    """Bulk confirmation reuses the exact same per-order sync logic as a
-    single confirm -- no separate Shopify code path for bulk.
+async def test_bulk_confirm_tags_every_order_and_never_creates_a_fulfillment(
+    db_session: AsyncSession,
+) -> None:
+    """Requirement 8: bulk confirmation reuses the exact same per-order
+    sync logic as a single confirm -- no separate Shopify code path for
+    bulk, and never a `fulfillmentCreate` for any order in the batch.
     """
     from app.integrations.registry import clear_adapters, register_adapter
     from app.integrations.shopify.adapter import ShopifyAdapter
@@ -1171,11 +1131,7 @@ async def test_bulk_confirm_syncs_every_order_to_shopify(db_session: AsyncSessio
     client = _StubShopifyClient(
         [
             _tags_add_success("gid://shopify/Order/900008"),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
-            _fulfillment_create_success("gid://shopify/Fulfillment/7008"),
             _tags_add_success("gid://shopify/Order/900009"),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/2"),
-            _fulfillment_create_success("gid://shopify/Fulfillment/7009"),
         ]
     )
     register_adapter(ShopifyAdapter(client=client))
@@ -1207,10 +1163,17 @@ async def test_bulk_confirm_syncs_every_order_to_shopify(db_session: AsyncSessio
             assert response.status_code == 200
             assert response.json()["data"]["confirmed_count"] == 2
 
+        assert len(client.calls) == 2
+        for query, _variables in client.calls:
+            assert "tagsAdd" in query
+        _assert_no_fulfillment_calls(client)
+
         await db_session.refresh(order_a)
         await db_session.refresh(order_b)
-        assert order_a.shopify_confirmation_fulfillment_id == "gid://shopify/Fulfillment/7008"
-        assert order_b.shopify_confirmation_fulfillment_id == "gid://shopify/Fulfillment/7009"
+        assert order_a.status == OrderStatus.CONFIRMED
+        assert order_b.status == OrderStatus.CONFIRMED
+        assert order_a.shopify_confirmation_fulfillment_id is None
+        assert order_b.shopify_confirmation_fulfillment_id is None
     finally:
         clear_adapters()
 
@@ -1238,3 +1201,14 @@ async def test_telecaller_cannot_retry_shopify_confirmation_sync(db_session: Asy
             f"/api/v1/orders/{order.id}/shopify/retry-confirmation-sync"
         )
         assert response.status_code == 403
+
+
+# Requirement 7 (actual AWB/shipment -> existing Shopify fulfillment/
+# tracking sync still works) is proven by `test_shopify_fulfillment.py`,
+# unchanged and still passing: `test_assign_awb_triggers_the_shopify_sync`
+# exercises exactly this path with `shopify_confirmation_fulfillment_id`
+# at its default `None` -- i.e. the ordinary condition every order is in
+# now that confirmation never sets that column. That module also keeps
+# `test_awb_assignment_attaches_tracking_to_the_confirmation_fulfillment`,
+# which proves the backward-compat fallback for an order confirmed under
+# the PREVIOUS (fulfillment-creating) behaviour still works unchanged.

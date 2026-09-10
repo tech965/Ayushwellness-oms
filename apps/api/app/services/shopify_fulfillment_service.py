@@ -8,20 +8,22 @@ neither can ever be mistaken for or cancel the other:
     assignment (`ShiprocketOperationsService.assign_awb`), never
     Telecaller confirmation and never bare shipment creation. Tracked on
     `Shipment.shopify_fulfillment_id`/`shopify_sync_status`.
-  - Telecaller confirmation (`sync_confirmation_fulfillment` /
-    `reverse_confirmation_fulfillment`): triggered by `OrderService.
-    confirm_order`/`unconfirm_order`. Marks the Shopify order Fulfilled
-    purely to reflect "OMS confirmed this order" — no AWB, no Shiprocket
-    shipment. Tracked on `Order.shopify_confirmation_fulfillment_id`/
-    `shopify_confirmation_sync_status`.
+  - Telecaller confirmation (`sync_confirmation_tag` /
+    `reverse_confirmation_tag`): triggered by `OrderService.
+    confirm_order`/`unconfirm_order`. Adds/removes the `CONFIRMATION_TAG`
+    marker on the Shopify order and NOTHING else — it never creates or
+    cancels a Shopify `Fulfillment`, and never touches the order's
+    fulfillment status. Shopify stays Unfulfilled until real shipping
+    happens (`sync_fulfillment_for_shipment`, above).
 
-Because a Telecaller confirmation can close the order's only
-FulfillmentOrder before any real shipment exists, `sync_fulfillment_for_
-shipment` has a fallback: if there's no remaining OPEN FulfillmentOrder
-*and* the order has a `shopify_confirmation_fulfillment_id`, it attaches
-real tracking to that SAME Fulfillment (`fulfillmentTrackingInfoUpdate`)
-instead of trying to create a second one. This is the one place the two
-pushes touch — see that method's docstring.
+`sync_confirmation_fulfillment` / `reverse_confirmation_fulfillment`
+below are retained but NO LONGER part of the confirm/unconfirm flow
+(that is tag-only now). They remain reachable directly, and the
+`sync_fulfillment_for_shipment` fallback still honours a pre-existing
+`Order.shopify_confirmation_fulfillment_id` (an order fulfilled for
+confirmation under the previous behaviour) by attaching real tracking to
+that SAME Fulfillment (`fulfillmentTrackingInfoUpdate`) rather than
+creating a second one — see that method's docstring.
 
 Failure isolation is the core contract here: a Shopify failure must
 NEVER undo or fail the Shiprocket/OMS operation that triggered it. Every
@@ -76,13 +78,13 @@ logger = get_logger(__name__)
 # the UI it backs (Part 13).
 _MAX_ERROR_MESSAGE_LENGTH = 2000
 
-# Pushed to the Shopify order on Telecaller confirmation (`OrderService.
-# confirm_order`), alongside (never instead of) the real confirmation
-# Fulfillment `sync_confirmation_fulfillment` creates -- a marker proving
-# the OMS is driving the workflow. Removed again by `unconfirm_order` via
-# `reverse_confirmation_fulfillment`. Purely informational either way:
-# never read back as a business-state source (Order.status/confirmation
-# columns stay authoritative -- see module docstring).
+# The ONLY Shopify-side effect of a Telecaller confirmation: added on
+# `OrderService.confirm_order` (`sync_confirmation_tag`), removed on
+# `OrderService.unconfirm_order` (`reverse_confirmation_tag`). A marker
+# proving the OMS is driving the workflow -- never a Fulfillment, never a
+# fulfillment-status change. Purely informational: never read back as a
+# business-state source (Order.status/confirmation columns stay
+# authoritative -- see module docstring).
 CONFIRMATION_TAG = "OMS Confirmed"
 
 
@@ -287,12 +289,10 @@ class ShopifyFulfillmentService:
 
     async def sync_confirmation_tag(self, order_id: uuid.UUID, *, actor: User | None) -> None:
         """Best-effort outbound push of `CONFIRMATION_TAG` to the Shopify
-        order once a Telecaller confirms it in the OMS -- a purely
-        informational marker proving the OMS is driving the workflow.
-        Independent of the actual Fulfillment push (`sync_confirmation_
-        fulfillment`, called separately by `OrderService.confirm_order`)
-        -- a failure here never blocks that, and vice versa, so either
-        half can be retried without redoing the other.
+        order once a Telecaller confirms it in the OMS -- the ONLY
+        Shopify-side effect of a confirmation. No Fulfillment is created
+        and the order's fulfillment status is left untouched (Shopify
+        stays Unfulfilled until real shipping).
 
         Skipped entirely for a non-Shopify order (`shopify_order_id` is
         `None`, e.g. a manually-created OMS order) -- nothing to tag.
@@ -304,9 +304,9 @@ class ShopifyFulfillmentService:
         Never raises: same failure-isolation contract as
         `sync_fulfillment_for_shipment` -- confirming an order in the OMS
         must never be blocked, delayed, or rolled back by a Shopify-side
-        failure. A failure here is logged only; there is no per-shipment
-        "Retry" affordance for this the way there is for fulfillment sync,
-        since the next successful confirm/resync naturally retries it.
+        failure. A failure here is logged only; the next successful
+        confirm/resync (`POST /orders/{id}/shopify/retry-confirmation-sync`)
+        naturally retries it.
         """
         order = await self.orders.get_by_id(order_id)
         if order is None or not order.shopify_order_id:
@@ -336,6 +336,54 @@ class ShopifyFulfillmentService:
         )
         await self.session.commit()
         logger.info("shopify_confirmation_tag_synced", order_id=str(order_id))
+
+    async def reverse_confirmation_tag(self, order_id: uuid.UUID, *, actor: User | None) -> None:
+        """Removes `CONFIRMATION_TAG` from the Shopify order when a
+        Telecaller unconfirms it -- the exact inverse of
+        `sync_confirmation_tag`, and the ONLY Shopify-side effect of an
+        unconfirm. Never calls `fulfillmentCancel`, never changes the
+        order's fulfillment status.
+
+        Skipped entirely for a non-Shopify order. Idempotent on Shopify's
+        side (`tagsRemove` is a no-op for a tag that's already gone), so a
+        re-unconfirm/retry is always safe and needs no local bookkeeping.
+
+        Never raises: same failure-isolation contract as
+        `sync_confirmation_tag` -- reverting an order in the OMS must
+        never be blocked, delayed, or rolled back by a Shopify-side
+        failure. A failure here is logged only; the next successful
+        unconfirm naturally retries it.
+        """
+        order = await self.orders.get_by_id(order_id)
+        if order is None or not order.shopify_order_id:
+            return
+
+        adapter = self._get_adapter()
+        order_gid = f"gid://shopify/Order/{order.shopify_order_id}"
+        try:
+            await adapter.remove_order_tags(order_gid, [CONFIRMATION_TAG])
+        except IntegrationError as exc:
+            logger.warning(
+                "shopify_confirmation_tag_removal_failed",
+                order_id=str(order_id),
+                error=exc.message,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - never let an unexpected error block an unconfirm
+            logger.warning(
+                "shopify_confirmation_tag_removal_failed", order_id=str(order_id), error=str(exc)
+            )
+            return
+
+        await self.audit.record(
+            user=actor,
+            action="order.shopify_confirmation_tag_removed",
+            entity_type="order",
+            entity_id=str(order_id),
+            new_value={"tag": CONFIRMATION_TAG},
+        )
+        await self.session.commit()
+        logger.info("shopify_confirmation_tag_removed", order_id=str(order_id))
 
     async def sync_confirmation_fulfillment(
         self, order_id: uuid.UUID, *, actor: User | None

@@ -594,16 +594,13 @@ async def test_telecaller_cannot_retry_shopify_confirmation_sync_via_orders_endp
 async def test_operations_role_can_retry_shopify_confirmation_sync(
     db_session: AsyncSession,
 ) -> None:
+    """The retry endpoint only re-pushes `CONFIRMATION_TAG` now -- never
+    `fulfillmentCreate` -- so the stub only ever needs to answer one call.
+    """
     role = await make_role(db_session, name="OPERATIONS", permission_codes=["orders.update"])
     user = await make_user(db_session, email="ops-confirm-sync@example.com", role=role)
     order = await _make_order(db_session, order_number="SHOPIFY-RBAC-4")
-    client = _StubShopifyClient(
-        [
-            _tags_add_success_response(),
-            _open_fulfillment_orders_response("gid://shopify/FulfillmentOrder/1"),
-            _fulfillment_create_success("gid://shopify/Fulfillment/9007"),
-        ]
-    )
+    client = _StubShopifyClient([_tags_add_success_response()])
     register_adapter(ShopifyAdapter(client=client))
 
     async with bearer_client(app, get_db, db_session, user.id) as api_client:
@@ -611,5 +608,9 @@ async def test_operations_role_can_retry_shopify_confirmation_sync(
             f"/api/v1/orders/{order.id}/shopify/retry-confirmation-sync"
         )
         assert response.status_code == 200
-        assert response.json()["data"]["shopify_confirmation_sync_status"] == "synced"
+
+    assert len(client.calls) == 1
+    query, variables = client.calls[0]
+    assert "tagsAdd" in query
+    assert variables == {"id": "gid://shopify/Order/900001", "tags": ["OMS Confirmed"]}
     app.dependency_overrides.clear()
