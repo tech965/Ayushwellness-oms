@@ -17,6 +17,7 @@ import {
 } from "@/services/inventory"
 import { useAuth } from "@/lib/auth-context"
 import type {
+  InventoryMovement,
   InventoryProductStock,
   OmsCatalogVariant,
   ProductVariantStockLine,
@@ -309,11 +310,26 @@ describe("InventoryProductPage — OMS-visible variants only", () => {
     expect(screen.queryByRole("heading", { name: /Pack of 2|Pack of 3/ })).toBeNull()
   })
 
-  it("underlying Shopify SKUs appear only inside the collapsible section", async () => {
+  it("every OMS-visible card shows its SKU(s) directly, with no click needed", () => {
+    renderWithProviders(<InventoryProductPage />)
+    // Ghutka Flavour groups AW-HM-CR-60 + AW-HM-CR-120 -- both listed on
+    // the card face, comma-separated, before any "Underlying Shopify
+    // variants" section is expanded.
+    const skuFields = screen.getAllByTestId("oms-variant-skus")
+    expect(skuFields.map((el) => el.textContent)).toEqual(
+      expect.arrayContaining([
+        "AW-HM-RG-60, AW-HM-RG-120",
+        "AW-HM-CR-60, AW-HM-CR-120",
+        "AW-HM-PN-60, AW-HM-PN-120",
+      ])
+    )
+  })
+
+  it("underlying Shopify SKU detail also appears inside the collapsible section", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
 
-    // collapsed by default: the SKU text is present in the DOM but not as a heading
+    // collapsed by default: the detail text is present in the DOM but not as a heading
     expect(screen.queryByRole("heading", { name: /AW-HM-CR-60/ })).toBeNull()
     const summaries = screen.getAllByText(/Underlying Shopify variants \(2\)/)
     expect(summaries).toHaveLength(3)
@@ -327,6 +343,11 @@ describe("InventoryProductPage — OMS-visible variants only", () => {
     renderWithProviders(<InventoryProductPage />)
     expect(screen.getAllByRole("button", { name: "Edit Stock" })).toHaveLength(1)
     expect(screen.getByRole("heading", { name: "Vajrashakti" })).toBeInTheDocument()
+    // its 3 pack-size SKUs are all grouped into that one card and all
+    // shown directly on the card face
+    expect(screen.getByTestId("oms-variant-skus").textContent).toBe(
+      "VJR-30, VJR-60, VJR-90"
+    )
   })
 
   it("shows aggregated boxes/packets per OMS variant and 'mixed pack sizes'", () => {
@@ -519,6 +540,124 @@ describe("InventoryProductPage — Edit Name & History", () => {
     expect(screen.getByText(/spans 2 Shopify SKUs/)).toBeInTheDocument()
     await user.click(screen.getAllByRole("button", { name: "Hide History" })[0])
     expect(screen.queryByText(/Movement History — Ghutka Flavour/)).toBeNull()
+  })
+})
+
+function movement(
+  over: Partial<InventoryMovement> & { id: string; movement_type: InventoryMovement["movement_type"] }
+): InventoryMovement {
+  return {
+    product_variant_id: "v-1",
+    product_id: "prod-1",
+    product_title: "Vajrashakti",
+    variant_title: "Pack of 1",
+    variant_display_title: "Pack of 1",
+    catalog_variant_id: "cv-vjr",
+    sku: "VJR-30",
+    quantity_delta: -1,
+    previous_balance: 300,
+    quantity_after: 299,
+    order_id: null,
+    shipment_id: null,
+    rto_id: null,
+    actor_user_id: null,
+    actor_label: "Shiprocket",
+    reason: null,
+    notes: null,
+    created_at: "2026-01-01T00:00:00Z",
+    ...over,
+  }
+}
+
+function setMovements(rows: InventoryMovement[]) {
+  mockedUseMovements.mockReturnValue({
+    data: { data: rows, meta: { page: 1, page_size: 20, total_items: rows.length, total_pages: 1 } },
+    isLoading: false,
+    isError: false,
+    error: null,
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useInventoryMovements>)
+}
+
+describe("InventoryProductPage — Movement History display", () => {
+  beforeEach(() => {
+    setProduct(VAJRASHAKTI) // single OMS-visible card -- exactly one "History" button
+  })
+
+  it("renders a dispatch as 'Shipped: -1 box'", async () => {
+    const user = userEvent.setup()
+    setMovements([
+      movement({
+        id: "m-1",
+        movement_type: "dispatch",
+        quantity_delta: -1,
+        previous_balance: 300,
+        quantity_after: 299,
+      }),
+    ])
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getByRole("button", { name: "History" }))
+    expect(screen.getByText("Shipped: -1 box")).toBeInTheDocument()
+  })
+
+  it("renders an RTO restock as 'RTO Delivered: +1 box'", async () => {
+    const user = userEvent.setup()
+    setMovements([
+      movement({
+        id: "m-2",
+        movement_type: "rto_restock",
+        quantity_delta: 1,
+        previous_balance: 298,
+        quantity_after: 299,
+      }),
+    ])
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getByRole("button", { name: "History" }))
+    expect(screen.getByText("RTO Delivered: +1 box")).toBeInTheDocument()
+  })
+
+  it("pluralizes to 'boxes' for any magnitude other than 1", async () => {
+    const user = userEvent.setup()
+    setMovements([
+      movement({
+        id: "m-3",
+        movement_type: "manual_adjustment",
+        quantity_delta: 5,
+        previous_balance: 294,
+        quantity_after: 299,
+      }),
+      movement({
+        id: "m-4",
+        movement_type: "initial_stock",
+        quantity_delta: 10,
+        previous_balance: 0,
+        quantity_after: 10,
+      }),
+    ])
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getByRole("button", { name: "History" }))
+    expect(screen.getByText("Manual adjustment: +5 boxes")).toBeInTheDocument()
+    expect(screen.getByText("Initial stock: +10 boxes")).toBeInTheDocument()
+  })
+
+  it("keeps SKU visible and New balance shown in boxes alongside the combined column", async () => {
+    const user = userEvent.setup()
+    setMovements([
+      movement({
+        id: "m-5",
+        movement_type: "dispatch",
+        sku: "VJR-30",
+        quantity_delta: -1,
+        previous_balance: 300,
+        quantity_after: 299,
+      }),
+    ])
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getByRole("button", { name: "History" }))
+    expect(screen.getByText("Shipped: -1 box")).toBeInTheDocument()
+    expect(screen.getByText("VJR-30")).toBeInTheDocument()
+    expect(screen.getByText("299 boxes")).toBeInTheDocument() // New balance
+    expect(screen.getByText("300 boxes")).toBeInTheDocument() // Previous balance, unchanged
   })
 })
 

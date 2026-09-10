@@ -174,8 +174,8 @@ export const STOCK_STATUS_BADGE_CLASSES: Record<StockStatus, string> = {
 }
 
 export const INVENTORY_MOVEMENT_TYPE_OPTIONS: { label: string; value: InventoryMovementType }[] = [
-  { label: "Dispatch", value: "dispatch" },
-  { label: "RTO restock", value: "rto_restock" },
+  { label: "Shipped", value: "dispatch" },
+  { label: "RTO Delivered", value: "rto_restock" },
   { label: "Manual adjustment", value: "manual_adjustment" },
   { label: "Initial stock", value: "initial_stock" },
 ]

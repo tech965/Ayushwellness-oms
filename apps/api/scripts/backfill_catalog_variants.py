@@ -2,23 +2,43 @@
 `CatalogVariant` groupings approved for the Inventory "OMS-visible variant"
 feature (schema added by migration `d3b8f1e2a5c7` -- schema only, no data).
 
-APPROVED BUSINESS RULE (final, confirmed):
+APPROVED BUSINESS RULE (refreshed -- catalog has grown since the original
+22-product manifest; see PENDING_PRODUCTS below for what changed):
 
-  * ONLY the canonical product "Aayush Wellness Herbal Masala" (Shopify
-    product id 8009941287101) gets 3 OMS-visible CatalogVariants (Royal
-    Tobacco Flavour / Ghutka Flavour / Paan Masala Flavour).
-  * 17 other named products get exactly ONE CatalogVariant each, named
-    after the product's own approved display name, grouping ALL of that
-    product's existing ProductVariant rows.
-  * 4 more named products already have exactly one ProductVariant and get
-    NO CatalogVariant row -- `InventoryService.get_oms_variants_for_product`
-    already treats a lone, ungrouped ProductVariant as its own implicit
-    OMS-visible variant.
-  * That is 22 products total. This is a FIXED, REVIEWED list (the
-    `MANIFEST` below) -- not a generic "any product with >1 variant" scan.
-    A product that is not in `MANIFEST` is NEVER assigned a CatalogVariant
-    by this script, no matter how many ProductVariant rows it has; it is
-    instead reported as an UNEXPECTED PRODUCT and blocks the run.
+  * The canonical, ACTIVE "Aayush Wellness Herbal Masala" (Shopify product
+    id 8009941287101) gets exactly 3 OMS-visible CatalogVariants, grouped
+    by its Shopify-native `options.Flavour` value -- matched on that exact
+    field only, never on title text, SKU, image filename/colour, or
+    position:
+      "Royal Tobacco Flavour" -> "Gold Packet"
+      "Gutka Flavour"         -> "Red Packet"
+      "Paan Masala Flavour"   -> "Blue Packet"
+    All 9 of its underlying ProductVariant rows (3 flavours x 3 pack
+    sizes) collapse into these 3 cards; no separate card per pack size.
+  * 15 other named, ACTIVE, multi-variant products get exactly ONE
+    CatalogVariant each, named after the product's own approved display
+    name, grouping ALL of that product's existing ProductVariant rows
+    (pack-size splits collapse to one OMS-visible card).
+  * 4 more named, ACTIVE products already have exactly one ProductVariant
+    and get NO CatalogVariant row -- `InventoryService.
+    get_oms_variants_for_product` already treats a lone, ungrouped
+    ProductVariant as its own implicit OMS-visible variant.
+  * That is 20 products total in `MANIFEST`. This is a FIXED, REVIEWED
+    list -- not a generic "any product with >1 variant" scan. A product
+    that is not in `MANIFEST` AND not in `PENDING_PRODUCTS` is NEVER
+    assigned a CatalogVariant by this script, no matter how many
+    ProductVariant rows it has; it is reported as an UNEXPECTED PRODUCT
+    and blocks the run.
+  * `PENDING_PRODUCTS` (below) lists 5 products this run deliberately
+    does NOT touch, each for an explicit, reported reason -- they are
+    excluded from both the manifest and the "unexpected" blocking check,
+    so their presence never blocks an otherwise-clean run: a second,
+    not-yet-published "Aayush Wellness Herbal Masala" duplicate; a
+    Hindi-titled "Aayush Herbal Masala (New)"; "Test AHM draft testings";
+    "Testing"; "Herbal Masala Trial Bundle" -- all `status=draft` in
+    Shopify. Whether a draft/unpublished Shopify product should appear in
+    OMS Inventory at all is a business decision, not inferred here --
+    excluded until that decision is made.
 
 SAFE BY DESIGN:
   - DRY-RUN BY DEFAULT. Nothing is written unless `--apply` is passed.
@@ -28,9 +48,10 @@ SAFE BY DESIGN:
     `MANIFEST` below -- NEVER by a dev-database UUID, and NEVER by a
     generic "products with >1 variant" query. The same generic query is
     still run, but ONLY to detect and report products that look
-    multi-variant yet are absent from the approved manifest (an
-    UNEXPECTED PRODUCT), which blocks the run rather than being silently
-    included.
+    multi-variant yet are absent from BOTH the approved manifest AND
+    `PENDING_PRODUCTS` (an UNEXPECTED PRODUCT), which blocks the run
+    rather than being silently included. A product explicitly listed in
+    `PENDING_PRODUCTS` is reported separately and does NOT block.
   - Only ever writes two things: new `CatalogVariant` rows, and
     `ProductVariant.catalog_variant_id` on rows that are currently NULL.
     Nothing else -- `available_quantity`, `inventory_quantity`, `sku`,
@@ -94,7 +115,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 configure_logging()
 logger = get_logger(__name__)
 
-# --- the approved 22-product manifest (business identifiers only) --------
+# --- the approved 20-product manifest (business identifiers only) --------
 #
 # This is the ONLY set of products this script will ever assign a
 # CatalogVariant to. Built from a read-only inspection of the dev database
@@ -126,23 +147,65 @@ class ManifestProduct:
     variants: tuple[ManifestVariant, ...] = ()
 
 
+# Approved mapping (Shopify's own `options.Flavour` value -> OMS-visible
+# CatalogVariant name). Matched ONLY by this exact field -- never by
+# title text, SKU, image filename/colour, or position. SKUs re-verified
+# live: 6 of the 9 now carry a `-shopify-<id>` fallback suffix (see
+# `ProductService._safe_sku`) after a second, draft "Aayush Wellness
+# Herbal Masala" product with colliding real SKUs was synced -- these are
+# the current, correct values, not the original clean SKUs.
 _CANONICAL_VARIANTS: tuple[ManifestVariant, ...] = (
-    ManifestVariant("AW-HM-CR-120", "45082735378621", "Ghutka Flavour"),
-    ManifestVariant("AW-HM-CR-180", "46521815662781", "Ghutka Flavour"),
-    ManifestVariant("AW-HM-CR-60", "45082739605693", "Ghutka Flavour"),
-    ManifestVariant("AW-HM-PN-120", "45082735280317", "Paan Masala Flavour"),
-    ManifestVariant("AW-HM-PN-180", "46521815630013", "Paan Masala Flavour"),
-    ManifestVariant("AW-HM-PN-60", "45082739572925", "Paan Masala Flavour"),
-    ManifestVariant("AW-HM-RG-120", "45082735182013", "Royal Tobacco Flavour"),
-    ManifestVariant("AW-HM-RG-180", "46521815695549", "Royal Tobacco Flavour"),
-    ManifestVariant("AW-HM-RG-60", "45082739540157", "Royal Tobacco Flavour"),
+    ManifestVariant("AW-HM-RG-120-shopify-45082735182013", "45082735182013", "Gold Packet"),
+    ManifestVariant("AW-HM-RG-180", "46521815695549", "Gold Packet"),
+    ManifestVariant("AW-HM-RG-60-shopify-45082739540157", "45082739540157", "Gold Packet"),
+    ManifestVariant("AW-HM-CR-120-shopify-45082735378621", "45082735378621", "Red Packet"),
+    ManifestVariant("AW-HM-CR-180", "46521815662781", "Red Packet"),
+    ManifestVariant("AW-HM-CR-60-shopify-45082739605693", "45082739605693", "Red Packet"),
+    ManifestVariant("AW-HM-PN-120-shopify-45082735280317", "45082735280317", "Blue Packet"),
+    ManifestVariant("AW-HM-PN-180", "46521815630013", "Blue Packet"),
+    ManifestVariant("AW-HM-PN-60-shopify-45082739572925", "45082739572925", "Blue Packet"),
 )
 
-# Fixed OMS-variant display order for the canonical product.
+# Fixed OMS-variant display order for the canonical product, matching the
+# approved enumeration order (1. Gold Packet 2. Red Packet 3. Blue Packet).
 CANONICAL_FLAVOUR_ORDER: dict[str, int] = {
-    "Royal Tobacco Flavour": 0,
-    "Ghutka Flavour": 1,
-    "Paan Masala Flavour": 2,
+    "Gold Packet": 0,
+    "Red Packet": 1,
+    "Blue Packet": 2,
+}
+
+# --- products this run deliberately does NOT touch (each for an explicit,
+#     reported reason) -- excluded from both MANIFEST and the "unexpected
+#     product" blocking check. See the module docstring for why each one
+#     is here. Keyed by Shopify product id; value is (title, reason).
+PENDING_PRODUCTS: dict[str, tuple[str, str]] = {
+    # NOTE: the canonical active "Aayush Wellness Herbal Masala"
+    # (8009941287101) previously sat here pending an explicit Red/Blue/
+    # Gold mapping. That mapping is now approved and it has moved into
+    # MANIFEST as a 3-way split (see `_CANONICAL_VARIANTS` above).
+    "8449765605565": (
+        "Aayush Wellness Herbal Masala",
+        "DRAFT duplicate of the canonical product (same 9-variant, 3-flavour "
+        "shape). Draft status -- awaiting a decision on whether draft/unpublished "
+        "Shopify products belong in OMS Inventory at all.",
+    ),
+    "8103466631357": (
+        "आयुष हर्बल मसाला (नया)",
+        "DRAFT (Hindi-titled 'Aayush Herbal Masala (New)'). Awaiting the same "
+        "draft-inclusion decision as above.",
+    ),
+    "8182639329469": (
+        "Test AHM draft testings",
+        "DRAFT. Awaiting the same draft-inclusion decision as above.",
+    ),
+    "8333928792253": (
+        "Testing",
+        "DRAFT. Awaiting the same draft-inclusion decision as above.",
+    ),
+    "8210784354493": (
+        "Herbal Masala Trial Bundle",
+        "DRAFT (single-variant). Awaiting the same draft-inclusion decision as above.",
+    ),
 }
 
 
@@ -151,16 +214,42 @@ def _single_group(name: str, variants: tuple[tuple[str, str], ...]) -> tuple[Man
 
 
 MANIFEST: tuple[ManifestProduct, ...] = (
-    # --- the canonical product: 3-way flavour split ---
+    # --- the canonical active product: approved 3-way flavour split ---
     ManifestProduct(
         shopify_product_id="8009941287101",
         expected_title="Aayush Wellness Herbal Masala",
         expected_variant_count=9,
         expected_oms_variant_count=3,
-        catalog_variant_names=("Royal Tobacco Flavour", "Ghutka Flavour", "Paan Masala Flavour"),
+        catalog_variant_names=("Gold Packet", "Red Packet", "Blue Packet"),
         variants=_CANONICAL_VARIANTS,
     ),
-    # --- 17 other multi-variant products: exactly 1 CatalogVariant each ---
+    # --- 15 ACTIVE multi-variant products: exactly 1 CatalogVariant each.
+    #     Every SKU/shopify_variant_id below was re-verified live against
+    #     the current database this refresh -- some have drifted since the
+    #     original manifest (see the Arjuna Plus entries: a second, newly-
+    #     discovered ACTIVE "Arjuna Plus" product shares its real SKUs with
+    #     the original one, so `ProductService._safe_sku` has now pushed
+    #     the ORIGINAL product's SKUs onto the `-shopify-<id>` fallback
+    #     form -- both products are listed below with their true current
+    #     values).
+    ManifestProduct(
+        "8398327546045",
+        "Aayush Wellness Herbal Masala Bulk Order",
+        6,
+        1,
+        ("Aayush Wellness Herbal Masala Bulk Order",),
+        _single_group(
+            "Aayush Wellness Herbal Masala Bulk Order",
+            (
+                ("AW-HM-CR-21", "47647499944125"),
+                ("AW-HM-CR-35", "47647515934909"),
+                ("AW-HM-PN-21", "47647499845821"),
+                ("AW-HM-PN-35", "47647515902141"),
+                ("AW-HM-RG-21", "47647500042429"),
+                ("AW-HM-RG-35", "47647515967677"),
+            ),
+        ),
+    ),
     ManifestProduct(
         "7972941660349",
         "Aayush Wellness Herbal Masala New - Ziplock Big Pouches!",
@@ -183,79 +272,7 @@ MANIFEST: tuple[ManifestProduct, ...] = (
         ),
     ),
     ManifestProduct(
-        "8103466631357",
-        "Aayush Herbal Masala (New)",
-        6,
-        1,
-        ("Aayush Herbal Masala (New)",),
-        _single_group(
-            "Aayush Herbal Masala (New)",
-            (
-                ("shopify-45771790581949", "45771790581949"),
-                ("shopify-45771790549181", "45771790549181"),
-                ("shopify-45771790680253", "45771790680253"),
-                ("shopify-45771790647485", "45771790647485"),
-                ("shopify-45771790778557", "45771790778557"),
-                ("shopify-45771790745789", "45771790745789"),
-            ),
-        ),
-    ),
-    ManifestProduct(
-        "8398327546045",
-        "Aayush Wellness Herbal Masala Bulk Order",
-        6,
-        1,
-        ("Aayush Wellness Herbal Masala Bulk Order",),
-        _single_group(
-            "Aayush Wellness Herbal Masala Bulk Order",
-            (
-                ("AW-HM-CR-21", "47647499944125"),
-                ("AW-HM-CR-35", "47647515934909"),
-                ("AW-HM-PN-21", "47647499845821"),
-                ("AW-HM-PN-35", "47647515902141"),
-                ("AW-HM-RG-21", "47647500042429"),
-                ("AW-HM-RG-35", "47647515967677"),
-            ),
-        ),
-    ),
-    ManifestProduct(
-        "8182639329469",
-        "Test AHM draft testings",
-        6,
-        1,
-        ("Test AHM draft testings",),
-        _single_group(
-            "Test AHM draft testings",
-            (
-                ("shopify-46285664485565", "46285664485565"),
-                ("shopify-46285664452797", "46285664452797"),
-                ("shopify-46285664551101", "46285664551101"),
-                ("shopify-46285664518333", "46285664518333"),
-                ("shopify-46285664616637", "46285664616637"),
-                ("shopify-46285664583869", "46285664583869"),
-            ),
-        ),
-    ),
-    ManifestProduct(
-        "8333928792253",
-        "Testing",
-        6,
-        1,
-        ("Testing",),
-        _single_group(
-            "Testing",
-            (
-                ("shopify-47743177228477", "47743177228477"),
-                ("shopify-47743177261245", "47743177261245"),
-                ("shopify-47624908243133", "47624908243133"),
-                ("shopify-47743177294013", "47743177294013"),
-                ("shopify-47743177326781", "47743177326781"),
-                ("shopify-47713124843709", "47713124843709"),
-            ),
-        ),
-    ),
-    ManifestProduct(
-        "8475914043581",
+        "8470165782717",  # NEW since the original manifest -- second ACTIVE "Arjuna Plus"
         "Arjuna Plus",
         3,
         1,
@@ -263,9 +280,24 @@ MANIFEST: tuple[ManifestProduct, ...] = (
         _single_group(
             "Arjuna Plus",
             (
-                ("ARJ-PLS-30", "48337109582013"),
-                ("ARJ-PLS-60", "48337109614781"),
-                ("ARJ-PLS-90", "48337109647549"),
+                ("ARJ-PLS-30", "48317103636669"),
+                ("ARJ-PLS-60", "48317103669437"),
+                ("ARJ-PLS-90", "48317103702205"),
+            ),
+        ),
+    ),
+    ManifestProduct(
+        "8475914043581",  # the original "Arjuna Plus" -- SKUs now fallback-suffixed, see above
+        "Arjuna Plus",
+        3,
+        1,
+        ("Arjuna Plus",),
+        _single_group(
+            "Arjuna Plus",
+            (
+                ("ARJ-PLS-30-shopify-48337109582013", "48337109582013"),
+                ("ARJ-PLS-60-shopify-48337109614781", "48337109614781"),
+                ("ARJ-PLS-90-shopify-48337109647549", "48337109647549"),
             ),
         ),
     ),
@@ -345,6 +377,20 @@ MANIFEST: tuple[ManifestProduct, ...] = (
         ),
     ),
     ManifestProduct(
+        "8310135521469",
+        "Himalayan Shilajit Drops",
+        2,
+        1,
+        ("Himalayan Shilajit Drops",),
+        _single_group(
+            "Himalayan Shilajit Drops",
+            (
+                ("AW-HS-DP-30", "46917889851581"),
+                ("AW-HS-DP-60", "46917889884349"),
+            ),
+        ),
+    ),
+    ManifestProduct(
         "8075025088701",
         "Immune Care Tablets",
         3,
@@ -390,6 +436,20 @@ MANIFEST: tuple[ManifestProduct, ...] = (
         ),
     ),
     ManifestProduct(
+        "8005829886141",
+        "Skin, Hair & Nail Gummies with Glutathione & Hyaluronic Acid",
+        2,
+        1,
+        ("Skin, Hair & Nail Gummies with Glutathione & Hyaluronic Acid",),
+        _single_group(
+            "Skin, Hair & Nail Gummies with Glutathione & Hyaluronic Acid",
+            (
+                ("AW-BV-GM-30", "45068786335933"),
+                ("AW-BV-GM-60", "45068786368701"),
+            ),
+        ),
+    ),
+    ManifestProduct(
         "8471325999293",
         "Vajrashakti",
         3,
@@ -404,46 +464,21 @@ MANIFEST: tuple[ManifestProduct, ...] = (
             ),
         ),
     ),
-    ManifestProduct(
-        "8310135521469",
-        "Himalayan Shilajit Drops",
-        2,
-        1,
-        ("Himalayan Shilajit Drops",),
-        _single_group(
-            "Himalayan Shilajit Drops",
-            (
-                ("AW-HS-DP-30", "46917889851581"),
-                ("AW-HS-DP-60", "46917889884349"),
-            ),
-        ),
-    ),
-    ManifestProduct(
-        "8005829886141",
-        "Skin, Hair & Nail Gummies with Glutathione & Hyaluronic Acid",
-        2,
-        1,
-        ("Skin, Hair & Nail Gummies with Glutathione & Hyaluronic Acid",),
-        _single_group(
-            "Skin, Hair & Nail Gummies with Glutathione & Hyaluronic Acid",
-            (
-                ("AW-BV-GM-30", "45068786335933"),
-                ("AW-BV-GM-60", "45068786368701"),
-            ),
-        ),
-    ),
-    # --- 4 products already at exactly 1 ProductVariant: no CatalogVariant
-    #     row expected at all. Roster not captured (no grouping decision
-    #     needed); only the count is verified.
+    # --- 4 ACTIVE products already at exactly 1 ProductVariant: no
+    #     CatalogVariant row expected at all. Roster not captured (no
+    #     grouping decision needed); only the count is verified.
     ManifestProduct("8210784059581", "Gut & Detox Bundle", 1, 1, ()),
-    ManifestProduct("8210784354493", "Herbal Masala Trial Bundle", 1, 1, ()),
     ManifestProduct("8207039135933", "Immunity & Vitality Bundle", 1, 1, ()),
+    ManifestProduct("8491034673341", "Men’s Strength & Vitality Kit", 1, 1, ()),  # NEW
     ManifestProduct("8210784157885", "Mind & Lifestyle Balance Bundle", 1, 1, ()),
 )
 
-assert len(MANIFEST) == 22, f"MANIFEST must have exactly 22 approved products, has {len(MANIFEST)}"
+assert len(MANIFEST) == 20, f"MANIFEST must have exactly 20 approved products, has {len(MANIFEST)}"
 _MANIFEST_BY_SPID: dict[str, ManifestProduct] = {m.shopify_product_id: m for m in MANIFEST}
-assert len(_MANIFEST_BY_SPID) == 22, "duplicate shopify_product_id in MANIFEST"
+assert len(_MANIFEST_BY_SPID) == 20, "duplicate shopify_product_id in MANIFEST"
+assert not (
+    set(_MANIFEST_BY_SPID) & set(PENDING_PRODUCTS)
+), "a shopify_product_id is in both MANIFEST and PENDING_PRODUCTS"
 
 
 # --- plan data structures (pure; no DB writes happen while building these) -
@@ -482,7 +517,10 @@ class Plan:
     )  # (spid, expected_title, actual_title)
     unexpected_products: list[tuple[str, str, int]] = field(
         default_factory=list
-    )  # (title, shopify_product_id, variant_count) -- multi-variant, not in MANIFEST
+    )  # (title, shopify_product_id, variant_count) -- multi-variant, on neither list below
+    pending_products: list[tuple[str, str, int, str]] = field(
+        default_factory=list
+    )  # (title, shopify_product_id, variant_count, reason) -- deliberately excluded, not blocking
     variant_count_mismatches: list[tuple[str, int, int]] = field(
         default_factory=list
     )  # (title, expected, actual)
@@ -525,10 +563,11 @@ async def _duplicate_check(
 
 
 async def build_plan(session: AsyncSession) -> Plan:
-    """Pure, read-only. Resolves every one of the 22 approved manifest
+    """Pure, read-only. Resolves every one of the 20 approved manifest
     products by Shopify product id, verifies each against its expected
-    roster, and separately flags any *other* multi-variant product found
-    in the database that is not on the manifest. Never writes anything.
+    roster, resolves every `PENDING_PRODUCTS` entry for reporting only,
+    and separately flags any *other* multi-variant product found in the
+    database that is on neither list. Never writes anything.
     """
     plan = Plan()
 
@@ -668,10 +707,30 @@ async def build_plan(session: AsyncSession) -> Plan:
     ).all()
 
     for _product_id, title, shopify_product_id, n in generic_multi_variant:
-        if shopify_product_id in _MANIFEST_BY_SPID:
-            continue  # already handled above
+        if shopify_product_id in _MANIFEST_BY_SPID or shopify_product_id in PENDING_PRODUCTS:
+            continue  # already handled above / handled as pending below
         plan.unexpected_products.append((title, shopify_product_id or "", n))
         plan.discovered_product_count += 1
+
+    # --- 3. resolve every PENDING_PRODUCTS entry for the report (by spid,
+    #     regardless of variant count -- e.g. Herbal Masala Trial Bundle
+    #     has only 1 variant and would never appear in the >1 scan above).
+    #     Read-only: never contributes a CatalogVariantPlan, never blocks.
+    for spid, (expected_title, reason) in PENDING_PRODUCTS.items():
+        db_product = (
+            await session.execute(select(Product).where(Product.shopify_product_id == spid))
+        ).scalar_one_or_none()
+        if db_product is None:
+            plan.pending_products.append((expected_title, spid, 0, f"NOT FOUND IN DB -- {reason}"))
+            continue
+        variant_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ProductVariant)
+                .where(ProductVariant.product_id == db_product.id)
+            )
+        ).scalar_one()
+        plan.pending_products.append((db_product.title, spid, variant_count, reason))
 
     return plan
 
@@ -723,11 +782,19 @@ def print_report(plan: Plan) -> None:
         )
 
     print(
-        f"\nUnexpected products (>1 variant, NOT on the approved manifest): "
+        f"\nUnexpected products (>1 variant, NOT on the manifest or pending list): "
         f"{len(plan.unexpected_products)}"
     )
     for title, spid, n in plan.unexpected_products:
         print(f"  - UNEXPECTED PRODUCT: {title!r} shopify_product_id={spid} variant_count={n}")
+
+    print(
+        f"\nPending products (deliberately excluded this run, awaiting your decision): "
+        f"{len(plan.pending_products)}"
+    )
+    for title, spid, n, reason in plan.pending_products:
+        print(f"  - PENDING: {title!r} shopify_product_id={spid} variant_count={n}")
+        print(f"      reason: {reason}")
 
     print(f"\nProductVariant count mismatches: {len(plan.variant_count_mismatches)}")
     for title, expected, actual in plan.variant_count_mismatches:
@@ -788,6 +855,7 @@ def print_report(plan: Plan) -> None:
     print(f"DISCOVERED PRODUCTS: {plan.discovered_product_count}")
     print(f"UNEXPECTED PRODUCTS: {len(plan.unexpected_products)}")
     print(f"MISSING APPROVED PRODUCTS: {len(plan.missing_manifest_products)}")
+    print(f"PENDING PRODUCTS (excluded, not blocking): {len(plan.pending_products)}")
     print()
     print(f"CATALOG VARIANTS TO CREATE: {to_create}")
     print(f"  (already exist, idempotent no-op: {already_exist})")
@@ -823,14 +891,18 @@ def print_report(plan: Plan) -> None:
     singles_ok = all(
         counts.get(m.shopify_product_id, 0) == 0 for m in MANIFEST if not m.catalog_variant_names
     )
+    pending_untouched = set(counts.keys()).isdisjoint(set(PENDING_PRODUCTS.keys()))
     blocked = has_blocking_problems(plan)
 
-    print(f"Aayush Wellness Herbal Masala = 3 OMS variants:        {canonical_ok}")
-    print(f"Every other approved product = 1 OMS variant:          {others_ok}")
+    print(f"Canonical Herbal Masala = 3 OMS variants (Gold/Red/Blue): {canonical_ok}")
+    print(f"Every other approved product = exactly 1 OMS variant:  {others_ok}")
     print(f"4 single-variant products get no CatalogVariant row:   {singles_ok}")
     print(f"No unapproved product receives a CatalogVariant:       {no_extra_cv_products}")
+    print(f"No pending (excluded) product receives a CatalogVariant: {pending_untouched}")
 
-    invariant_ok = canonical_ok and others_ok and singles_ok and no_extra_cv_products
+    invariant_ok = (
+        canonical_ok and others_ok and singles_ok and no_extra_cv_products and pending_untouched
+    )
     verdict = "PASS" if (not blocked and invariant_ok) else "BLOCKED"
     action = (
         "safe to review for --apply"

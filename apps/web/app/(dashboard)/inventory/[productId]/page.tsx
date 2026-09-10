@@ -594,20 +594,18 @@ function OmsVariantHistory({
       cell: (row) => row.sku ?? "—",
     },
     {
-      id: "type",
+      id: "movement",
       header: "Movement",
-      cell: (row) => (
-        <Badge variant="secondary">{movementTypeLabel(row.movement_type)}</Badge>
-      ),
-    },
-    {
-      id: "delta",
-      header: "Change (boxes)",
-      cell: (row) => (
-        <span className={row.quantity_delta < 0 ? "text-red-600" : "text-emerald-600"}>
-          {row.quantity_delta > 0 ? `+${row.quantity_delta}` : row.quantity_delta}
-        </span>
-      ),
+      cell: (row) => {
+        const unit = Math.abs(row.quantity_delta) === 1 ? "box" : "boxes"
+        const signed =
+          row.quantity_delta > 0 ? `+${row.quantity_delta}` : `${row.quantity_delta}`
+        return (
+          <span className={row.quantity_delta < 0 ? "text-red-600" : "text-emerald-600"}>
+            {movementTypeLabel(row.movement_type)}: {signed} {unit}
+          </span>
+        )
+      },
     },
     {
       id: "previous",
@@ -692,7 +690,19 @@ function OmsVariantCard({ group }: { group: OmsCatalogVariant }) {
         <StockStatusBadge status={group.stock_status} />
       </CardHeader>
       <CardContent>
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
+          <div className="col-span-2 sm:col-span-4">
+            <dt className="text-muted-foreground">SKU</dt>
+            {/* Shown directly on the card face -- never requires expanding
+             * "Underlying Shopify variants" to find. A single-underlying-
+             * variant OMS card shows its one SKU; a grouped card (e.g. a
+             * future multi-pack flavour split) lists every constituent
+             * SKU, comma-separated, so nothing is hidden behind a click.
+             */}
+            <dd className="font-mono font-medium break-words" data-testid="oms-variant-skus">
+              {group.underlying_variants.map((v) => v.sku).join(", ")}
+            </dd>
+          </div>
           <div>
             <dt className="text-muted-foreground">Available stock</dt>
             <dd className="font-medium">
