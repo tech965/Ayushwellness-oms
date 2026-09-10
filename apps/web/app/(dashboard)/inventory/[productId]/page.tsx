@@ -511,9 +511,11 @@ function PacketsPerBoxDialog({ variant }: { variant: ProductVariantStockLine }) 
 function UnderlyingShopifyVariants({
   group,
   canManage,
+  isCanonicalHerbalMasala,
 }: {
   group: OmsCatalogVariant
   canManage: boolean
+  isCanonicalHerbalMasala: boolean
 }) {
   if (group.underlying_variant_count === 0) {
     return (
@@ -528,32 +530,56 @@ function UnderlyingShopifyVariants({
         Underlying Shopify variants ({group.underlying_variant_count})
       </summary>
       <div className="mt-2 flex flex-col divide-y rounded-md border">
-        {group.underlying_variants.map((v) => (
-          <div
-            key={v.id}
-            className="flex flex-wrap items-center justify-between gap-2 p-2 text-sm"
-          >
-            <div className="flex items-center gap-2">
-              <ProductThumbnail src={v.image_url} alt={v.display_title} size="size-8" />
-              <div>
-                <span className="font-medium">{v.display_title}</span>
-                <span className="text-muted-foreground">
-                  {" "}
-                  · SKU {v.sku} · {v.available_boxes} boxes · {v.packets_per_box}/box
-                </span>
+        {group.underlying_variants.map((v) => {
+          const packSize = isCanonicalHerbalMasala ? herbalMasalaPackSize(v.sku) : null
+          const label = packSize ? `${packSize} Pack` : v.display_title
+          return (
+            <div
+              key={v.id}
+              className="flex flex-wrap items-center justify-between gap-2 p-2 text-sm"
+            >
+              <div className="flex items-center gap-2">
+                <ProductThumbnail src={v.image_url} alt={label} size="size-8" />
+                <div>
+                  <span className="font-medium">{label}</span>
+                  <span className="text-muted-foreground">
+                    {" "}
+                    · SKU {v.sku} · {v.available_boxes} boxes · {v.packets_per_box}/box
+                  </span>
+                </div>
               </div>
+              {canManage && (
+                <div className="flex gap-1">
+                  <VariantNameEditor variant={v} />
+                  <PacketsPerBoxDialog variant={v} />
+                </div>
+              )}
             </div>
-            {canManage && (
-              <div className="flex gap-1">
-                <VariantNameEditor variant={v} />
-                <PacketsPerBoxDialog variant={v} />
-              </div>
-            )}
-          </div>
-        ))}
+          )
+        })}
       </div>
     </details>
   )
+}
+
+// The one product this specific pack-size label applies to (the
+// canonical, active "Aayush Wellness Herbal Masala" -- Royal Tobacco /
+// Gutka / Paan Masala flavours renamed to Gold / Red / Blue Packet).
+// Scoped by Shopify's own immutable product id -- never by the OMS UUID
+// (differs per environment) and never by title (a draft duplicate shares
+// the exact same title) -- so this can never misfire on another product.
+const CANONICAL_HERBAL_MASALA_SHOPIFY_PRODUCT_ID = "8009941287101"
+
+/** Derives "60" / "120" / "180" from this product's own real SKU shape
+ * (`AW-HM-<flavour code>-<pack size>[-shopify-<id>]`, e.g.
+ * `AW-HM-RG-60-shopify-45082739540157`) -- read directly off the actual
+ * SKU already stored on the row, never guessed or invented. Returns
+ * `null` for any SKU that doesn't match this exact shape, so callers
+ * always have a safe fallback to the existing display title.
+ */
+function herbalMasalaPackSize(sku: string): string | null {
+  const match = /^AW-HM-[A-Z]+-(\d+)(?:-shopify-\d+)?$/.exec(sku)
+  return match ? match[1] : null
 }
 
 function movementTypeLabel(type: InventoryMovement["movement_type"]): string {
@@ -569,9 +595,11 @@ function movementTypeLabel(type: InventoryMovement["movement_type"]): string {
 function OmsVariantHistory({
   group,
   spansMultipleSkus,
+  isCanonicalHerbalMasala,
 }: {
   group: OmsCatalogVariant
   spansMultipleSkus: boolean
+  isCanonicalHerbalMasala: boolean
 }) {
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const [movementType, setMovementType] = React.useState<
@@ -591,7 +619,11 @@ function OmsVariantHistory({
     {
       id: "sku",
       header: "Shopify SKU",
-      cell: (row) => row.sku ?? "—",
+      cell: (row) => {
+        if (!row.sku) return "—"
+        const packSize = isCanonicalHerbalMasala ? herbalMasalaPackSize(row.sku) : null
+        return packSize ? `${packSize} Pack — ${row.sku}` : row.sku
+      },
     },
     {
       id: "movement",
@@ -664,7 +696,13 @@ function OmsVariantHistory({
   )
 }
 
-function OmsVariantCard({ group }: { group: OmsCatalogVariant }) {
+function OmsVariantCard({
+  group,
+  isCanonicalHerbalMasala,
+}: {
+  group: OmsCatalogVariant
+  isCanonicalHerbalMasala: boolean
+}) {
   const { hasPermission } = useAuth()
   const canManage = hasPermission("inventory.manage")
   const [showHistory, setShowHistory] = React.useState(false)
@@ -730,9 +768,17 @@ function OmsVariantCard({ group }: { group: OmsCatalogVariant }) {
             {showHistory ? "Hide History" : "History"}
           </Button>
         </div>
-        <UnderlyingShopifyVariants group={group} canManage={canManage} />
+        <UnderlyingShopifyVariants
+          group={group}
+          canManage={canManage}
+          isCanonicalHerbalMasala={isCanonicalHerbalMasala}
+        />
         {showHistory && (
-          <OmsVariantHistory group={group} spansMultipleSkus={spansMultipleSkus} />
+          <OmsVariantHistory
+            group={group}
+            spansMultipleSkus={spansMultipleSkus}
+            isCanonicalHerbalMasala={isCanonicalHerbalMasala}
+          />
         )}
       </CardContent>
     </Card>
@@ -742,6 +788,8 @@ function OmsVariantCard({ group }: { group: OmsCatalogVariant }) {
 function ProductInventory({ product }: { product: InventoryProductStock }) {
   const { hasPermission } = useAuth()
   const canManage = hasPermission("inventory.manage")
+  const isCanonicalHerbalMasala =
+    product.shopify_product_id === CANONICAL_HERBAL_MASALA_SHOPIFY_PRODUCT_ID
 
   return (
     <div className="flex flex-col gap-6">
@@ -773,6 +821,7 @@ function ProductInventory({ product }: { product: InventoryProductStock }) {
         <OmsVariantCard
           key={group.catalog_variant_id ?? group.underlying_variants[0]?.id ?? group.name}
           group={group}
+          isCanonicalHerbalMasala={isCanonicalHerbalMasala}
         />
       ))}
     </div>

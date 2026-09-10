@@ -139,6 +139,12 @@ class InventoryProductStockResponse(BaseModel):
     """
 
     product_id: uuid.UUID
+    # Shopify's own, immutable product id -- the ONLY safe key for the
+    # frontend to scope any product-specific display behaviour by (e.g.
+    # the canonical Herbal Masala product's pack-size labels). Never the
+    # OMS UUID above, and never `title`/`product_name` (two products can
+    # share the same title -- e.g. an unpublished draft duplicate).
+    shopify_product_id: str | None
     product_name: str  # display name: title_override or Shopify title
     title: str
     title_override: str | None

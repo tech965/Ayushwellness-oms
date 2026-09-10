@@ -118,6 +118,7 @@ function omsVariant(
 // Aayush Herbal Masala: 3 OMS flavour variants, each grouping a 60- and a 120-pack SKU.
 const HERBAL_MASALA: InventoryProductStock = {
   product_id: "prod-1",
+  shopify_product_id: "8009941287101", // the canonical product this feature is scoped to
   product_name: "Aayush Wellness Herbal Masala",
   title: "आयुष हर्बल मसाला",
   title_override: "Aayush Wellness Herbal Masala",
@@ -197,6 +198,7 @@ const HERBAL_MASALA: InventoryProductStock = {
 // A non-Herbal-Masala product: ONE OMS variant grouping 3 pack SKUs.
 const VAJRASHAKTI: InventoryProductStock = {
   product_id: "prod-1",
+  shopify_product_id: "8471325999293", // not the canonical Herbal Masala product
   product_name: "Vajrashakti",
   title: "Vajrashakti",
   title_override: null,
@@ -238,6 +240,7 @@ const VAJRASHAKTI: InventoryProductStock = {
 // An implicit (ungrouped) OMS variant -- catalog_variant_id null, 1 underlying row.
 const IMPLICIT: InventoryProductStock = {
   product_id: "prod-1",
+  shopify_product_id: null,
   product_name: "Ungrouped Product",
   title: "Ungrouped Product",
   title_override: null,
@@ -658,6 +661,87 @@ describe("InventoryProductPage — Movement History display", () => {
     expect(screen.getByText("VJR-30")).toBeInTheDocument()
     expect(screen.getByText("299 boxes")).toBeInTheDocument() // New balance
     expect(screen.getByText("300 boxes")).toBeInTheDocument() // Previous balance, unchanged
+  })
+})
+
+describe("InventoryProductPage — Herbal Masala pack-size labels (canonical product only)", () => {
+  it("shows '60 Pack' / '120 Pack' for the canonical product's underlying variants", async () => {
+    const user = userEvent.setup()
+    setProduct(HERBAL_MASALA)
+    renderWithProviders(<InventoryProductPage />)
+
+    const summaries = screen.getAllByText(/Underlying Shopify variants \(2\)/)
+    for (const summary of summaries) {
+      await user.click(summary) // expand every flavour's collapsible section
+    }
+    // all 3 flavours' 60-pack / 120-pack rows now read "60 Pack" / "120
+    // Pack" -- the label carries only the pack size, never the flavour,
+    // which is exactly right since the flavour is already the card title.
+    expect(screen.getAllByText("60 Pack")).toHaveLength(3)
+    expect(screen.getAllByText("120 Pack")).toHaveLength(3)
+    // the raw Shopify title must NOT be used as the label once derived
+    expect(screen.queryByText("Royal Tobacco Flavour / 60 - Pouches")).toBeNull()
+    expect(screen.queryByText("Royal Tobacco Flavour / 120 - Pouches")).toBeNull()
+    // the real SKU is still shown alongside it, unchanged
+    expect(screen.getByText(/SKU AW-HM-RG-60/)).toBeInTheDocument()
+    expect(screen.getByText(/SKU AW-HM-RG-120/)).toBeInTheDocument()
+  })
+
+  it("does NOT apply pack-size labels to a non-canonical product", async () => {
+    const user = userEvent.setup()
+    setProduct(VAJRASHAKTI)
+    renderWithProviders(<InventoryProductPage />)
+
+    await user.click(screen.getByText(/Underlying Shopify variants \(3\)/))
+    // its normal display titles are unaffected
+    expect(screen.getByText("Pack of 1")).toBeInTheDocument()
+    expect(screen.getByText("Pack of 2")).toBeInTheDocument()
+    expect(screen.getByText("Pack of 3")).toBeInTheDocument()
+    expect(screen.queryByText(/^\d+ Pack$/)).toBeNull()
+  })
+
+  it("history SKU column shows the pack-size prefix for the canonical product", async () => {
+    const user = userEvent.setup()
+    setProduct(HERBAL_MASALA)
+    setMovements([
+      movement({
+        id: "m-hm-1",
+        movement_type: "dispatch",
+        sku: "AW-HM-RG-60",
+        quantity_delta: -1,
+        previous_balance: 11,
+        quantity_after: 10,
+      }),
+    ])
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getAllByRole("button", { name: "History" })[0])
+    expect(screen.getByText("60 Pack — AW-HM-RG-60")).toBeInTheDocument()
+  })
+
+  it("history SKU column stays plain for a non-canonical product", async () => {
+    const user = userEvent.setup()
+    setProduct(VAJRASHAKTI)
+    setMovements([
+      movement({
+        id: "m-vjr-1",
+        movement_type: "dispatch",
+        sku: "VJR-30",
+        quantity_delta: -1,
+        previous_balance: 301,
+        quantity_after: 300,
+      }),
+    ])
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getByRole("button", { name: "History" }))
+    expect(screen.getByText("VJR-30")).toBeInTheDocument()
+    expect(screen.queryByText(/Pack — VJR-30/)).toBeNull()
+  })
+
+  it("never renders the Hindi source title anywhere on the canonical product's page", () => {
+    setProduct(HERBAL_MASALA)
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.queryByText("आयुष हर्बल मसाला")).not.toBeInTheDocument()
+    expect(screen.getByText("Aayush Wellness Herbal Masala")).toBeInTheDocument()
   })
 })
 

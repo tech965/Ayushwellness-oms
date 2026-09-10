@@ -155,6 +155,7 @@ def _product_stock_response(  # noqa: ANN001
     pack_sizes = {v.packets_per_box for v in all_underlying}
     return InventoryProductStockResponse(
         product_id=product.id,
+        shopify_product_id=product.shopify_product_id,
         product_name=_product_display_title(product),
         title=product.title,
         title_override=product.title_override,

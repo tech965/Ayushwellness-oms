@@ -104,6 +104,12 @@ export interface OmsCatalogVariant {
  */
 export interface InventoryProductStock {
   product_id: string
+  /** Shopify's own, immutable product id -- the only safe key to scope
+   * any product-specific display behaviour by (never `product_id`, the
+   * per-environment OMS UUID, and never `title`/`product_name`, which
+   * two distinct Shopify products can share).
+   */
+  shopify_product_id: string | null
   product_name: string
   title: string
   title_override: string | null
