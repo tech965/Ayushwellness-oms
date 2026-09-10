@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, IntegrationError, NotFoundError
+from app.core.logging import get_logger
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import get_adapter
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
@@ -41,6 +42,8 @@ from app.services.inventory_service import InventoryService
 from app.services.ndr_service import NDRService
 from app.services.shipment_service import ShipmentService
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
+
+logger = get_logger(__name__)
 
 # The Shiprocket seller-dashboard "Ready to Ship" page, pre-filtered to
 # one order via the `order_ids` query param -- what "Process Shipment"/
@@ -91,7 +94,25 @@ def shiprocket_order_url(shipment: Shipment | None) -> str | None:
     order_id = payload.get("order_id")
     if not order_id:
         return None
-    return f"{SHIPROCKET_READY_TO_SHIP_URL}?order_ids={order_id}"
+    # Defense in depth: `order_id` above already rejects None/0/""/[]/{},
+    # but not a value that's truthy yet renders as nothing usable (e.g. a
+    # whitespace-only string from a malformed sync record) -- stringified
+    # and stripped *before* the URL is built, so a degenerate value can
+    # never reach `?order_ids=` empty. Real Shiprocket order ids are
+    # always plain digits in every confirmed-live sample this engagement
+    # has seen; a non-digit value is logged (never raised -- reading this
+    # URL must never crash a page render) so a genuinely bad stored value
+    # is visible in production logs instead of silently opening a
+    # generic/unfiltered Shiprocket page.
+    order_id_str = str(order_id).strip()
+    if not order_id_str or not order_id_str.isdigit():
+        logger.warning(
+            "shiprocket_order_id_not_usable",
+            shipment_id=str(shipment.id),
+            order_id_repr=repr(order_id),
+        )
+        return None
+    return f"{SHIPROCKET_READY_TO_SHIP_URL}?order_ids={order_id_str}"
 
 
 # Bounds on the live, on-demand scan `locate_shiprocket_orders` runs when

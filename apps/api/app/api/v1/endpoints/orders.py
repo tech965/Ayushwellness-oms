@@ -147,7 +147,15 @@ def _to_list_response(order: Order) -> OrderListResponse:
     # An order can have more than one Shipment (a re-ship after RTO); the
     # most recently created one is "the" shipment for a list-row summary,
     # matching the export's convention (`ExportService.orders_to_xlsx`).
-    shipment = order.shipments[-1] if order.shipments else None
+    # Picked explicitly by `created_at` (never `order.shipments[-1]`) --
+    # `Order.shipments` is a plain `selectinload`, with no `order_by`, so
+    # its Python-list order is whatever Postgres happened to return, not
+    # a documented "insertion order" guarantee. Real production impact:
+    # a stale/CANCELLED/no-Shiprocket-order-id shipment could be picked
+    # over the genuine current one, silently showing the wrong (or a
+    # `None`) `shiprocket_order_url` for "Process Shipment"/"Ship Order"
+    # on this exact list (backs "Confirmed by Telecaller").
+    shipment = max(order.shipments, key=lambda s: s.created_at) if order.shipments else None
 
     items = order.items
     total_quantity = sum(item.quantity for item in items)
