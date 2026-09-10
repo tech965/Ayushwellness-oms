@@ -200,7 +200,7 @@ function ConfirmedByTelecallerContent() {
           shopifySyncStatus={r.shopify_sync_status}
           orderStatus={r.status}
           fulfillmentStatus={r.fulfillment_status}
-          shiprocketOrderUrl={r.shiprocket_order_url}
+          shiprocketOrderId={r.shiprocket_order_id}
         />
       ),
     },

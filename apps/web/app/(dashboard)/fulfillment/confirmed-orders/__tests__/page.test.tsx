@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { screen, within } from "@testing-library/react"
+import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -11,6 +11,7 @@ import { useRetryShopifySync } from "@/services/shipments"
 import { useTeamTelecallers } from "@/services/team"
 
 const mockPush = vi.fn()
+const READY_TO_SHIP_URL = "https://app.shiprocket.in/seller/orders/readytoship"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, replace: vi.fn(), back: vi.fn() }),
@@ -57,7 +58,7 @@ const ROW = {
   shipment_status: null as string | null,
   shipment_id: null as string | null,
   shopify_sync_status: null as string | null,
-  shiprocket_order_url: null as string | null,
+  shiprocket_order_id: null as string | null,
   confirmed_at: "2026-09-09T10:32:00Z",
   confirmed_by_telecaller_id: "tc-1",
   confirmed_by_telecaller_name: "Rahul Sharma",
@@ -85,7 +86,7 @@ function mockShipHooks(
       ids.map((id) => ({
         order_id: id,
         status: "not_found",
-        shiprocket_order_url: null,
+        shiprocket_order_id: null,
         message: null,
       }))
     )
@@ -99,6 +100,16 @@ function mockShipHooks(
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useRetryShopifySync>)
+}
+
+/** `navigator.clipboard` must be stubbed AFTER `userEvent.setup()` --
+ * that call installs its own clipboard emulation, which would otherwise
+ * clobber a stub set beforehand.
+ */
+function mockClipboard() {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
+  return writeText
 }
 
 describe("FulfillmentConfirmedOrdersPage", () => {
@@ -137,24 +148,16 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     expect(screen.getByText("Ayush Wellness Herbal Masala x1")).toBeInTheDocument()
   })
 
-  it("shows Ship Order directly in the row, opening the real Shiprocket order page", async () => {
+  it("shows Ship Order directly in the row, opening the plain Shiprocket Ready to Ship page", async () => {
     const user = userEvent.setup()
-    mockQuery([
-      {
-        ...ROW,
-        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
-      },
-    ])
+    mockClipboard()
+    mockQuery([{ ...ROW, shiprocket_order_id: "1576398335" }])
     mockShipHooks()
 
     renderWithProviders(<FulfillmentConfirmedOrdersPage />)
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=1576398335",
-      "_blank",
-      "noopener,noreferrer"
-    )
+    expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
   })
 
   it("shows the unavailable message, never a Shiprocket API call, when no order id is stored", async () => {
@@ -167,7 +170,7 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
     expect(openSpy).not.toHaveBeenCalled()
     expect(toast.error).toHaveBeenCalledWith(
-      "Shiprocket order link is unavailable for this order.",
+      "Shiprocket order ID is unavailable for this order.",
       expect.anything()
     )
   })
@@ -208,8 +211,9 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     expect(screen.getByText("AWL95408")).toBeInTheDocument()
   })
 
-  it("selects orders via checkbox and opens their existing Shiprocket order pages (never creates)", async () => {
+  it("selects orders via checkbox, locates their Shiprocket IDs, and never creates a shipment", async () => {
     const user = userEvent.setup()
+    const writeText = mockClipboard()
     const locateMutate = vi.fn()
     mockQuery()
     mockShipHooks()
@@ -219,7 +223,7 @@ describe("FulfillmentConfirmedOrdersPage", () => {
         {
           order_id: "order-1",
           status: "found",
-          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/readytoship?order_ids=order-1",
+          shiprocket_order_id: "1600000001",
           message: null,
         },
       ],
@@ -239,12 +243,13 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     expect(
       within(dialog).queryByRole("button", { name: /create shipment/i })
     ).not.toBeInTheDocument()
-    await user.click(within(dialog).getByRole("button", { name: /^Open All Found/i }))
-    expect(openSpy).toHaveBeenCalledWith(
-      "https://app.shiprocket.in/seller/orders/readytoship?order_ids=order-1",
-      "_blank",
-      "noopener,noreferrer"
-    )
+    expect(within(dialog).getByText("1600000001")).toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole("button", { name: /^Copy ID$/i }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("1600000001"))
+
+    await user.click(within(dialog).getByRole("button", { name: /^Open Ready to Ship$/i }))
+    expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
   })
 
   it("shows an empty state when nothing has been confirmed by Telecalling yet", () => {

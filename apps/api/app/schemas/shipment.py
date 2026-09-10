@@ -127,13 +127,15 @@ class ShipmentQueueRowResponse(BaseModel):
     # queue table offer "Retry Shopify Sync" directly, without opening
     # the shipment. `None` exactly when `shipment_id` is `None`.
     shopify_sync_status: ShopifySyncStatus | None = None
-    # The real Shiprocket "Ready to Ship" page for this shipment (see
-    # `app.services.shiprocket_service.shiprocket_order_url`) -- `None`
-    # when the OMS has no reliably-stored Shiprocket order id, including
-    # whenever `shipment_id` is `None`. The Fulfillment Queue's "Process
-    # Shipment"/"Ship Order" actions open this directly instead of
-    # calling any Shiprocket create-shipment API.
-    shiprocket_order_url: str | None = None
+    # The real, numeric Shiprocket order id for this shipment (see
+    # `app.services.shiprocket_service.shiprocket_order_id`) -- `None`
+    # when the OMS has no reliably-stored one, including whenever
+    # `shipment_id` is `None`. Shiprocket has no supported deep-link
+    # filter for its "Ready to Ship" page, so the Fulfillment Queue's
+    # "Process Shipment"/"Ship Order" actions open that page plain and
+    # copy this id to the clipboard, instead of calling any Shiprocket
+    # create-shipment API.
+    shiprocket_order_id: str | None = None
 
 
 class ShipmentSummaryResponse(BaseModel):

@@ -37,7 +37,7 @@ from app.services.shipment_service import ShipmentService
 from app.services.shiprocket_service import (
     ShiprocketOperationsService,
     locate_shiprocket_orders,
-    shiprocket_order_url,
+    shiprocket_order_id,
 )
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
@@ -69,7 +69,7 @@ def _to_shipment_queue_row(order: Order, shipment: Shipment | None) -> ShipmentQ
         shopify_sync_status=shipment.shopify_sync_status if shipment else None,
         awb=shipment.awb if shipment else None,
         courier_name=shipment.courier.name if shipment and shipment.courier else None,
-        shiprocket_order_url=shiprocket_order_url(shipment),
+        shiprocket_order_id=shiprocket_order_id(shipment),
     )
 
 
@@ -195,15 +195,19 @@ async def locate_shiprocket_order(
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("shipments.update")),
 ) -> ApiResponse[list[LocateShiprocketOrderResult]]:
-    """Locate an order's EXISTING Shiprocket order.
+    """Locate an order's EXISTING Shiprocket order id.
 
     "Process Shipment"/"Ship Order" (single-row) and the bulk
-    Fulfillment action both call this before ever opening a Shiprocket
-    order page -- resolves each order's EXISTING Shiprocket order via
+    Fulfillment action both call this before ever opening Shiprocket --
+    resolves each order's EXISTING Shiprocket order id via
     `locate_shiprocket_orders` (never creates one; see that function's
-    docstring). Gated the same as every other Shiprocket-triggering
-    action here (`shipments.update`) since a genuine match is persisted
-    as a real `Shipment` row, not just read.
+    docstring). The frontend opens Shiprocket's plain "Ready to Ship"
+    page and copies the id to the clipboard for the operator to paste
+    into Shiprocket's own "Multiple Order IDs" filter -- Shiprocket has
+    no supported deep-link URL for a specific order. Gated the same as
+    every other Shiprocket-triggering action here (`shipments.update`)
+    since a genuine match is persisted as a real `Shipment` row, not just
+    read.
     """
     orders: list[Order] = []
     results: list[LocateShiprocketOrderResult] = []
@@ -225,15 +229,15 @@ async def locate_shiprocket_order(
     order_ids = [order.id for order in orders]
     resolved = await locate_shiprocket_orders(session, orders)
     for order_id in order_ids:
-        url = resolved.get(order_id)
+        found_id = resolved.get(order_id)
         results.append(
             LocateShiprocketOrderResult(
                 order_id=order_id,
-                status="found" if url else "not_found",
-                shiprocket_order_url=url,
+                status="found" if found_id else "not_found",
+                shiprocket_order_id=found_id,
                 message=(
                     None
-                    if url
+                    if found_id
                     else "Existing Shiprocket order could not be located for this order."
                 ),
             )

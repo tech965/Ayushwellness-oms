@@ -45,30 +45,31 @@ from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 logger = get_logger(__name__)
 
-# The Shiprocket seller-dashboard "Ready to Ship" page, pre-filtered to
-# one order via the `order_ids` query param -- what "Process Shipment"/
-# "Ship Order" open now (previously the individual order-details page,
-# `.../orders/details/{id}`; changed here only -- the id lookup itself is
-# unchanged, see `shiprocket_order_url` below). Takes Shiprocket's own
-# numeric order id -- NEVER the OMS order number (`#AWLxxxxx`), which has
-# no relationship to it, and never `shiprocket_shipment_id` either (a
-# different id, for a different Shiprocket object -- `/orders/create/
-# adhoc`'s response has both `order_id` and `shipment_id` as separate
-# fields; this URL takes the former).
+# The Shiprocket seller-dashboard "Ready to Ship" page -- ALWAYS opened
+# plain, with no query string. Shiprocket support has confirmed
+# `order_ids` (or any other deep-link filter param) is NOT an officially
+# supported way to pre-filter this page -- an earlier version of this
+# feature tried exactly that (`?order_ids={id}`) and it silently did
+# nothing (Shiprocket's own page resets/ignores unrecognized query
+# state). The supported alternative: open this plain page and give the
+# operator the real numeric Shiprocket order id to paste into
+# Shiprocket's own "Multiple Order IDs" filter -- see
+# `shiprocket_order_id()` below, and the frontend's `openShiprocketOrder`
+# handlers (`ShipmentActionCell` et al.), which open this URL and copy
+# the id to the clipboard together.
 SHIPROCKET_READY_TO_SHIP_URL = "https://app.shiprocket.in/seller/orders/readytoship"
 
 
-def shiprocket_order_url(shipment: Shipment | None) -> str | None:
-    """The exact Shiprocket "Ready to Ship" page for `shipment`
-    (`{SHIPROCKET_READY_TO_SHIP_URL}?order_ids={id}`), or `None` when the
-    OMS has no reliably-stored Shiprocket order id for it -- never
-    fabricated from the OMS order number or any other guess (see the
-    Fulfillment Queue's "Process Shipment"/"Ship Order" actions, which
-    open this URL directly rather than calling `create_shipment_
-    for_order` again -- creating a second Shiprocket order for one this
-    account may already have, e.g. via Shiprocket's own Shopify channel
-    connector, is exactly the duplicate-shipment risk this exists to
-    avoid).
+def shiprocket_order_id(shipment: Shipment | None) -> str | None:
+    """The real, numeric Shiprocket order id for `shipment`, or `None`
+    when the OMS has no reliably-stored one for it -- never fabricated
+    from the OMS order number or any other guess (see the Fulfillment
+    Queue's "Process Shipment"/"Ship Order" actions, which open
+    Shiprocket's plain "Ready to Ship" page and copy this id to the
+    clipboard, rather than calling `create_shipment_for_order` again --
+    creating a second Shiprocket order for one this account may already
+    have, e.g. via Shiprocket's own Shopify channel connector, is exactly
+    the duplicate-shipment risk this exists to avoid).
 
     The id itself: `create_shipment_for_order` persists the FULL
     `/orders/create/adhoc` response verbatim on `Shipment.raw_
@@ -97,13 +98,13 @@ def shiprocket_order_url(shipment: Shipment | None) -> str | None:
     # Defense in depth: `order_id` above already rejects None/0/""/[]/{},
     # but not a value that's truthy yet renders as nothing usable (e.g. a
     # whitespace-only string from a malformed sync record) -- stringified
-    # and stripped *before* the URL is built, so a degenerate value can
-    # never reach `?order_ids=` empty. Real Shiprocket order ids are
-    # always plain digits in every confirmed-live sample this engagement
-    # has seen; a non-digit value is logged (never raised -- reading this
-    # URL must never crash a page render) so a genuinely bad stored value
-    # is visible in production logs instead of silently opening a
-    # generic/unfiltered Shiprocket page.
+    # and stripped before being handed to the frontend, so a degenerate
+    # value can never be copied/displayed as a blank id. Real Shiprocket
+    # order ids are always plain digits in every confirmed-live sample
+    # this engagement has seen; a non-digit value is logged (never raised
+    # -- reading this must never crash a page render) so a genuinely bad
+    # stored value is visible in production logs instead of silently
+    # being offered to an operator as if it were usable.
     order_id_str = str(order_id).strip()
     if not order_id_str or not order_id_str.isdigit():
         logger.warning(
@@ -112,7 +113,7 @@ def shiprocket_order_url(shipment: Shipment | None) -> str | None:
             order_id_repr=repr(order_id),
         )
         return None
-    return f"{SHIPROCKET_READY_TO_SHIP_URL}?order_ids={order_id_str}"
+    return order_id_str
 
 
 # Bounds on the live, on-demand scan `locate_shiprocket_orders` runs when
@@ -134,9 +135,9 @@ _LOCATE_MAX_CANDIDATES = 30
 async def locate_shiprocket_orders(
     session: AsyncSession, orders: list[Order]
 ) -> dict[uuid.UUID, str | None]:
-    """Resolves each of `orders` to its existing Shiprocket "Ready to
-    Ship" URL -- NEVER creates a Shiprocket order (no `orders/create/
-    adhoc` call anywhere in this function or anything it calls).
+    """Resolves each of `orders` to its existing Shiprocket order id --
+    NEVER creates a Shiprocket order (no `orders/create/adhoc` call
+    anywhere in this function or anything it calls).
 
     Two steps, in order:
 
@@ -169,11 +170,11 @@ async def locate_shiprocket_orders(
     pending: dict[uuid.UUID, Order] = {}
     for order in orders:
         existing_shipments = await ShipmentRepository(session).list_for_order(order.id)
-        url = next(
-            (u for s in existing_shipments if (u := shiprocket_order_url(s)) is not None), None
+        order_id_found = next(
+            (i for s in existing_shipments if (i := shiprocket_order_id(s)) is not None), None
         )
-        if url:
-            results[order.id] = url
+        if order_id_found:
+            results[order.id] = order_id_found
         else:
             pending[order.id] = order
 
@@ -208,7 +209,7 @@ async def locate_shiprocket_orders(
                     continue
                 await session.commit()
                 if upserted.order_id in pending:
-                    results[upserted.order_id] = shiprocket_order_url(upserted)
+                    results[upserted.order_id] = shiprocket_order_id(upserted)
                     del pending[upserted.order_id]
             if not pending or not page.has_more or candidates_examined >= _LOCATE_MAX_CANDIDATES:
                 break

@@ -93,12 +93,14 @@ export interface Order {
   // `shipment_status` is `null` (no shipment yet).
   shipment_id?: string | null
   shopify_sync_status?: string | null
-  // The real Shiprocket "Ready to Ship" page for that same shipment --
+  // The real, numeric Shiprocket order id for that same shipment --
   // `null` under the exact same conditions as `shipment_id` above (no
   // shipment yet, or one with no reliably-stored Shiprocket order id).
-  // "Process Shipment"/"Ship Order" open this directly in a new tab
-  // instead of calling any Shiprocket create-shipment API.
-  shiprocket_order_url?: string | null
+  // Shiprocket has no supported deep-link URL for a specific order, so
+  // "Process Shipment"/"Ship Order" open Shiprocket's plain "Ready to
+  // Ship" page and copy this id to the clipboard, instead of calling any
+  // Shiprocket create-shipment API.
+  shiprocket_order_id?: string | null
   // See `confirmed_by_telecaller_id` above -- resolved name, present on
   // `GET /orders` rows (`OrderListResponse`). `null`/absent whenever the
   // id itself is `null`, never a fabricated value.
