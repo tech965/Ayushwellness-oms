@@ -5,7 +5,26 @@ schemas in `app.schemas.integration`.
 
 from __future__ import annotations
 
+import uuid
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+class LocateShiprocketOrderRequest(BaseModel):
+    """One or many OMS order ids to resolve to their existing Shiprocket
+    order-details page -- never creates anything, see
+    `app.services.shiprocket_service.locate_shiprocket_orders`.
+    """
+
+    order_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+
+
+class LocateShiprocketOrderResult(BaseModel):
+    order_id: uuid.UUID
+    status: Literal["found", "not_found", "error"]
+    shiprocket_order_url: str | None = None
+    message: str | None = None
 
 
 class ShiprocketShipRequest(BaseModel):

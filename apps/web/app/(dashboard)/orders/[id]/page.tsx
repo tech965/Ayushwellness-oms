@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams, useSearchParams } from "next/navigation"
-import { Mail, MapPin, Phone, PhoneCall, Tag, Truck } from "lucide-react"
+import { ExternalLink, Mail, MapPin, Phone, PhoneCall, Tag, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { CashfreePaymentCard } from "@/components/orders/cashfree-payment-card"
@@ -37,13 +37,9 @@ import { formatDateTime, formatMoney } from "@/lib/format"
 import { usePaymentsForOrder } from "@/services/payments"
 import { useRefundsForOrder } from "@/services/refunds"
 import { useReturnsForOrder } from "@/services/returns"
+import { useLocateShiprocketOrders } from "@/services/shipment-queue"
 import { useShipmentsForOrder } from "@/services/shipments"
-import {
-  useOrder,
-  useOrderTimeline,
-  useShipOrderViaShiprocket,
-  useTransitionOrderStatus,
-} from "@/services/orders"
+import { useOrder, useOrderTimeline, useTransitionOrderStatus } from "@/services/orders"
 import { ORDER_STATUS_OPTIONS, type OrderAddress, type OrderStatus } from "@/types/order"
 
 function OrderDetailSkeleton() {
@@ -80,9 +76,42 @@ function OrderDetailContent() {
   const returnsQuery = useReturnsForOrder(orderId)
   const refundsQuery = useRefundsForOrder(orderId)
   const transition = useTransitionOrderStatus(orderId)
-  const shipViaShiprocket = useShipOrderViaShiprocket(orderId)
+  const locate = useLocateShiprocketOrders()
 
   const [nextStatus, setNextStatus] = React.useState<OrderStatus | undefined>(undefined)
+
+  // "Ship Order" opens the real Shiprocket order-details page in a new
+  // tab -- never a Shiprocket create-shipment API call from here.
+  // Shiprocket may already have this order (e.g. via its own Shopify
+  // channel connector, independent of this OMS), so creating one here
+  // risked a real, confirmed duplicate-shipment bug -- see the identical
+  // rule on `ShipmentActionCell`, the Fulfillment Queue's equivalent
+  // action. This card only ever shows the button while no `Shipment` row
+  // exists yet for this order (`!shipmentsQuery.data?.length` below), so
+  // the OMS never has a stored Shiprocket order id to link to here
+  // locally -- a click asks the backend to locate the EXISTING
+  // Shiprocket order live (`useLocateShiprocketOrders`, never creates
+  // one) before falling back to the "unavailable" message.
+  function openShiprocketOrder() {
+    if (locate.isPending) return
+    locate.mutate([orderId], {
+      onSuccess: (results) => {
+        const result = results[0]
+        if (result?.shiprocket_order_url) {
+          window.open(result.shiprocket_order_url, "_blank", "noopener,noreferrer")
+        } else {
+          toast.error("Shiprocket order link is unavailable for this order.", {
+            description:
+              result?.message ??
+              "The OMS doesn't have a stored Shiprocket order id for this order yet -- it hasn't " +
+                "been pushed to Shiprocket from here, and hasn't been matched back from Shiprocket " +
+                "either.",
+          })
+        }
+      },
+      onError: (error) => toast.error(getApiErrorMessage(error)),
+    })
+  }
 
   function handleTransition() {
     if (!nextStatus) return
@@ -409,18 +438,9 @@ function OrderDetailContent() {
                 <CardHeader className="flex flex-row items-center justify-between gap-2">
                   <CardTitle>Shipment</CardTitle>
                   {hasPermission("shipments.update") && !shipmentsQuery.data?.length && (
-                    <Button
-                      size="sm"
-                      disabled={shipViaShiprocket.isPending}
-                      onClick={() => {
-                        shipViaShiprocket.mutate(undefined, {
-                          onSuccess: () =>
-                            toast.success("Shipment created via Shiprocket."),
-                          onError: (error) => toast.error(getApiErrorMessage(error)),
-                        })
-                      }}
-                    >
-                      {shipViaShiprocket.isPending ? "Shipping..." : "Ship Order"}
+                    <Button size="sm" disabled={locate.isPending} onClick={openShiprocketOrder}>
+                      <ExternalLink className="size-3.5" />
+                      {locate.isPending ? "Checking..." : "Ship Order"}
                     </Button>
                   )}
                 </CardHeader>

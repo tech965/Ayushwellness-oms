@@ -2,7 +2,6 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { toast } from "sonner"
 
 import { BulkShipDialog } from "@/components/fulfillment/bulk-ship-dialog"
 import { ShipmentActionCell } from "@/components/fulfillment/shipment-action-cell"
@@ -21,11 +20,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useTelecallerConfirmedOrders } from "@/services/orders"
-import { useShipOrderFromQueue } from "@/services/shipment-queue"
 import { useTeamTelecallers } from "@/services/team"
 import {
   ORDER_STATUS_OPTIONS,
@@ -68,7 +65,6 @@ function ConfirmedByTelecallerContent() {
   const router = useRouter()
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
   const telecallersQuery = useTeamTelecallers()
-  const shipOrder = useShipOrderFromQueue()
 
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
   const [bulkShipOpen, setBulkShipOpen] = React.useState(false)
@@ -91,13 +87,6 @@ function ConfirmedByTelecallerContent() {
         else next.add(id)
       }
       return next
-    })
-  }
-
-  function handleShipOrder(orderId: string) {
-    shipOrder.mutate(orderId, {
-      onSuccess: () => toast.success("Shipment created via Shiprocket."),
-      onError: (error) => toast.error(getApiErrorMessage(error)),
     })
   }
 
@@ -211,8 +200,7 @@ function ConfirmedByTelecallerContent() {
           shopifySyncStatus={r.shopify_sync_status}
           orderStatus={r.status}
           fulfillmentStatus={r.fulfillment_status}
-          onShip={handleShipOrder}
-          shipPending={shipOrder.isPending && shipOrder.variables === r.id}
+          shiprocketOrderUrl={r.shiprocket_order_url}
         />
       ),
     },
@@ -324,7 +312,7 @@ function ConfirmedByTelecallerContent() {
             <span className="font-medium">Selected {selectedIds.size} orders</span>
             <div className="flex items-center gap-2">
               <Button size="sm" onClick={() => setBulkShipOpen(true)}>
-                Create Shipments
+                Open in Shiprocket
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
                 Clear Selection
@@ -367,12 +355,7 @@ function ConfirmedByTelecallerContent() {
                 onOpenChange={setBulkShipOpen}
                 rows={data.data
                   .filter((r) => selectedIds.has(r.id))
-                  .map((r) => ({
-                    id: r.id,
-                    order_number: r.order_number,
-                    payment_type: r.payment_type,
-                    total_amount: r.total_amount,
-                  }))}
+                  .map((r) => ({ id: r.id, order_number: r.order_number }))}
                 onDone={() => setSelectedIds(new Set())}
               />
             </>

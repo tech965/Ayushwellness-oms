@@ -1,15 +1,12 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import FulfillmentConfirmedOrdersPage from "@/app/(dashboard)/fulfillment/confirmed-orders/page"
+import { toast } from "sonner"
 import { useTelecallerConfirmedOrders } from "@/services/orders"
-import {
-  useBulkShipOrders,
-  useShipOrderFromQueue,
-  useValidateBulkShip,
-} from "@/services/shipment-queue"
+import { useLocateShiprocketOrders } from "@/services/shipment-queue"
 import { useRetryShopifySync } from "@/services/shipments"
 import { useTeamTelecallers } from "@/services/team"
 
@@ -30,9 +27,7 @@ vi.mock("@/services/orders", () => ({
 }))
 
 vi.mock("@/services/shipment-queue", () => ({
-  useShipOrderFromQueue: vi.fn(),
-  useBulkShipOrders: vi.fn(),
-  useValidateBulkShip: vi.fn(),
+  useLocateShiprocketOrders: vi.fn(),
 }))
 
 vi.mock("@/services/shipments", () => ({
@@ -45,9 +40,7 @@ vi.mock("@/services/team", () => ({
 
 const mockedUseTelecallerConfirmedOrders = vi.mocked(useTelecallerConfirmedOrders)
 const mockedUseTeamTelecallers = vi.mocked(useTeamTelecallers)
-const mockedUseShipOrderFromQueue = vi.mocked(useShipOrderFromQueue)
-const mockedUseBulkShipOrders = vi.mocked(useBulkShipOrders)
-const mockedUseValidateBulkShip = vi.mocked(useValidateBulkShip)
+const mockedUseLocateShiprocketOrders = vi.mocked(useLocateShiprocketOrders)
 const mockedUseRetryShopifySync = vi.mocked(useRetryShopifySync)
 
 const ROW = {
@@ -64,6 +57,7 @@ const ROW = {
   shipment_status: null as string | null,
   shipment_id: null as string | null,
   shopify_sync_status: null as string | null,
+  shiprocket_order_url: null as string | null,
   confirmed_at: "2026-09-09T10:32:00Z",
   confirmed_by_telecaller_id: "tc-1",
   confirmed_by_telecaller_name: "Rahul Sharma",
@@ -85,21 +79,22 @@ function mockQuery(data: typeof ROW[] = [ROW]) {
   } as unknown as ReturnType<typeof useTeamTelecallers>)
 }
 
-function mockShipHooks() {
-  mockedUseShipOrderFromQueue.mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-    variables: undefined,
-  } as unknown as ReturnType<typeof useShipOrderFromQueue>)
-  mockedUseBulkShipOrders.mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof useBulkShipOrders>)
-  mockedUseValidateBulkShip.mockReturnValue({
-    mutate: vi.fn(),
+function mockShipHooks(
+  locateImpl: (ids: string[], opts?: { onSuccess?: (r: unknown) => void }) => void = (ids, opts) =>
+    opts?.onSuccess?.(
+      ids.map((id) => ({
+        order_id: id,
+        status: "not_found",
+        shiprocket_order_url: null,
+        message: null,
+      }))
+    )
+) {
+  mockedUseLocateShiprocketOrders.mockReturnValue({
+    mutate: vi.fn(locateImpl),
     data: undefined,
     isPending: false,
-  } as unknown as ReturnType<typeof useValidateBulkShip>)
+  } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
   mockedUseRetryShopifySync.mockReturnValue({
     mutate: vi.fn(),
     isPending: false,
@@ -107,6 +102,17 @@ function mockShipHooks() {
 }
 
 describe("FulfillmentConfirmedOrdersPage", () => {
+  let openSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    openSpy = vi.spyOn(window, "open").mockReturnValue(null)
+  })
+
+  afterEach(() => {
+    openSpy.mockRestore()
+    vi.clearAllMocks()
+  })
+
   it("shows the page title and subtitle", () => {
     mockQuery()
     mockShipHooks()
@@ -131,21 +137,39 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     expect(screen.getByText("Ayush Wellness Herbal Masala x1")).toBeInTheDocument()
   })
 
-  it("shows Ship Order directly in the row for an order eligible for shipment", async () => {
+  it("shows Ship Order directly in the row, opening the real Shiprocket order page", async () => {
     const user = userEvent.setup()
-    const shipMutate = vi.fn()
-    mockQuery()
+    mockQuery([
+      {
+        ...ROW,
+        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+      },
+    ])
     mockShipHooks()
-    mockedUseShipOrderFromQueue.mockReturnValue({
-      mutate: shipMutate,
-      isPending: false,
-      variables: undefined,
-    } as unknown as ReturnType<typeof useShipOrderFromQueue>)
 
     renderWithProviders(<FulfillmentConfirmedOrdersPage />)
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    expect(shipMutate).toHaveBeenCalledWith("order-1", expect.anything())
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "_blank",
+      "noopener,noreferrer"
+    )
+  })
+
+  it("shows the unavailable message, never a Shiprocket API call, when no order id is stored", async () => {
+    const user = userEvent.setup()
+    mockQuery()
+    mockShipHooks()
+
+    renderWithProviders(<FulfillmentConfirmedOrdersPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(toast.error).toHaveBeenCalledWith(
+      "Shiprocket order link is unavailable for this order.",
+      expect.anything()
+    )
   })
 
   it("hides Ship Order once the order is already shipped/in transit/delivered", () => {
@@ -184,27 +208,23 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     expect(screen.getByText("AWL95408")).toBeInTheDocument()
   })
 
-  it("selects orders via checkbox and runs the bulk-ship validate-then-ship flow", async () => {
+  it("selects orders via checkbox and opens their existing Shiprocket order pages (never creates)", async () => {
     const user = userEvent.setup()
-    const validateMutate = vi.fn()
-    const bulkShipMutate = vi.fn((_ids, opts) => {
-      opts.onSuccess({
-        shipped_count: 1,
-        failed_count: 0,
-        results: [{ order_id: "order-1", success: true, message: null, shipment_id: "ship-9" }],
-      })
-    })
+    const locateMutate = vi.fn()
     mockQuery()
     mockShipHooks()
-    mockedUseValidateBulkShip.mockReturnValue({
-      mutate: validateMutate,
-      data: [{ order_id: "order-1", ready: true, reason: null }],
+    mockedUseLocateShiprocketOrders.mockReturnValue({
+      mutate: locateMutate,
+      data: [
+        {
+          order_id: "order-1",
+          status: "found",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/order-1",
+          message: null,
+        },
+      ],
       isPending: false,
-    } as unknown as ReturnType<typeof useValidateBulkShip>)
-    mockedUseBulkShipOrders.mockReturnValue({
-      mutate: bulkShipMutate,
-      isPending: false,
-    } as unknown as ReturnType<typeof useBulkShipOrders>)
+    } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
 
     renderWithProviders(<FulfillmentConfirmedOrdersPage />)
 
@@ -212,12 +232,19 @@ describe("FulfillmentConfirmedOrdersPage", () => {
     await user.click(checkboxes[1])
     expect(screen.getByText("Selected 1 orders")).toBeInTheDocument()
 
-    await user.click(screen.getByRole("button", { name: /^Create Shipments$/i }))
-    expect(validateMutate).toHaveBeenCalledWith(["order-1"])
+    await user.click(screen.getByRole("button", { name: /^Open in Shiprocket$/i }))
+    expect(locateMutate).toHaveBeenCalledWith(["order-1"])
 
     const dialog = screen.getByRole("alertdialog")
-    await user.click(within(dialog).getByRole("button", { name: /^Create Shipments$/i }))
-    expect(bulkShipMutate).toHaveBeenCalledWith(["order-1"], expect.anything())
+    expect(
+      within(dialog).queryByRole("button", { name: /create shipment/i })
+    ).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole("button", { name: /^Open All Found/i }))
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://app.shiprocket.in/seller/orders/details/order-1",
+      "_blank",
+      "noopener,noreferrer"
+    )
   })
 
   it("shows an empty state when nothing has been confirmed by Telecalling yet", () => {

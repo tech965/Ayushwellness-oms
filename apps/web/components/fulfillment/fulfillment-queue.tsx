@@ -2,7 +2,6 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { toast } from "sonner"
 
 import { BulkShipDialog } from "@/components/fulfillment/bulk-ship-dialog"
 import { ShipmentActionCell } from "@/components/fulfillment/shipment-action-cell"
@@ -21,10 +20,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import { useShipmentQueue, useShipOrderFromQueue } from "@/services/shipment-queue"
+import { useShipmentQueue } from "@/services/shipment-queue"
 import { useTeamTelecallers } from "@/services/team"
 import { PAYMENT_TYPE_OPTIONS } from "@/types/order"
 import {
@@ -64,7 +62,6 @@ function FulfillmentQueueContent() {
 
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
   const [bulkShipOpen, setBulkShipOpen] = React.useState(false)
-  const shipOrder = useShipOrderFromQueue()
 
   function toggleOne(id: string) {
     setSelectedIds((prev) => {
@@ -84,13 +81,6 @@ function FulfillmentQueueContent() {
         else next.add(id)
       }
       return next
-    })
-  }
-
-  function handleShipOrder(orderId: string) {
-    shipOrder.mutate(orderId, {
-      onSuccess: () => toast.success("Shipment created via Shiprocket."),
-      onError: (error) => toast.error(getApiErrorMessage(error)),
     })
   }
 
@@ -182,8 +172,7 @@ function FulfillmentQueueContent() {
           shopifySyncStatus={r.shopify_sync_status}
           orderStatus="confirmed"
           fulfillmentStatus="unfulfilled"
-          onShip={handleShipOrder}
-          shipPending={shipOrder.isPending && shipOrder.variables === r.order_id}
+          shiprocketOrderUrl={r.shiprocket_order_url}
         />
       ),
     },
@@ -273,7 +262,7 @@ function FulfillmentQueueContent() {
             <span className="font-medium">Selected {selectedIds.size} orders</span>
             <div className="flex items-center gap-2">
               <Button size="sm" onClick={() => setBulkShipOpen(true)}>
-                Create Shipments
+                Open in Shiprocket
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
                 Clear Selection
@@ -316,12 +305,7 @@ function FulfillmentQueueContent() {
                 onOpenChange={setBulkShipOpen}
                 rows={data.data
                   .filter((r) => selectedIds.has(r.order_id))
-                  .map((r) => ({
-                    id: r.order_id,
-                    order_number: r.order_number,
-                    payment_type: r.payment_type,
-                    total_amount: r.total_amount,
-                  }))}
+                  .map((r) => ({ id: r.order_id, order_number: r.order_number }))}
                 onDone={() => setSelectedIds(new Set())}
               />
             </>

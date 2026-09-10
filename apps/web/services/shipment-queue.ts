@@ -3,8 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
-  BulkShipOrdersResponse,
-  Shipment,
+  LocateShiprocketOrderResult,
   ShipmentAnalytics,
   ShipmentQueueFilters,
   ShipmentQueueRow,
@@ -93,22 +92,17 @@ export function useShipmentAnalytics(params: ShipmentAnalyticsParams = {}) {
   })
 }
 
-/** Row-level "Ship via Shiprocket" from the Fulfillment Queue -- the order
- * id is passed at call time (`mutate(orderId)`) rather than baked into the
- * hook, since one table renders many rows and a hook can't be created
- * inside a per-row cell callback. Distinct from `useShipOrderViaShiprocket`
- * in `services/orders.ts` (the order-detail page's single bound-id hook) --
- * same underlying endpoint, different call shape for a different caller.
- */
-/** A brand-new shipment moves an order between all three fulfillment
- * views at once: it leaves "Orders Need Shipment" (`shipment-queue`),
- * appears/updates in "Shipments" (`shipments`), and its status changes
- * in "Confirmed by Telecaller" (`orders`, incl. the `confirmed-by-
- * telecaller` query -- query-key prefix matching invalidates that too).
- * Refreshing all three here (rather than each page invalidating only
- * its own key) is what makes "ship from the Confirmed-by-Telecaller
- * table" and "ship from the queue" both keep every other open view
- * correct without a manual page reload.
+/** A newly-located (or newly-created-elsewhere) shipment moves an order
+ * between all three fulfillment views at once: it leaves "Orders Need
+ * Shipment" (`shipment-queue`), appears/updates in "Shipments"
+ * (`shipments`), and its status changes in "Confirmed by Telecaller"
+ * (`orders`, incl. the `confirmed-by-telecaller` query -- query-key
+ * prefix matching invalidates that too). Used by `useLocateShiprocketOrders`
+ * below, since resolving a previously-unknown Shiprocket order persists a
+ * real local `Shipment` row as a side effect (see
+ * `app.services.shiprocket_service.locate_shiprocket_orders`) -- the
+ * single-row "Ship Order"/"Process Shipment" action (`ShipmentActionCell`)
+ * calls the same endpoint per row and relies on this too.
  */
 function invalidateAfterShipmentChange(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
@@ -116,49 +110,23 @@ function invalidateAfterShipmentChange(queryClient: ReturnType<typeof useQueryCl
   void queryClient.invalidateQueries({ queryKey: ["orders"] })
 }
 
-export function useShipOrderFromQueue() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: async (orderId: string) => {
-      const response = await apiClient.post<ApiResponse<Shipment>>(`/orders/${orderId}/ship`, {})
-      return response.data.data
-    },
-    onSuccess: () => invalidateAfterShipmentChange(queryClient),
-  })
-}
-
-/** Read-only dry run for the bulk-ship confirmation screen -- classifies
- * every selected order as ready/not-ready with a reason, WITHOUT
- * creating anything (`POST /orders/bulk-ship/validate`). Not a mutation
- * despite the POST verb (no server-side write happens); modeled as one
- * anyway so the confirmation dialog gets `isPending` for free, same as
- * every other async action in this codebase.
+/** Resolves each selected order's EXISTING Shiprocket order -- NEVER
+ * creates one (no `orders/create/adhoc` call anywhere in this path; see
+ * `app.services.shiprocket_service.locate_shiprocket_orders`). Backs both
+ * the bulk "Open in Shiprocket" dialog and (indirectly, one order at a
+ * time) `ShipmentActionCell`'s single-row "Process Shipment"/"Ship
+ * Order" actions. A per-order `status: "not_found"` is reported back,
+ * never silently dropped or guessed.
  */
-export function useValidateBulkShip() {
-  return useMutation({
-    mutationFn: async (orderIds: string[]) => {
-      const response = await apiClient.post<
-        ApiResponse<{ order_id: string; ready: boolean; reason: string | null }[]>
-      >("/orders/bulk-ship/validate", { order_ids: orderIds })
-      return response.data.data ?? []
-    },
-  })
-}
-
-/** Ships every selected confirmed order independently -- the response
- * always reports a per-order result (insufficient stock, unknown order,
- * etc. never blocks the rest), same convention as `useBulkConfirmOrders`.
- */
-export function useBulkShipOrders() {
+export function useLocateShiprocketOrders() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (orderIds: string[]) => {
-      const response = await apiClient.post<ApiResponse<BulkShipOrdersResponse>>(
-        "/orders/bulk-ship",
+      const response = await apiClient.post<ApiResponse<LocateShiprocketOrderResult[]>>(
+        "/shipments/locate-shiprocket-order",
         { order_ids: orderIds }
       )
-      if (!response.data.data) throw new Error("Bulk ship did not return a result.")
-      return response.data.data
+      return response.data.data ?? []
     },
     onSuccess: () => invalidateAfterShipmentChange(queryClient),
   })

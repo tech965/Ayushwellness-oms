@@ -16,12 +16,19 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, IntegrationError, NotFoundError
+from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
 from app.integrations.registry import get_adapter
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.config import ShiprocketConfig
 from app.integrations.shiprocket.normalizer import TRACKING_NORMALIZER, extract_tracking_events
 from app.models.auth import User
-from app.models.enums import FulfillmentStatus, NDRStatus, OrderStatus, ShipmentStatus, ShopifySyncStatus
+from app.models.enums import (
+    FulfillmentStatus,
+    NDRStatus,
+    OrderStatus,
+    ShipmentStatus,
+    ShopifySyncStatus,
+)
 from app.models.integration import IntegrationCode
 from app.models.ndr import NDR
 from app.models.order import Order
@@ -34,6 +41,161 @@ from app.services.inventory_service import InventoryService
 from app.services.ndr_service import NDRService
 from app.services.shipment_service import ShipmentService
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
+
+# The Shiprocket seller-dashboard order-details page. Takes Shiprocket's
+# own numeric order id -- NEVER the OMS order number (`#AWLxxxxx`), which
+# has no relationship to it, and never `shiprocket_shipment_id` either
+# (a different id, for a different Shiprocket object -- `/orders/create/
+# adhoc`'s response has both `order_id` and `shipment_id` as separate
+# fields; this URL takes the former).
+SHIPROCKET_ORDER_DASHBOARD_BASE_URL = "https://app.shiprocket.in/seller/orders/details"
+
+
+def shiprocket_order_url(shipment: Shipment | None) -> str | None:
+    """The exact Shiprocket order-details page for `shipment`, or `None`
+    when the OMS has no reliably-stored Shiprocket order id for it --
+    never fabricated from the OMS order number or any other guess (see
+    the Fulfillment Queue's "Process Shipment"/"Ship Order" actions,
+    which open this URL directly rather than calling `create_shipment_
+    for_order` again -- creating a second Shiprocket order for one this
+    account may already have, e.g. via Shiprocket's own Shopify channel
+    connector, is exactly the duplicate-shipment risk this exists to
+    avoid).
+
+    The id itself: `create_shipment_for_order` persists the FULL
+    `/orders/create/adhoc` response verbatim on `Shipment.raw_
+    external_payload` (see that method) -- that response's `order_id`
+    key is Shiprocket's own numeric order id, distinct from `shipment_
+    id` (which `shiprocket_shipment_id`/`external_id` already store).
+    No other code path in this codebase currently persists that id
+    anywhere else on `Shipment` (confirmed against `entity_sync.
+    _upsert_shipment`, which only ever uses a pulled shipment's own
+    `shiprocket_order_id` transiently, to resolve which OMS `Order` it
+    belongs to, then discards it) -- a `Shipment` pulled in from
+    Shiprocket rather than created via this OMS's own push (i.e. every
+    Shiprocket order picked up by Shiprocket's Shopify channel connector
+    before this OMS ever pushed it) has no `raw_external_payload["order_
+    id"]` to read, and this correctly returns `None` for it rather than
+    guessing.
+    """
+    if shipment is None:
+        return None
+    payload = shipment.raw_external_payload
+    if not payload:
+        return None
+    order_id = payload.get("order_id")
+    if not order_id:
+        return None
+    return f"{SHIPROCKET_ORDER_DASHBOARD_BASE_URL}/{order_id}"
+
+
+# Bounds on the live, on-demand scan `locate_shiprocket_orders` runs when
+# an order has no local `Shipment` row yet (e.g. it reached Shiprocket
+# only via Shiprocket's own Shopify channel connector, and the periodic
+# `shipments` sync -- see `app.tasks.sync_tasks._SCHEDULED_SYNC_ENTITIES`
+# -- hasn't caught up to it yet). This is a synchronous, request-bound
+# operation, not a background crawl, so both the number of `/shipments`
+# pages fetched and the number of candidate records actually resolved
+# (each of which can cost one live `GET /orders/show/{id}` call -- see
+# `entity_sync._upsert_shipment`) must stay small enough to finish inside
+# one HTTP request. A locate attempt that exhausts these bounds without a
+# match reports "not found" rather than guessing -- the periodic sync
+# remains the backstop that will eventually resolve it regardless.
+_LOCATE_MAX_PAGES = 2
+_LOCATE_MAX_CANDIDATES = 30
+
+
+async def locate_shiprocket_orders(
+    session: AsyncSession, orders: list[Order]
+) -> dict[uuid.UUID, str | None]:
+    """Resolves each of `orders` to its existing Shiprocket order-details
+    URL -- NEVER creates a Shiprocket order (no `orders/create/adhoc`
+    call anywhere in this function or anything it calls).
+
+    Two steps, in order:
+
+    1. A local-only check: any `orders` that already have a `Shipment`
+       row with a usable `raw_external_payload["order_id"]` (created
+       either by this OMS's own `create_shipment_for_order` push, or by
+       a previous run of the periodic Shiprocket `shipments` sync /
+       a previous call to this same function) resolve immediately, with
+       no Shiprocket API call at all.
+
+    2. For everything still unresolved: a bounded, newest-first live scan
+       of Shiprocket's `/shipments` list (the one confirmed-live list
+       endpoint -- see `ShiprocketAdapter._FETCH_ROUTES`), reusing
+       `entity_sync.ENTITY_UPSERT_HANDLERS["shipments"]` -- the EXACT
+       same matching logic (exact `channel_order_id`/`api_order_id`
+       identity only, see that module's docstring; never a fuzzy match
+       on name/phone/amount) and persistence path the periodic sync
+       itself uses -- run here on-demand instead of waiting for its next
+       scheduled cycle. A genuine match is persisted as a real `Shipment`
+       row (via `ShipmentService.upsert_synced_shipment`, the same as
+       every other sync path), so the id is "exposed/stored... for future
+       use" exactly once, not re-derived on every later click.
+
+    Bounded by `_LOCATE_MAX_PAGES`/`_LOCATE_MAX_CANDIDATES` (see their
+    docstring) -- an order whose match isn't found within that budget
+    resolves to `None` here (never a guess), and stays resolvable by the
+    next periodic sync cycle regardless.
+    """
+    results: dict[uuid.UUID, str | None] = {}
+    pending: dict[uuid.UUID, Order] = {}
+    for order in orders:
+        existing_shipments = await ShipmentRepository(session).list_for_order(order.id)
+        url = next(
+            (u for s in existing_shipments if (u := shiprocket_order_url(s)) is not None), None
+        )
+        if url:
+            results[order.id] = url
+        else:
+            pending[order.id] = order
+
+    if not pending:
+        return results
+
+    adapter = get_adapter(IntegrationCode.SHIPROCKET)
+    if not isinstance(adapter, ShiprocketAdapter):
+        for order_id in pending:
+            results[order_id] = None
+        return results
+
+    since = min(order.order_datetime for order in pending.values())
+    cursor: str | None = None
+    candidates_examined = 0
+    handler = ENTITY_UPSERT_HANDLERS["shipments"]
+
+    try:
+        for _page_num in range(_LOCATE_MAX_PAGES):
+            page = await adapter.fetch_incremental(
+                "shipments", since=since, cursor=cursor, limit=50
+            )
+            for raw in page.nodes:
+                if not pending or candidates_examined >= _LOCATE_MAX_CANDIDATES:
+                    break
+                candidates_examined += 1
+                try:
+                    normalized = adapter.normalize("shipments", raw)
+                    upserted, _created = await handler(session, normalized)
+                except Exception:  # noqa: BLE001 - one bad candidate must not abort the scan
+                    await session.rollback()
+                    continue
+                await session.commit()
+                if upserted.order_id in pending:
+                    results[upserted.order_id] = shiprocket_order_url(upserted)
+                    del pending[upserted.order_id]
+            if not pending or not page.has_more or candidates_examined >= _LOCATE_MAX_CANDIDATES:
+                break
+            cursor = page.next_cursor
+    except IntegrationError:
+        # Couldn't even fetch a page (not configured, auth, network) --
+        # everything still `pending` falls through to "not found" below,
+        # same as a bounded scan that genuinely found nothing.
+        await session.rollback()
+
+    for order_id in pending:
+        results[order_id] = None
+    return results
 
 
 class ShiprocketOperationsService:

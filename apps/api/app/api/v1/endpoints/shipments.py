@@ -15,6 +15,7 @@ from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
 from app.models.order import Order
 from app.models.shipment import Shipment
+from app.repositories.order import OrderRepository
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.response import ApiResponse, PaginatedResponse
 from app.schemas.shipment import (
@@ -27,9 +28,17 @@ from app.schemas.shipment import (
     ShipmentSummaryResponse,
     ShipmentUpdateRequest,
 )
-from app.schemas.shiprocket import ShiprocketAssignAwbRequest
+from app.schemas.shiprocket import (
+    LocateShiprocketOrderRequest,
+    LocateShiprocketOrderResult,
+    ShiprocketAssignAwbRequest,
+)
 from app.services.shipment_service import ShipmentService
-from app.services.shiprocket_service import ShiprocketOperationsService
+from app.services.shiprocket_service import (
+    ShiprocketOperationsService,
+    locate_shiprocket_orders,
+    shiprocket_order_url,
+)
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 router = APIRouter()
@@ -60,6 +69,7 @@ def _to_shipment_queue_row(order: Order, shipment: Shipment | None) -> ShipmentQ
         shopify_sync_status=shipment.shopify_sync_status if shipment else None,
         awb=shipment.awb if shipment else None,
         courier_name=shipment.courier.name if shipment and shipment.courier else None,
+        shiprocket_order_url=shiprocket_order_url(shipment),
     )
 
 
@@ -174,6 +184,61 @@ async def create_shipment(
         actor=current_user, **payload.model_dump()
     )
     return ApiResponse(data=ShipmentResponse.model_validate(shipment), message="Shipment created.")
+
+
+@router.post(
+    "/locate-shiprocket-order",
+    response_model=ApiResponse[list[LocateShiprocketOrderResult]],
+)
+async def locate_shiprocket_order(
+    payload: LocateShiprocketOrderRequest,
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.update")),
+) -> ApiResponse[list[LocateShiprocketOrderResult]]:
+    """Locate an order's EXISTING Shiprocket order.
+
+    "Process Shipment"/"Ship Order" (single-row) and the bulk
+    Fulfillment action both call this before ever opening a Shiprocket
+    order page -- resolves each order's EXISTING Shiprocket order via
+    `locate_shiprocket_orders` (never creates one; see that function's
+    docstring). Gated the same as every other Shiprocket-triggering
+    action here (`shipments.update`) since a genuine match is persisted
+    as a real `Shipment` row, not just read.
+    """
+    orders: list[Order] = []
+    results: list[LocateShiprocketOrderResult] = []
+    for order_id in payload.order_ids:
+        order = await OrderRepository(session).get_by_id(order_id)
+        if order is None:
+            results.append(
+                LocateShiprocketOrderResult(
+                    order_id=order_id, status="error", message="Order not found."
+                )
+            )
+        else:
+            orders.append(order)
+
+    # Captured before the call -- `locate_shiprocket_orders` may roll the
+    # session back (a caught Shiprocket `IntegrationError`), which expires
+    # every attribute on every attached object; a plain `.id` access after
+    # would raise `MissingGreenlet` under `AsyncSession`.
+    order_ids = [order.id for order in orders]
+    resolved = await locate_shiprocket_orders(session, orders)
+    for order_id in order_ids:
+        url = resolved.get(order_id)
+        results.append(
+            LocateShiprocketOrderResult(
+                order_id=order_id,
+                status="found" if url else "not_found",
+                shiprocket_order_url=url,
+                message=(
+                    None
+                    if url
+                    else "Existing Shiprocket order could not be located for this order."
+                ),
+            )
+        )
+    return ApiResponse(data=results)
 
 
 @router.get("/{shipment_id}", response_model=ApiResponse[ShipmentResponse])

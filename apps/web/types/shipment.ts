@@ -111,6 +111,12 @@ export interface ShipmentQueueRow {
   shopify_sync_status: string | null
   awb: string | null
   courier_name: string | null
+  // The real Shiprocket order-details page for this row's shipment --
+  // `null` exactly when `shipment_id` is `null`, or when the OMS has no
+  // reliably-stored Shiprocket order id for it. "Process Shipment"/"Ship
+  // Order" open this directly in a new tab instead of calling any
+  // Shiprocket create-shipment API.
+  shiprocket_order_url: string | null
 }
 
 export interface ShipmentQueueFilters {
@@ -179,4 +185,17 @@ export interface BulkShipOrdersResponse {
   shipped_count: number
   failed_count: number
   results: BulkShipOrderResult[]
+}
+
+/** One order's result from `POST /shipments/locate-shiprocket-order` (or
+ * the Shipment Staff scoped equivalent) -- resolves an order's EXISTING
+ * Shiprocket order, never creates one. "error" means the order itself
+ * couldn't be resolved/authorized, distinct from "not_found" (the order
+ * is fine, but no existing Shiprocket order could be located for it).
+ */
+export interface LocateShiprocketOrderResult {
+  order_id: string
+  status: "found" | "not_found" | "error"
+  shiprocket_order_url: string | null
+  message: string | null
 }

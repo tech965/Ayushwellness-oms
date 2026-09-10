@@ -1,15 +1,11 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import FulfillmentOrdersPage from "@/app/(dashboard)/fulfillment/orders/page"
-import {
-  useBulkShipOrders,
-  useShipmentQueue,
-  useShipOrderFromQueue,
-  useValidateBulkShip,
-} from "@/services/shipment-queue"
+import { toast } from "sonner"
+import { useLocateShiprocketOrders, useShipmentQueue } from "@/services/shipment-queue"
 import { useRetryShopifySync } from "@/services/shipments"
 import { useTeamTelecallers } from "@/services/team"
 
@@ -27,9 +23,7 @@ vi.mock("sonner", () => ({
 
 vi.mock("@/services/shipment-queue", () => ({
   useShipmentQueue: vi.fn(),
-  useShipOrderFromQueue: vi.fn(),
-  useBulkShipOrders: vi.fn(),
-  useValidateBulkShip: vi.fn(),
+  useLocateShiprocketOrders: vi.fn(),
 }))
 
 vi.mock("@/services/shipments", () => ({
@@ -42,26 +36,31 @@ vi.mock("@/services/team", () => ({
 
 const mockedUseShipmentQueue = vi.mocked(useShipmentQueue)
 const mockedUseTeamTelecallers = vi.mocked(useTeamTelecallers)
-const mockedUseShipOrderFromQueue = vi.mocked(useShipOrderFromQueue)
-const mockedUseBulkShipOrders = vi.mocked(useBulkShipOrders)
-const mockedUseValidateBulkShip = vi.mocked(useValidateBulkShip)
+const mockedUseLocateShiprocketOrders = vi.mocked(useLocateShiprocketOrders)
 const mockedUseRetryShopifySync = vi.mocked(useRetryShopifySync)
 
+/** Default: a locate that reports "not found" for whatever ids it's
+ * handed -- individual tests override `mutate` for the found path.
+ */
+function mockLocateHook(
+  impl: (ids: string[], opts?: { onSuccess?: (r: unknown) => void }) => void = (ids, opts) =>
+    opts?.onSuccess?.(
+      ids.map((id) => ({
+        order_id: id,
+        status: "not_found",
+        shiprocket_order_url: null,
+        message: null,
+      }))
+    )
+) {
+  mockedUseLocateShiprocketOrders.mockReturnValue({
+    mutate: vi.fn(impl),
+    isPending: false,
+  } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
+}
+
 function mockShipHooks() {
-  mockedUseShipOrderFromQueue.mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-    variables: undefined,
-  } as unknown as ReturnType<typeof useShipOrderFromQueue>)
-  mockedUseBulkShipOrders.mockReturnValue({
-    mutate: vi.fn(),
-    isPending: false,
-  } as unknown as ReturnType<typeof useBulkShipOrders>)
-  mockedUseValidateBulkShip.mockReturnValue({
-    mutate: vi.fn(),
-    data: undefined,
-    isPending: false,
-  } as unknown as ReturnType<typeof useValidateBulkShip>)
+  mockLocateHook()
   mockedUseRetryShopifySync.mockReturnValue({
     mutate: vi.fn(),
     isPending: false,
@@ -85,6 +84,7 @@ const ROW = {
   shipment_id: null as string | null,
   shipment_status: null as string | null,
   shopify_sync_status: null as string | null,
+  shiprocket_order_url: null as string | null,
   awb: null,
   courier_name: null,
 }
@@ -106,111 +106,218 @@ function mockQueue(data = [ROW]) {
 }
 
 describe("FulfillmentOrdersPage", () => {
-  it("lists orders needing shipment with a Ship Order row action", async () => {
+  let openSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    openSpy = vi.spyOn(window, "open").mockReturnValue(null)
+  })
+
+  afterEach(() => {
+    openSpy.mockRestore()
+    vi.clearAllMocks()
+  })
+
+  it("shows the unavailable message when a live locate finds no existing Shiprocket order", async () => {
     const user = userEvent.setup()
-    const shipMutate = vi.fn()
     mockQueue()
     mockShipHooks()
-    mockedUseShipOrderFromQueue.mockReturnValue({
-      mutate: shipMutate,
-      isPending: false,
-      variables: undefined,
-    } as unknown as ReturnType<typeof useShipOrderFromQueue>)
 
     renderWithProviders(<FulfillmentOrdersPage />)
 
     expect(screen.getByText("Orders Need Shipment")).toBeInTheDocument()
     expect(screen.getByText("Alice")).toBeInTheDocument()
-    expect(screen.getByText("9990000001")).toBeInTheDocument()
-    expect(screen.getByText("Sourabh")).toBeInTheDocument()
     expect(screen.getByText("Ready to Ship")).toBeInTheDocument()
 
-    // No shipment yet -- the row offers to create one directly, no
-    // navigation required.
+    // No stored Shiprocket order id -- clicking triggers a live locate
+    // (never a create-shipment call), and when that also finds nothing
+    // the button says so instead of opening a guessed URL.
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    expect(shipMutate).toHaveBeenCalledWith("order-1", expect.anything())
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(toast.error).toHaveBeenCalledWith(
+      "Shiprocket order link is unavailable for this order.",
+      expect.anything()
+    )
     expect(mockPush).not.toHaveBeenCalled()
   })
 
-  it("hides Ship Order and routes to the shipment processing page once a shipment already exists", async () => {
+  it("opens the real Shiprocket order page when a live locate resolves the id", async () => {
     const user = userEvent.setup()
-    mockQueue([{ ...ROW, shipment_id: "ship-1", shipment_status: "pending" }])
+    mockQueue()
+    mockLocateHook((ids, opts) =>
+      opts?.onSuccess?.(
+        ids.map((id) => ({
+          order_id: id,
+          status: "found",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+          message: null,
+        }))
+      )
+    )
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "_blank",
+      "noopener,noreferrer"
+    )
+  })
+
+  it("opens the real Shiprocket order page directly when the id is already on the row", async () => {
+    const user = userEvent.setup()
+    mockQueue([
+      {
+        ...ROW,
+        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+      },
+    ])
+    mockShipHooks()
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "_blank",
+      "noopener,noreferrer"
+    )
+    expect(mockPush).not.toHaveBeenCalled()
+  })
+
+  it("shows Process Shipment (not Ship Order) once a shipment already exists", async () => {
+    const user = userEvent.setup()
+    mockQueue([
+      {
+        ...ROW,
+        shipment_id: "ship-1",
+        shipment_status: "pending",
+        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+      },
+    ])
     mockShipHooks()
 
     renderWithProviders(<FulfillmentOrdersPage />)
 
     expect(screen.queryByRole("button", { name: /^Ship Order$/i })).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: /^Process Shipment$/i }))
-    expect(mockPush).toHaveBeenCalledWith("/shipments/ship-1")
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "_blank",
+      "noopener,noreferrer"
+    )
+    expect(mockPush).not.toHaveBeenCalled()
   })
 
-  it("selects orders, validates them, and ships only the ready ones", async () => {
+  it("does not open a second tab on a rapid double-click", async () => {
     const user = userEvent.setup()
-    const validateMutate = vi.fn()
-    const bulkShipMutate = vi.fn((_ids, opts) => {
-      opts.onSuccess({
-        shipped_count: 1,
-        failed_count: 0,
-        results: [{ order_id: "order-1", success: true, message: null, shipment_id: "ship-9" }],
-      })
-    })
-    mockQueue()
+    mockQueue([
+      {
+        ...ROW,
+        shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+      },
+    ])
     mockShipHooks()
-    mockedUseValidateBulkShip.mockReturnValue({
-      mutate: validateMutate,
-      data: [{ order_id: "order-1", ready: true, reason: null }],
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    const button = screen.getByRole("button", { name: /^Ship Order$/i })
+    await user.click(button)
+    await user.click(button)
+
+    expect(openSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it("bulk action locates every selected order and never calls a create-shipment API", async () => {
+    const user = userEvent.setup()
+    const locateMutate = vi.fn((ids: string[], opts?: { onSuccess?: (r: unknown) => void }) =>
+      opts?.onSuccess?.(
+        ids.map((id) => ({
+          order_id: id,
+          status: "found",
+          shiprocket_order_url: `https://app.shiprocket.in/seller/orders/details/${id}`,
+          message: null,
+        }))
+      )
+    )
+    mockQueue()
+    mockedUseLocateShiprocketOrders.mockReturnValue({
+      mutate: locateMutate,
+      data: [
+        {
+          order_id: "order-1",
+          status: "found",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/order-1",
+          message: null,
+        },
+      ],
       isPending: false,
-    } as unknown as ReturnType<typeof useValidateBulkShip>)
-    mockedUseBulkShipOrders.mockReturnValue({
-      mutate: bulkShipMutate,
+    } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
       isPending: false,
-    } as unknown as ReturnType<typeof useBulkShipOrders>)
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
 
     renderWithProviders(<FulfillmentOrdersPage />)
 
     const checkboxes = screen.getAllByRole("checkbox")
     await user.click(checkboxes[1])
-
     expect(screen.getByText("Selected 1 orders")).toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: /^Create Shipments$/i }))
+
+    await user.click(screen.getByRole("button", { name: /^Open in Shiprocket$/i }))
 
     const dialog = screen.getByRole("alertdialog")
-    expect(validateMutate).toHaveBeenCalledWith(["order-1"])
-    await user.click(within(dialog).getByRole("button", { name: /^Create Shipments$/i }))
-
-    expect(bulkShipMutate).toHaveBeenCalledWith(["order-1"], expect.anything())
+    expect(locateMutate).toHaveBeenCalledWith(["order-1"])
+    // "Open All Found" opens each resolved order page -- and there is no
+    // "Create Shipments" action anywhere in this dialog anymore.
+    expect(within(dialog).queryByRole("button", { name: /create shipment/i })).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole("button", { name: /^Open All Found/i }))
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://app.shiprocket.in/seller/orders/details/order-1",
+      "_blank",
+      "noopener,noreferrer"
+    )
   })
 
-  it("excludes not-ready orders from the bulk ship call and shows the reason", async () => {
+  it("bulk dialog reports orders whose Shiprocket order could not be located", async () => {
     const user = userEvent.setup()
     mockQueue([ROW, { ...ROW, order_id: "order-2", order_number: "OMS-0002" }])
-    mockShipHooks()
-    mockedUseValidateBulkShip.mockReturnValue({
+    mockedUseLocateShiprocketOrders.mockReturnValue({
       mutate: vi.fn(),
       data: [
-        { order_id: "order-1", ready: true, reason: null },
-        { order_id: "order-2", ready: false, reason: "Order has no shipping address on file." },
+        {
+          order_id: "order-1",
+          status: "found",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/order-1",
+          message: null,
+        },
+        {
+          order_id: "order-2",
+          status: "not_found",
+          shiprocket_order_url: null,
+          message: "Existing Shiprocket order could not be located for this order.",
+        },
       ],
       isPending: false,
-    } as unknown as ReturnType<typeof useValidateBulkShip>)
-    const bulkShipMutate = vi.fn()
-    mockedUseBulkShipOrders.mockReturnValue({
-      mutate: bulkShipMutate,
+    } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
       isPending: false,
-    } as unknown as ReturnType<typeof useBulkShipOrders>)
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
 
     renderWithProviders(<FulfillmentOrdersPage />)
 
     const checkboxes = screen.getAllByRole("checkbox")
     await user.click(checkboxes[0]) // select-all header checkbox
-    await user.click(screen.getByRole("button", { name: /^Create Shipments$/i }))
+    await user.click(screen.getByRole("button", { name: /^Open in Shiprocket$/i }))
 
     const dialog = screen.getByRole("alertdialog")
-    expect(within(dialog).getByText(/no shipping address on file/i)).toBeInTheDocument()
-    const shipButton = within(dialog).getByRole("button", { name: /^Ship 1 Ready Order$/i })
-    await user.click(shipButton)
-
-    expect(bulkShipMutate).toHaveBeenCalledWith(["order-1"], expect.anything())
+    expect(within(dialog).getByText(/verify manually in Shiprocket/i)).toBeInTheDocument()
+    expect(within(dialog).getByText("OMS-0002")).toBeInTheDocument()
   })
 
   it("does not show the bulk toolbar when nothing is selected", () => {

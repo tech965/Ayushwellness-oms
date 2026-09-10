@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { toast } from "sonner"
+import { ExternalLink } from "lucide-react"
 
 import {
   AlertDialog,
@@ -13,144 +13,137 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
-import { getApiErrorMessage } from "@/lib/api-client"
-import { formatMoney } from "@/lib/format"
-import { useBulkShipOrders, useValidateBulkShip } from "@/services/shipment-queue"
+import { useLocateShiprocketOrders } from "@/services/shipment-queue"
 
 export interface BulkShipRow {
   id: string
   order_number: string
-  payment_type: string
-  total_amount: string
 }
 
 interface BulkShipDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   rows: BulkShipRow[]
-  /** Called once processing finishes (whether or not the dialog is
-   * closed programmatically) so the caller can clear its selection —
-   * spec: "After successful processing: clear successful rows from
-   * selection." Simplified to clearing the whole selection once any
-   * shipments were created, matching `useBulkShipOrders`' own existing
-   * queue-page behavior.
+  /** Called once the dialog is closed so the caller can clear its
+   * selection.
    */
   onDone: () => void
 }
 
-/** Shared bulk-ship confirmation flow for both "Orders Need Shipment" and
- * "Confirmed by Telecaller" — reused rather than reimplemented per page,
- * so the two can never drift on validation or execution behavior.
+/** Shared bulk "open in Shiprocket" flow for both "Orders Need Shipment"
+ * and "Confirmed by Telecaller" -- reused rather than reimplemented per
+ * page, so the two can never drift on behavior.
  *
- * Two-step, matching spec exactly:
- *   1. On open, dry-run validates every selected order (`POST /orders/
- *      bulk-ship/validate` — reuses `ShiprocketOperationsService.
- *      _check_shippable`, the SAME rule `create_shipment_for_order`
- *      itself enforces; never a second, looser copy of it) and shows
- *      ready/not-ready counts with per-order reasons. Nothing is created
- *      yet at this point.
- *   2. Only the READY subset is actually shipped (`POST /orders/
- *      bulk-ship`, the existing bulk endpoint) — never blindly every
- *      selected row. One order's failure during execution never blocks
- *      or rolls back the others (existing endpoint behavior); the result
- *      toast reports the final shipped/failed counts.
+ * NEVER calls a Shiprocket create-shipment API (no `orders/create/adhoc`
+ * anywhere in this path) -- the same rule `ShipmentActionCell`'s
+ * single-row "Process Shipment"/"Ship Order" actions follow, and for the
+ * identical reason: Shiprocket may already have an order for one of
+ * these (e.g. via its own Shopify channel connector), so creating one
+ * here risked a real duplicate shipment.
+ *
+ * On open, resolves every selected order's EXISTING Shiprocket order via
+ * `POST /shipments/locate-shiprocket-order` (see
+ * `app.services.shiprocket_service.locate_shiprocket_orders` -- exact
+ * identifier matching only, never a guess). Each "Open" click is its own
+ * direct user gesture -- opening every found tab automatically the
+ * moment the (asynchronous) locate response arrives would be blocked by
+ * most browsers' popup blockers, so tabs only ever open from a real
+ * click here (either one row's "Open" button, or "Open All Found",
+ * which fires its `window.open` calls synchronously from that same
+ * click, after the results are already on screen).
  */
 export function BulkShipDialog({ open, onOpenChange, rows, onDone }: BulkShipDialogProps) {
-  const validate = useValidateBulkShip()
-  const bulkShip = useBulkShipOrders()
+  const locate = useLocateShiprocketOrders()
   const orderIds = React.useMemo(() => rows.map((r) => r.id), [rows])
+  const rowsByOrderId = React.useMemo(() => new Map(rows.map((r) => [r.id, r])), [rows])
 
   React.useEffect(() => {
     if (open && orderIds.length > 0) {
-      validate.mutate(orderIds)
+      locate.mutate(orderIds)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  const results = validate.data
-  const readyIds = React.useMemo(
-    () => new Set((results ?? []).filter((r) => r.ready).map((r) => r.order_id)),
-    [results]
-  )
-  const notReady = (results ?? []).filter((r) => !r.ready)
-  const readyRows = rows.filter((r) => readyIds.has(r.id))
-  const rowsByOrderId = new Map(rows.map((r) => [r.id, r]))
+  const results = locate.data ?? []
+  const found = results.filter((r) => r.status === "found")
+  const notFound = results.filter((r) => r.status !== "found")
+  const hasResults = locate.data !== undefined
+  const isLoading = locate.isPending
 
-  const codCount = readyRows.filter((r) => r.payment_type === "cod").length
-  const prepaidCount = readyRows.filter((r) => r.payment_type === "prepaid").length
-  const totalValue = readyRows.reduce((sum, r) => sum + Number(r.total_amount || 0), 0)
+  function openOne(url: string) {
+    window.open(url, "_blank", "noopener,noreferrer")
+  }
+
+  function openAllFound() {
+    for (const r of found) {
+      if (r.shiprocket_order_url) openOne(r.shiprocket_order_url)
+    }
+  }
 
   function handleClose(nextOpen: boolean) {
-    if (!bulkShip.isPending) onOpenChange(nextOpen)
+    onOpenChange(nextOpen)
+    if (!nextOpen) onDone()
   }
-
-  function handleShip() {
-    bulkShip.mutate(Array.from(readyIds), {
-      onSuccess: (result) => {
-        if (result.failed_count === 0) {
-          toast.success(`${result.shipped_count} shipment(s) created via Shiprocket.`)
-        } else {
-          toast.warning(
-            `${result.shipped_count} shipped, ${result.failed_count} could not be shipped.`
-          )
-        }
-        onOpenChange(false)
-        onDone()
-      },
-      onError: (error) => toast.error(getApiErrorMessage(error)),
-    })
-  }
-
-  const isValidating = validate.isPending
-  const hasValidated = results !== undefined
 
   return (
     <AlertDialog open={open} onOpenChange={handleClose}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            {hasValidated && notReady.length > 0
-              ? `${rows.length} selected — ${readyRows.length} ready, ${notReady.length} cannot be shipped`
-              : `Create shipments for ${rows.length} selected orders?`}
+            {hasResults
+              ? `${found.length} of ${rows.length} selected orders found in Shiprocket`
+              : `Locate ${rows.length} selected orders in Shiprocket`}
           </AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="flex flex-col gap-3 text-left">
-              {isValidating ? (
-                <span>Checking stock, address, and confirmation status for each order…</span>
+              {isLoading ? (
+                <span>Checking Shiprocket for each selected order…</span>
               ) : (
                 <>
-                  <div className="grid grid-cols-3 gap-2 text-sm">
-                    <div>
-                      <div className="text-muted-foreground text-xs">COD</div>
-                      <div className="font-medium">{codCount}</div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground text-xs">Prepaid</div>
-                      <div className="font-medium">{prepaidCount}</div>
-                    </div>
-                    <div>
-                      <div className="text-muted-foreground text-xs">Total value</div>
-                      <div className="font-medium">{formatMoney(totalValue)}</div>
-                    </div>
-                  </div>
                   <span>
-                    Creates a Shiprocket shipment for each ready order and syncs tracking to
-                    Shopify once assigned. You still assign AWB/request pickup per shipment
-                    afterward where needed.
+                    Opens each order&apos;s EXISTING Shiprocket order page in a new tab -- never
+                    creates a new one. Ship it from within Shiprocket as usual.
                   </span>
-                  {notReady.length > 0 && (
+                  {found.length > 0 && (
+                    <div className="border-border rounded-md border p-2">
+                      <p className="mb-1 text-xs font-semibold">Found — click to open:</p>
+                      <ul className="flex flex-col gap-1 text-xs">
+                        {found.map((r) => (
+                          <li
+                            key={r.order_id}
+                            className="flex items-center justify-between gap-2"
+                          >
+                            <span className="font-medium">
+                              {rowsByOrderId.get(r.order_id)?.order_number ?? r.order_id}
+                            </span>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2"
+                              onClick={() =>
+                                r.shiprocket_order_url && openOne(r.shiprocket_order_url)
+                              }
+                            >
+                              <ExternalLink className="size-3" />
+                              Open
+                            </Button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {notFound.length > 0 && (
                     <div className="border-border rounded-md border p-2">
                       <p className="mb-1 text-xs font-semibold">
-                        Not ready — excluded automatically:
+                        Could not be located — verify manually in Shiprocket:
                       </p>
                       <ul className="flex flex-col gap-0.5 text-xs">
-                        {notReady.map((r) => (
+                        {notFound.map((r) => (
                           <li key={r.order_id}>
                             <span className="font-medium">
                               {rowsByOrderId.get(r.order_id)?.order_number ?? r.order_id}
                             </span>
-                            {": "}
-                            {r.reason}
+                            {r.message ? `: ${r.message}` : null}
                           </li>
                         ))}
                       </ul>
@@ -162,16 +155,9 @@ export function BulkShipDialog({ open, onOpenChange, rows, onDone }: BulkShipDia
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel disabled={bulkShip.isPending}>Cancel</AlertDialogCancel>
-          <Button
-            onClick={handleShip}
-            disabled={isValidating || readyRows.length === 0 || bulkShip.isPending}
-          >
-            {bulkShip.isPending
-              ? "Shipping..."
-              : notReady.length > 0
-                ? `Ship ${readyRows.length} Ready Order${readyRows.length === 1 ? "" : "s"}`
-                : "Create Shipments"}
+          <AlertDialogCancel>Close</AlertDialogCancel>
+          <Button onClick={openAllFound} disabled={isLoading || found.length === 0}>
+            Open All Found ({found.length})
           </Button>
         </AlertDialogFooter>
       </AlertDialogContent>

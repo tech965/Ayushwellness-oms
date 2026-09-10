@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { useRouter } from "next/navigation"
+import { ExternalLink } from "lucide-react"
 import { toast } from "sonner"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
@@ -22,7 +22,7 @@ import {
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import { useMyConfirmedOrders, useShipMyConfirmedOrder } from "@/services/shipment-staff"
+import { useLocateShiprocketOrdersForMyScope, useMyConfirmedOrders } from "@/services/shipment-staff"
 import { PAYMENT_TYPE_OPTIONS } from "@/types/order"
 import {
   SHIPMENT_STATUS_OPTIONS,
@@ -57,9 +57,55 @@ export default function ShipmentStaffOrdersPage() {
 }
 
 function ShipmentStaffOrdersContent() {
-  const router = useRouter()
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
-  const shipOrder = useShipMyConfirmedOrder()
+  const locate = useLocateShiprocketOrdersForMyScope()
+  // Debounces a double-click into one open, not two tabs -- opening the
+  // Shiprocket order page is a read-only `window.open`, never a
+  // mutation, so this is purely a UX guard. Keyed per order id so
+  // opening one row's link never disables another's button.
+  const [openingOrderId, setOpeningOrderId] = React.useState<string | null>(null)
+
+  function showUnavailable(message?: string | null) {
+    toast.error("Shiprocket order link is unavailable for this order.", {
+      description:
+        message ??
+        "The OMS doesn't have a stored Shiprocket order id for this order yet -- it hasn't " +
+          "been pushed to Shiprocket from here, and hasn't been matched back from Shiprocket " +
+          "either.",
+    })
+  }
+
+  function openShiprocketOrder(orderId: string, url: string | null) {
+    if (openingOrderId === orderId || locate.isPending) return
+    if (url) {
+      setOpeningOrderId(orderId)
+      window.open(url, "_blank", "noopener,noreferrer")
+      window.setTimeout(
+        () => setOpeningOrderId((current) => (current === orderId ? null : current)),
+        1000
+      )
+      return
+    }
+    // No locally-known Shiprocket order id yet -- ask the backend to
+    // locate the EXISTING order live before giving up (never creates
+    // one; see `useLocateShiprocketOrdersForMyScope`).
+    setOpeningOrderId(orderId)
+    locate.mutate([orderId], {
+      onSuccess: (results) => {
+        setOpeningOrderId(null)
+        const result = results[0]
+        if (result?.shiprocket_order_url) {
+          window.open(result.shiprocket_order_url, "_blank", "noopener,noreferrer")
+        } else {
+          showUnavailable(result?.message)
+        }
+      },
+      onError: (error) => {
+        setOpeningOrderId(null)
+        toast.error(getApiErrorMessage(error))
+      },
+    })
+  }
 
   const dateRange: DateRangeValue = {
     from: filters.date_from ? new Date(filters.date_from) : undefined,
@@ -125,29 +171,35 @@ function ShipmentStaffOrdersContent() {
     {
       id: "actions",
       header: "",
+      // "Ship Order"/"Process Shipment" open the real Shiprocket
+      // order-details page in a new tab -- never a Shiprocket
+      // create-shipment API call from here (Shiprocket may already have
+      // this order, e.g. via its own Shopify channel connector,
+      // independent of this OMS, so creating one here risked a real
+      // duplicate-shipment bug). See `ShipmentActionCell` (Fulfillment's
+      // equivalent table) for the identical rule -- kept as a small
+      // local duplicate rather than reusing that component directly,
+      // since it also renders a "View" button pointed at `/orders/{id}`,
+      // a page this Shipment Staff role has no permission to open.
       cell: (r) =>
         r.shipment_id ? (
           <Button
             size="sm"
             variant="outline"
-            onClick={() => router.push(`/shipment-staff/shipments/${r.shipment_id}`)}
+            disabled={openingOrderId === r.order_id}
+            onClick={() => openShiprocketOrder(r.order_id, r.shiprocket_order_url)}
           >
-            Process Shipment
+            <ExternalLink className="size-3.5" />
+            {openingOrderId === r.order_id && locate.isPending ? "Checking..." : "Process Shipment"}
           </Button>
         ) : (
           <Button
             size="sm"
-            disabled={shipOrder.isPending && shipOrder.variables === r.order_id}
-            onClick={() => {
-              shipOrder.mutate(r.order_id, {
-                onSuccess: () => toast.success("Shipment created via Shiprocket."),
-                onError: (error) => toast.error(getApiErrorMessage(error)),
-              })
-            }}
+            disabled={openingOrderId === r.order_id}
+            onClick={() => openShiprocketOrder(r.order_id, r.shiprocket_order_url)}
           >
-            {shipOrder.isPending && shipOrder.variables === r.order_id
-              ? "Shipping..."
-              : "Ship Order"}
+            <ExternalLink className="size-3.5" />
+            {openingOrderId === r.order_id && locate.isPending ? "Checking..." : "Ship Order"}
           </Button>
         ),
     },

@@ -46,7 +46,7 @@ from app.schemas.shipment import (
 )
 from app.schemas.shiprocket import ShiprocketShipRequest
 from app.services.order_service import OrderService
-from app.services.shiprocket_service import ShiprocketOperationsService
+from app.services.shiprocket_service import ShiprocketOperationsService, shiprocket_order_url
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 router = APIRouter()
@@ -168,6 +168,7 @@ def _to_list_response(order: Order) -> OrderListResponse:
         tracking_number=shipment.awb if shipment else None,
         shipment_id=shipment.id if shipment else None,
         shopify_sync_status=shipment.shopify_sync_status.value if shipment else None,
+        shiprocket_order_url=shiprocket_order_url(shipment),
         confirmed_by_telecaller_name=(
             order.confirmed_by_telecaller.name if order.confirmed_by_telecaller else None
         ),

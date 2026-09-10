@@ -1,10 +1,13 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import OrderDetailPage from "@/app/(dashboard)/orders/[id]/page"
+import { toast } from "sonner"
 import { useOrder, useOrderTimeline } from "@/services/orders"
 import { usePaymentsForOrder } from "@/services/payments"
+import { useLocateShiprocketOrders } from "@/services/shipment-queue"
 import { useShipmentsForOrder } from "@/services/shipments"
 import { useReturnsForOrder } from "@/services/returns"
 import { useRefundsForOrder } from "@/services/refunds"
@@ -16,15 +19,22 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }))
 
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+}))
+
 vi.mock("@/services/orders", () => ({
   useOrder: vi.fn(),
   useOrderTimeline: vi.fn(),
-  useShipOrderViaShiprocket: () => ({ mutate: vi.fn(), isPending: false }),
   useTransitionOrderStatus: () => ({ mutate: vi.fn(), isPending: false }),
 }))
 
 vi.mock("@/services/payments", () => ({
   usePaymentsForOrder: vi.fn(),
+}))
+
+vi.mock("@/services/shipment-queue", () => ({
+  useLocateShiprocketOrders: vi.fn(),
 }))
 
 vi.mock("@/services/shipments", () => ({
@@ -54,6 +64,24 @@ const mockedUseShipmentsForOrder = vi.mocked(useShipmentsForOrder)
 const mockedUseReturnsForOrder = vi.mocked(useReturnsForOrder)
 const mockedUseRefundsForOrder = vi.mocked(useRefundsForOrder)
 const mockedUseAuth = vi.mocked(useAuth)
+const mockedUseLocateShiprocketOrders = vi.mocked(useLocateShiprocketOrders)
+
+function mockLocate(
+  impl: (ids: string[], opts?: { onSuccess?: (r: unknown) => void }) => void = (ids, opts) =>
+    opts?.onSuccess?.(
+      ids.map((id) => ({
+        order_id: id,
+        status: "not_found",
+        shiprocket_order_url: null,
+        message: null,
+      }))
+    )
+) {
+  mockedUseLocateShiprocketOrders.mockReturnValue({
+    mutate: vi.fn(impl),
+    isPending: false,
+  } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
+}
 
 function emptyListQuery<T>(data: T[] = []) {
   return {
@@ -99,6 +127,7 @@ const BASE_ORDER: OrderDetail = {
 }
 
 function setUpQueries(order: OrderDetail) {
+  mockLocate()
   mockedUseOrder.mockReturnValue({
     isLoading: false,
     isError: false,
@@ -165,5 +194,78 @@ describe("OrderDetailPage — Shopify tags and order note", () => {
 
     expect(screen.getByText("Shopify Tags & Order Note")).toBeInTheDocument()
     expect(screen.getByText("“Leave at the gate”")).toBeInTheDocument()
+  })
+})
+
+describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
+  let openSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    openSpy = vi.spyOn(window, "open").mockReturnValue(null)
+    mockLocate()
+  })
+
+  afterEach(() => {
+    openSpy.mockRestore()
+    vi.clearAllMocks()
+  })
+
+  it("never calls a Shiprocket create-shipment API -- a live locate that finds nothing shows the unavailable message", async () => {
+    const user = userEvent.setup()
+    setUpQueries(BASE_ORDER)
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    const shipButton = screen.getByRole("button", { name: /^Ship Order$/i })
+    await user.click(shipButton)
+
+    // The click triggers a live locate (never a create-shipment call);
+    // when that also finds nothing, the message says so -- never a guess.
+    expect(openSpy).not.toHaveBeenCalled()
+    expect(toast.error).toHaveBeenCalledWith(
+      "Shiprocket order link is unavailable for this order.",
+      expect.anything()
+    )
+  })
+
+  it("opens the real Shiprocket order page when a live locate resolves the id", async () => {
+    const user = userEvent.setup()
+    setUpQueries(BASE_ORDER)
+    mockLocate((ids, opts) =>
+      opts?.onSuccess?.(
+        ids.map((id) => ({
+          order_id: id,
+          status: "found",
+          shiprocket_order_url: "https://app.shiprocket.in/seller/orders/details/1576398335",
+          message: null,
+        }))
+      )
+    )
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://app.shiprocket.in/seller/orders/details/1576398335",
+      "_blank",
+      "noopener,noreferrer"
+    )
+  })
+
+  it("hides Ship Order entirely without shipments.update permission", () => {
+    setUpQueries(BASE_ORDER)
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => false,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.queryByRole("button", { name: /^Ship Order$/i })).not.toBeInTheDocument()
   })
 })

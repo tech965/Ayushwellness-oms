@@ -6,6 +6,7 @@ import type { NDR, NDRListFilters } from "@/types/ndr"
 import type { OrderDetail } from "@/types/order"
 import type { RTO, RTOListFilters } from "@/types/rto"
 import type {
+  LocateShiprocketOrderResult,
   Shipment,
   ShipmentAnalytics,
   ShipmentEvent,
@@ -58,6 +59,28 @@ export function useMyConfirmedOrders(params: ShipmentQueueParams) {
   })
 }
 
+/** Scoped equivalent of `useLocateShiprocketOrders` (`services/shipment-
+ * queue.ts`) -- every id is re-checked server-side against this Shipment
+ * Staff user's own scope (`ShipmentStaffService.get_scoped_order`), and
+ * NEVER creates a Shiprocket order (see `locate_shiprocket_orders` on the
+ * backend). Backs "Process Shipment"/"Ship Order" on this page.
+ */
+export function useLocateShiprocketOrdersForMyScope() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (orderIds: string[]) => {
+      const response = await apiClient.post<ApiResponse<LocateShiprocketOrderResult[]>>(
+        "/shipment-staff/orders/locate-shiprocket-order",
+        { order_ids: orderIds }
+      )
+      return response.data.data ?? []
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["shipment-staff"] })
+    },
+  })
+}
+
 async function fetchMyConfirmedOrder(orderId: string): Promise<OrderDetail> {
   const response = await apiClient.get<ApiResponse<OrderDetail>>(
     `/shipment-staff/orders/${orderId}`
@@ -71,28 +94,6 @@ export function useMyConfirmedOrder(orderId: string) {
     queryKey: ["shipment-staff", "orders", orderId],
     queryFn: () => fetchMyConfirmedOrder(orderId),
     enabled: Boolean(orderId),
-  })
-}
-
-/** Takes the order id at call time (`mutate(orderId)`), not at hook
- * instantiation -- this is used from a table with many rows, and a hook
- * can't be created inside a per-row cell callback (see
- * `useShipOrderFromQueue` in services/shipment-queue.ts for the
- * identical pattern/reasoning on the Fulfillment side).
- */
-export function useShipMyConfirmedOrder() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: async (orderId: string) => {
-      const response = await apiClient.post<ApiResponse<Shipment>>(
-        `/shipment-staff/orders/${orderId}/ship`,
-        {}
-      )
-      return response.data.data
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["shipment-staff"] })
-    },
   })
 }
 

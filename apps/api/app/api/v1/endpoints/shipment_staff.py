@@ -23,11 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.endpoints.ndr import _to_list_response as _to_ndr_list_response
 from app.api.v1.endpoints.rto import _to_list_response as _to_rto_list_response
 from app.api.v1.endpoints.shipments import _to_shipment_queue_row
+from app.core.exceptions import AuthorizationError, NotFoundError
 from app.db.session import get_db
 from app.dependencies.auth import require_permission
 from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
+from app.models.order import Order
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.ndr import NDRListResponse
 from app.schemas.order import OrderDetailResponse
@@ -42,11 +44,14 @@ from app.schemas.shipment import (
 )
 from app.schemas.shipment_staff import ShipmentStaffPerformanceResponse
 from app.schemas.shiprocket import (
+    LocateShiprocketOrderRequest,
+    LocateShiprocketOrderResult,
     ShiprocketAssignAwbRequest,
     ShiprocketNdrReattemptRequest,
     ShiprocketShipRequest,
 )
 from app.services.shipment_staff_service import ShipmentStaffService
+from app.services.shiprocket_service import locate_shiprocket_orders
 
 router = APIRouter()
 
@@ -83,6 +88,58 @@ async def list_my_confirmed_orders(
         data=[_to_shipment_queue_row(order, shipment) for order, shipment in rows],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
+
+
+@router.post(
+    "/orders/locate-shiprocket-order",
+    response_model=ApiResponse[list[LocateShiprocketOrderResult]],
+)
+async def locate_shiprocket_order_for_my_scope(
+    payload: LocateShiprocketOrderRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("shipment_staff.manage")),
+) -> ApiResponse[list[LocateShiprocketOrderResult]]:
+    """Scoped equivalent of `POST /shipments/locate-shiprocket-order` —
+    every id is re-resolved through `ShipmentStaffService.get_scoped_order`
+    (never trusted from the client), so this can only ever locate a
+    Shiprocket order for one of this Shipment Staff user's own scoped
+    orders. See `locate_shiprocket_orders` for the actual (never-creates)
+    resolution logic, shared unchanged with the Fulfillment/Admin queue.
+    """
+    service = ShipmentStaffService(session)
+    orders: list[Order] = []
+    results: list[LocateShiprocketOrderResult] = []
+    for order_id in payload.order_ids:
+        try:
+            orders.append(await service.get_scoped_order(order_id, actor=current_user))
+        except (NotFoundError, AuthorizationError):
+            results.append(
+                LocateShiprocketOrderResult(
+                    order_id=order_id,
+                    status="error",
+                    message="Order not found or not in your scope.",
+                )
+            )
+
+    # Captured before the call -- see the comment in the equivalent
+    # `POST /shipments/locate-shiprocket-order` endpoint.
+    order_ids = [order.id for order in orders]
+    resolved = await locate_shiprocket_orders(session, orders)
+    for order_id in order_ids:
+        url = resolved.get(order_id)
+        results.append(
+            LocateShiprocketOrderResult(
+                order_id=order_id,
+                status="found" if url else "not_found",
+                shiprocket_order_url=url,
+                message=(
+                    None
+                    if url
+                    else "Existing Shiprocket order could not be located for this order."
+                ),
+            )
+        )
+    return ApiResponse(data=results)
 
 
 @router.get("/orders/{order_id}", response_model=ApiResponse[OrderDetailResponse])
