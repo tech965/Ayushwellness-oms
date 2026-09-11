@@ -102,3 +102,21 @@ describe("InventoryPage — product thumbnails", () => {
     expect(screen.getByRole("img", { name: "Herbal Masala" })).toBeInTheDocument()
   })
 })
+
+describe("InventoryPage — Variants column shows the OMS-visible count", () => {
+  it("renders the API's variant_count verbatim, never the raw Shopify SKU count", () => {
+    // Mirrors the canonical Aayush Wellness Herbal Masala product: 9
+    // underlying Shopify SKUs grouped into 3 OMS-visible flavours. The
+    // column must show the already-grouped count from the API -- the
+    // frontend never recomputes or re-derives it from variant data.
+    setProducts([
+      product({ id: "p1", display_title: "Aayush Wellness Herbal Masala", variant_count: 3 }),
+    ])
+    const { container } = renderWithProviders(<InventoryPage />)
+
+    // Columns: image, Product, Vendor, Variants, Total boxes, ...
+    const cells = container.querySelectorAll("tbody tr td")
+    expect(cells[3]).toHaveTextContent("3")
+    expect(cells[3].textContent?.trim()).toBe("3")
+  })
+})

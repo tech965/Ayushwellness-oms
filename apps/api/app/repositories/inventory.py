@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
-from app.models.enums import InventoryMovementType
+from app.models.enums import InventoryMovementType, ProductStatus
 from app.models.inventory import InventoryMovement
 from app.models.product import Product, ProductVariant
 from app.repositories.base import AppendOnlyRepository, BaseRepository
@@ -148,13 +148,23 @@ class InventoryProductRepository(BaseRepository[Product]):
     Variant -> Inventory hierarchy) -- searches by product title/vendor OR
     any of its variants' SKU, and eager-loads variants so a stock summary
     (variant count, total boxes) can be computed per product with no N+1.
+
+    Draft products are excluded: Shopify sync pulls in unpublished
+    duplicates/test products (which often reuse the exact title of a real
+    published product) that have never been reviewed or grouped into
+    `CatalogVariant`s. Surfacing them here would let staff land on an
+    ungrouped duplicate's raw Shopify-variant count instead of the real
+    product's OMS-visible one. Archived products remain visible -- they
+    can still carry real stock to sell down.
     """
 
     model = Product
 
     def search_query(self, *, q: str | None = None):
-        stmt = self._base_query().options(
-            selectinload(Product.variants), selectinload(Product.catalog_variants)
+        stmt = (
+            self._base_query()
+            .where(Product.status != ProductStatus.DRAFT)
+            .options(selectinload(Product.variants), selectinload(Product.catalog_variants))
         )
         if q:
             like = f"%{q}%"

@@ -672,6 +672,150 @@ async def test_catalog_variant_rename_requires_inventory_manage(
     assert refreshed.name == "Ghutka Flavour (Premium)"
 
 
+# --- real-world Aayush Wellness Herbal Masala shape (Gold/Red/Blue Packet,
+# 60/120/180 pouches) + draft-duplicate exclusion --------------------------
+
+
+async def _herbal_masala_gold_red_blue(session: AsyncSession):
+    """The real production shape: 3 flavours x 3 pack sizes = 9
+    ProductVariants, grouped into 3 OMS-visible CatalogVariants named
+    exactly as approved for the canonical active product (Royal Tobacco ->
+    Gold Packet, Gutka -> Red Packet, Paan Masala -> Blue Packet).
+    """
+    product, v = await _product_with_variants(
+        session,
+        key="HMGRB",
+        variants=[
+            {"sku": "AW-HM-RG-60", "available_quantity": 10},
+            {"sku": "AW-HM-RG-120", "available_quantity": 20},
+            {"sku": "AW-HM-RG-180", "available_quantity": 30},
+            {"sku": "AW-HM-CR-60", "available_quantity": 40},
+            {"sku": "AW-HM-CR-120", "available_quantity": 50},
+            {"sku": "AW-HM-CR-180", "available_quantity": 60},
+            {"sku": "AW-HM-PN-60", "available_quantity": 70},
+            {"sku": "AW-HM-PN-120", "available_quantity": 80},
+            {"sku": "AW-HM-PN-180", "available_quantity": 90},
+        ],
+    )
+    by_sku = {x.sku: x for x in v}
+    gold = await _make_catalog_variant(
+        session,
+        product_id=product.id,
+        name="Gold Packet",
+        display_order=0,
+        members=[by_sku["AW-HM-RG-60"], by_sku["AW-HM-RG-120"], by_sku["AW-HM-RG-180"]],
+    )
+    red = await _make_catalog_variant(
+        session,
+        product_id=product.id,
+        name="Red Packet",
+        display_order=1,
+        members=[by_sku["AW-HM-CR-60"], by_sku["AW-HM-CR-120"], by_sku["AW-HM-CR-180"]],
+    )
+    blue = await _make_catalog_variant(
+        session,
+        product_id=product.id,
+        name="Blue Packet",
+        display_order=2,
+        members=[by_sku["AW-HM-PN-60"], by_sku["AW-HM-PN-120"], by_sku["AW-HM-PN-180"]],
+    )
+    return product, by_sku, {"gold": gold, "red": red, "blue": blue}
+
+
+async def test_gold_red_blue_packet_each_contain_their_three_pack_sizes(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _by_sku, _cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read"]
+    ) as client:
+        body = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
+
+    assert body["oms_variant_count"] == 3
+    assert body["underlying_variant_count"] == 9
+    by_name = {g["name"]: g for g in body["oms_variants"]}
+    assert set(by_name) == {"Gold Packet", "Red Packet", "Blue Packet"}
+    assert {u["sku"] for u in by_name["Gold Packet"]["underlying_variants"]} == {
+        "AW-HM-RG-60",
+        "AW-HM-RG-120",
+        "AW-HM-RG-180",
+    }
+    assert {u["sku"] for u in by_name["Red Packet"]["underlying_variants"]} == {
+        "AW-HM-CR-60",
+        "AW-HM-CR-120",
+        "AW-HM-CR-180",
+    }
+    assert {u["sku"] for u in by_name["Blue Packet"]["underlying_variants"]} == {
+        "AW-HM-PN-60",
+        "AW-HM-PN-120",
+        "AW-HM-PN-180",
+    }
+    for g in body["oms_variants"]:
+        assert g["underlying_variant_count"] == 3
+
+
+async def test_gold_red_blue_packet_variant_count_is_three_everywhere(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Pins the exact regression this shape is prone to: 9 raw Shopify
+    SKUs must never surface as 9 (or a partial 6) in either the Overview
+    list or the detail payload -- only the grouped count of 3.
+    """
+    product, _by_sku, _cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read"]
+    ) as client:
+        list_rows = (await client.get("/api/v1/inventory/stock")).json()["data"]
+        detail = (
+            await client.get(f"/api/v1/inventory/products/{product.id}/stock")
+        ).json()["data"]
+
+    by_id = {r["id"]: r for r in list_rows}
+    assert by_id[str(product.id)]["variant_count"] == 3
+    assert detail["oms_variant_count"] == 3
+
+
+async def test_draft_duplicate_product_is_excluded_from_inventory_overview(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Reproduces the real production confusion: an unpublished Shopify
+    duplicate reuses the exact title of the real, grouped product but has
+    never been grouped into CatalogVariants (`catalog_variant_id` is NULL
+    on every row). If it were listed, staff could click into it from the
+    Overview and see its raw, ungrouped SKU count (here 2) instead of the
+    real product's OMS-visible count (3) -- exactly the "6 or 9" symptom
+    reported for Aayush Wellness Herbal Masala. The draft row itself is
+    never modified or grouped; it is only excluded from this listing.
+    """
+    active_product, _by_sku, _cv = await _herbal_masala_gold_red_blue(db_session)
+
+    draft_product, _draft_variants = await _product_with_variants(
+        db_session,
+        key="HMGRB-DRAFT-DUP",
+        variants=[
+            {"sku": "AW-HM-DUP-60", "available_quantity": 1},
+            {"sku": "AW-HM-DUP-120", "available_quantity": 1},
+        ],
+    )
+    draft_product.title = active_product.title
+    draft_product.status = "draft"
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read"]
+    ) as client:
+        rows = (await client.get("/api/v1/inventory/stock")).json()["data"]
+
+    ids = {r["id"] for r in rows}
+    assert str(active_product.id) in ids
+    assert str(draft_product.id) not in ids
+
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[str(active_product.id)]["variant_count"] == 3
+
+
 async def test_catalog_variant_with_no_members_still_returns_empty(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
