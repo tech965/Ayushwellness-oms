@@ -222,62 +222,94 @@ class AnalyticsService:
             prepaid_value,
         ) = (Decimal(v) if v is not None else Decimal("0") for v in order_row)
 
-        total_customers = await self._count_where(
-            Customer, Customer.created_at >= r.date_from, Customer.created_at <= r.date_to
-        )
-        # Same `Customer.created_at` scope as `total_customers` immediately
-        # above (never a second date-filtering rule) -- see
+        # Perf (dashboard load-time audit): these 7 figures span 5
+        # DIFFERENT tables (Customer, Product, Shipment x2 distinct WHERE
+        # columns, NDR, RTO, Return, Refund), so they can't be collapsed
+        # into one conditional-aggregation query the way the same-table
+        # Order cluster above was — but they CAN be collapsed into one
+        # ROUND TRIP: each becomes its own uncorrelated scalar subquery
+        # (`SELECT (SELECT count(*) FROM customers WHERE ...), (SELECT
+        # count(*) FROM products WHERE ...), ...` — no shared FROM, each
+        # subquery independently planned/executed by Postgres), selected
+        # together in one outer statement. Every subquery's WHERE is
+        # byte-for-byte identical to the separate query it replaces, so
+        # every result is identical too — only the number of client<->DB
+        # round trips changes (was 7, now 1). `repeat_customers` just below
+        # is intentionally NOT folded in here: it's a join against a
+        # GROUP BY/HAVING subquery (`_repeat_order_counts_subquery`), not a
+        # plain filtered count, and is already index-backed and cheap (see
+        # `CustomerRepository.count_repeat_customers_in_range`) — folding a
+        # GROUP BY into a scalar-subquery slot risks subtly changing its
+        # semantics for no measurable benefit.
+        def _scalar_count(model, *conditions):  # noqa: ANN001, ANN002, ANN202
+            return select(func.count()).select_from(model).where(*conditions).scalar_subquery()
+
+        other_row = (
+            await self.session.execute(
+                select(
+                    _scalar_count(
+                        Customer,
+                        Customer.created_at >= r.date_from,
+                        Customer.created_at <= r.date_to,
+                    ),
+                    _scalar_count(
+                        Product, Product.created_at >= r.date_from, Product.created_at <= r.date_to
+                    ),
+                    _scalar_count(
+                        Shipment,
+                        Shipment.actual_delivery_date >= r.date_from,
+                        Shipment.actual_delivery_date <= r.date_to,
+                    ),
+                    select(_count_if(Shipment.current_status == ShipmentStatus.IN_TRANSIT))
+                    .where(Shipment.updated_at >= r.date_from, Shipment.updated_at <= r.date_to)
+                    .scalar_subquery(),
+                    select(_count_if(Shipment.current_status == ShipmentStatus.OUT_FOR_DELIVERY))
+                    .where(Shipment.updated_at >= r.date_from, Shipment.updated_at <= r.date_to)
+                    .scalar_subquery(),
+                    select(_count_if(Shipment.delay_status == ShipmentDelayStatus.DELAYED))
+                    .where(Shipment.updated_at >= r.date_from, Shipment.updated_at <= r.date_to)
+                    .scalar_subquery(),
+                    _scalar_count(
+                        NDR,
+                        NDR.created_at >= r.date_from,
+                        NDR.created_at <= r.date_to,
+                        NDR.status == NDRStatus.OPEN,
+                    ),
+                    _scalar_count(
+                        RTO,
+                        RTO.created_at >= r.date_from,
+                        RTO.created_at <= r.date_to,
+                        RTO.status.in_([RTOStatus.INITIATED, RTOStatus.IN_TRANSIT]),
+                    ),
+                    _scalar_count(
+                        Return, Return.created_at >= r.date_from, Return.created_at <= r.date_to
+                    ),
+                    _scalar_count(
+                        Refund, Refund.created_at >= r.date_from, Refund.created_at <= r.date_to
+                    ),
+                )
+            )
+        ).one()
+        (
+            total_customers,
+            total_products,
+            delivered_shipments,
+            in_transit_shipments,
+            out_for_delivery_shipments,
+            delayed_shipments,
+            open_ndr,
+            open_rto,
+            returns,
+            refunds,
+        ) = (Decimal(v) if v is not None else Decimal("0") for v in other_row)
+
+        # Same `Customer.created_at` scope as `total_customers` above
+        # (never a second date-filtering rule) -- see
         # `CustomerRepository.count_repeat_customers_in_range`'s docstring.
         repeat_customers = Decimal(
             await self.customers.count_repeat_customers_in_range(
                 date_from=r.date_from, date_to=r.date_to
             )
-        )
-        total_products = await self._count_where(
-            Product, Product.created_at >= r.date_from, Product.created_at <= r.date_to
-        )
-        delivered_shipments = await self._count_where(
-            Shipment,
-            Shipment.actual_delivery_date >= r.date_from,
-            Shipment.actual_delivery_date <= r.date_to,
-        )
-        # Same collapse as the Order cluster above: `in_transit`/
-        # `out_for_delivery`/`delayed` were 3 separate queries against the
-        # same `Shipment.updated_at` range -- identical conditions, now one
-        # round trip. `delivered_shipments` above is intentionally kept
-        # separate: it filters on a different column (`actual_delivery_date`,
-        # not `updated_at`), so merging it in would change which rows the
-        # query scans, not just how many round trips it takes.
-        shipment_status_row = (
-            await self.session.execute(
-                select(
-                    _count_if(Shipment.current_status == ShipmentStatus.IN_TRANSIT),
-                    _count_if(Shipment.current_status == ShipmentStatus.OUT_FOR_DELIVERY),
-                    _count_if(Shipment.delay_status == ShipmentDelayStatus.DELAYED),
-                ).where(Shipment.updated_at >= r.date_from, Shipment.updated_at <= r.date_to)
-            )
-        ).one()
-        in_transit_shipments, out_for_delivery_shipments, delayed_shipments = (
-            Decimal(v) if v is not None else Decimal("0") for v in shipment_status_row
-        )
-
-        open_ndr = await self._count_where(
-            NDR,
-            NDR.created_at >= r.date_from,
-            NDR.created_at <= r.date_to,
-            NDR.status == NDRStatus.OPEN,
-        )
-        open_rto = await self._count_where(
-            RTO,
-            RTO.created_at >= r.date_from,
-            RTO.created_at <= r.date_to,
-            RTO.status.in_([RTOStatus.INITIATED, RTOStatus.IN_TRANSIT]),
-        )
-        returns = await self._count_where(
-            Return, Return.created_at >= r.date_from, Return.created_at <= r.date_to
-        )
-        refunds = await self._count_where(
-            Refund, Refund.created_at >= r.date_from, Refund.created_at <= r.date_to
         )
 
         return {
@@ -485,24 +517,42 @@ class AnalyticsService:
     ) -> BreakdownsResponse:
         r = resolve_range(date_from, date_to)
 
-        order_status = await self._group_count(
-            Order.status, Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to
-        )
-        payment_type = await self._group_count(
-            Order.payment_type,
-            Order.order_datetime >= r.date_from,
-            Order.order_datetime <= r.date_to,
-        )
-        payment_status = await self._group_count(
-            Order.payment_status,
-            Order.order_datetime >= r.date_from,
-            Order.order_datetime <= r.date_to,
-        )
-        fulfillment_status = await self._group_count(
-            Order.fulfillment_status,
-            Order.order_datetime >= r.date_from,
-            Order.order_datetime <= r.date_to,
-        )
+        # Perf: `order_status`/`payment_type`/`payment_status`/
+        # `fulfillment_status` were 4 separate `GROUP BY` round trips
+        # against the SAME table and SAME `order_datetime` WHERE, each
+        # differing only by which single column it grouped on. A `GROUP BY`
+        # can't group on 4 different columns into 4 independent result
+        # sets in one SQL statement without a dialect-specific feature
+        # (`GROUPING SETS`, unsupported by this suite's SQLite) -- so
+        # instead this fetches the 4 raw columns for every order in range
+        # ONCE (same portability tradeoff `get_orders_timeseries` already
+        # makes for this exact table/date-range shape) and tallies each
+        # dimension in Python. Every (status, count) pair is identical to
+        # before -- the original queries had no `ORDER BY`, so row order
+        # was never guaranteed either.
+        order_rows = (
+            await self.session.execute(
+                select(
+                    Order.status,
+                    Order.payment_type,
+                    Order.payment_status,
+                    Order.fulfillment_status,
+                ).where(Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to)
+            )
+        ).all()
+        order_status_counts: dict[str, int] = defaultdict(int)
+        payment_type_counts: dict[str, int] = defaultdict(int)
+        payment_status_counts: dict[str, int] = defaultdict(int)
+        fulfillment_status_counts: dict[str, int] = defaultdict(int)
+        for status, payment_type_val, payment_status_val, fulfillment_status_val in order_rows:
+            order_status_counts[str(status)] += 1
+            payment_type_counts[str(payment_type_val)] += 1
+            payment_status_counts[str(payment_status_val)] += 1
+            fulfillment_status_counts[str(fulfillment_status_val)] += 1
+
+        def _to_status_counts(counts: dict[str, int]) -> list[StatusCount]:
+            return [StatusCount(status=status, count=count) for status, count in counts.items()]
+
         shipment_status = await self._group_count(
             Shipment.current_status,
             Shipment.updated_at >= r.date_from,
@@ -510,10 +560,10 @@ class AnalyticsService:
         )
 
         return BreakdownsResponse(
-            order_status=order_status,
-            payment_type=payment_type,
-            payment_status=payment_status,
-            fulfillment_status=fulfillment_status,
+            order_status=_to_status_counts(order_status_counts),
+            payment_type=_to_status_counts(payment_type_counts),
+            payment_status=_to_status_counts(payment_status_counts),
+            fulfillment_status=_to_status_counts(fulfillment_status_counts),
             shipment_status=shipment_status,
         )
 
@@ -622,20 +672,26 @@ class AnalyticsService:
         """
         r = resolve_range(date_from, date_to)
 
-        total_returns = await self._count_where(
-            Return, Return.created_at >= r.date_from, Return.created_at <= r.date_to
-        )
-        completed_returns = await self._count_where(
-            Return,
-            Return.created_at >= r.date_from,
-            Return.created_at <= r.date_to,
-            Return.status == ReturnStatus.COMPLETED,
-        )
-        cancelled_returns = await self._count_where(
-            Return,
-            Return.created_at >= r.date_from,
-            Return.created_at <= r.date_to,
-            Return.status == ReturnStatus.CANCELLED,
+        def _count_if(condition):  # noqa: ANN001, ANN202
+            return func.count(case((condition, 1)))
+
+        # Perf: same conditional-aggregation collapse as `_summary_counts`'
+        # Order cluster -- `total_returns`/`completed_returns`/
+        # `cancelled_returns` were 3 separate round trips against the SAME
+        # `Return` rows in this date range (identical WHERE base, only the
+        # extra status condition differed). Every result below is
+        # byte-for-byte the same as the 3 queries it replaces.
+        returns_row = (
+            await self.session.execute(
+                select(
+                    func.count(),
+                    _count_if(Return.status == ReturnStatus.COMPLETED),
+                    _count_if(Return.status == ReturnStatus.CANCELLED),
+                ).where(Return.created_at >= r.date_from, Return.created_at <= r.date_to)
+            )
+        ).one()
+        total_returns, completed_returns, cancelled_returns = (
+            int(v) if v is not None else 0 for v in returns_row
         )
         pending_returns = total_returns - completed_returns - cancelled_returns
         total_orders = await self._count_where(
@@ -645,27 +701,28 @@ class AnalyticsService:
             float(total_returns / total_orders * 100) if total_orders else None
         )
 
-        total_refunds = await self._count_where(
-            Refund, Refund.created_at >= r.date_from, Refund.created_at <= r.date_to
-        )
-        completed_refunds = await self._count_where(
-            Refund,
-            Refund.created_at >= r.date_from,
-            Refund.created_at <= r.date_to,
-            Refund.status == RefundStatus.COMPLETED,
-        )
-        pending_refunds = await self._count_where(
-            Refund,
-            Refund.created_at >= r.date_from,
-            Refund.created_at <= r.date_to,
-            Refund.status.in_([RefundStatus.PENDING, RefundStatus.PROCESSING]),
-        )
-        total_refund_amount = await self._scalar(
-            select(func.coalesce(func.sum(Refund.amount), 0)).where(
-                Refund.created_at >= r.date_from,
-                Refund.created_at <= r.date_to,
-                Refund.status == RefundStatus.COMPLETED,
+        # Same collapse for the 4 `Refund` metrics -- was 4 round trips
+        # against the SAME `Refund` rows in this date range, now 1.
+        refunds_row = (
+            await self.session.execute(
+                select(
+                    func.count(),
+                    _count_if(Refund.status == RefundStatus.COMPLETED),
+                    _count_if(Refund.status.in_([RefundStatus.PENDING, RefundStatus.PROCESSING])),
+                    func.coalesce(
+                        func.sum(case((Refund.status == RefundStatus.COMPLETED, Refund.amount))), 0
+                    ),
+                ).where(Refund.created_at >= r.date_from, Refund.created_at <= r.date_to)
             )
+        ).one()
+        total_refunds, completed_refunds, pending_refunds, total_refund_amount_raw = refunds_row
+        total_refunds = int(total_refunds) if total_refunds is not None else 0
+        completed_refunds = int(completed_refunds) if completed_refunds is not None else 0
+        pending_refunds = int(pending_refunds) if pending_refunds is not None else 0
+        total_refund_amount = (
+            Decimal(total_refund_amount_raw)
+            if total_refund_amount_raw is not None
+            else Decimal("0")
         )
 
         return ReturnsRefundsSummaryResponse(
@@ -684,75 +741,112 @@ class AnalyticsService:
         )
 
     async def get_recent_activity(self, limit: int = 5) -> RecentActivityResponse:
-        orders_stmt = select(Order).order_by(Order.created_at.desc()).limit(limit)
-        orders = (await self.session.execute(orders_stmt)).scalars().all()
+        # Perf: was `select(Order)`/`select(Shipment)`/etc. -- every
+        # mapped column of the full entity (including large/irrelevant
+        # ones like `Order.raw_external_payload`), for rows only ever read
+        # for the 5 fields each response item actually has. Selecting just
+        # those columns returns plain `Row` tuples instead of ORM entities
+        # -- less data over the wire, no entity/identity-map construction
+        # for rows never touched again -- while `ORDER BY ... LIMIT` is
+        # unchanged (still index-backed now by `ix_orders_created_at`/
+        # `ix_shipments_updated_at`/`ix_ndrs_created_at`/`ix_rtos_created_at`/
+        # `ix_payments_created_at`), so the returned rows and their order
+        # are identical to before.
+        orders_stmt = (
+            select(Order.id, Order.order_number, Order.total_amount, Order.status, Order.created_at)
+            .order_by(Order.created_at.desc())
+            .limit(limit)
+        )
+        orders = (await self.session.execute(orders_stmt)).all()
 
-        shipments_stmt = select(Shipment).order_by(Shipment.updated_at.desc()).limit(limit)
-        shipments = (await self.session.execute(shipments_stmt)).scalars().all()
+        shipments_stmt = (
+            select(
+                Shipment.id,
+                Shipment.order_id,
+                Shipment.awb,
+                Shipment.current_status,
+                Shipment.updated_at,
+            )
+            .order_by(Shipment.updated_at.desc())
+            .limit(limit)
+        )
+        shipments = (await self.session.execute(shipments_stmt)).all()
 
-        ndrs_stmt = select(NDR).order_by(NDR.created_at.desc()).limit(limit)
-        ndrs = (await self.session.execute(ndrs_stmt)).scalars().all()
+        ndrs_stmt = (
+            select(NDR.id, NDR.order_id, NDR.status, NDR.reason, NDR.created_at)
+            .order_by(NDR.created_at.desc())
+            .limit(limit)
+        )
+        ndrs = (await self.session.execute(ndrs_stmt)).all()
 
-        rtos_stmt = select(RTO).order_by(RTO.created_at.desc()).limit(limit)
-        rtos = (await self.session.execute(rtos_stmt)).scalars().all()
+        rtos_stmt = (
+            select(RTO.id, RTO.order_id, RTO.status, RTO.reason, RTO.created_at)
+            .order_by(RTO.created_at.desc())
+            .limit(limit)
+        )
+        rtos = (await self.session.execute(rtos_stmt)).all()
 
-        payments_stmt = select(Payment).order_by(Payment.created_at.desc()).limit(limit)
-        payments = (await self.session.execute(payments_stmt)).scalars().all()
+        payments_stmt = (
+            select(Payment.id, Payment.order_id, Payment.amount, Payment.status, Payment.created_at)
+            .order_by(Payment.created_at.desc())
+            .limit(limit)
+        )
+        payments = (await self.session.execute(payments_stmt)).all()
 
         ndr_rto = [
             RecentNdrRto(
-                id=n.id,
-                order_id=n.order_id,
+                id=n_id,
+                order_id=n_order_id,
                 kind="ndr",
-                status=n.status.value,
-                reason=n.reason,
-                created_at=n.created_at,
+                status=n_status.value,
+                reason=n_reason,
+                created_at=n_created_at,
             )
-            for n in ndrs
+            for n_id, n_order_id, n_status, n_reason, n_created_at in ndrs
         ] + [
             RecentNdrRto(
-                id=r.id,
-                order_id=r.order_id,
+                id=r_id,
+                order_id=r_order_id,
                 kind="rto",
-                status=r.status.value,
-                reason=r.reason,
-                created_at=r.created_at,
+                status=r_status.value,
+                reason=r_reason,
+                created_at=r_created_at,
             )
-            for r in rtos
+            for r_id, r_order_id, r_status, r_reason, r_created_at in rtos
         ]
         ndr_rto.sort(key=lambda e: e.created_at, reverse=True)
 
         return RecentActivityResponse(
             recent_orders=[
                 RecentOrder(
-                    id=o.id,
-                    order_number=o.order_number,
-                    total_amount=o.total_amount,
-                    status=o.status.value,
-                    created_at=o.created_at,
+                    id=o_id,
+                    order_number=o_order_number,
+                    total_amount=o_total_amount,
+                    status=o_status.value,
+                    created_at=o_created_at,
                 )
-                for o in orders
+                for o_id, o_order_number, o_total_amount, o_status, o_created_at in orders
             ],
             recent_shipments=[
                 RecentShipment(
-                    id=s.id,
-                    order_id=s.order_id,
-                    awb=s.awb,
-                    current_status=s.current_status.value,
-                    updated_at=s.updated_at,
+                    id=s_id,
+                    order_id=s_order_id,
+                    awb=s_awb,
+                    current_status=s_current_status.value,
+                    updated_at=s_updated_at,
                 )
-                for s in shipments
+                for s_id, s_order_id, s_awb, s_current_status, s_updated_at in shipments
             ],
             recent_ndr_rto=ndr_rto[:limit],
             recent_payments=[
                 RecentPayment(
-                    id=p.id,
-                    order_id=p.order_id,
-                    amount=p.amount,
-                    status=p.status.value,
-                    created_at=p.created_at,
+                    id=p_id,
+                    order_id=p_order_id,
+                    amount=p_amount,
+                    status=p_status.value,
+                    created_at=p_created_at,
                 )
-                for p in payments
+                for p_id, p_order_id, p_amount, p_status, p_created_at in payments
             ],
         )
 
