@@ -38,6 +38,7 @@ from app.api.v1.endpoints import (
     shipment_events,
     shipment_staff,
     shipments,
+    shiprocket_diagnostics,
     supply_intelligence,
     sync,
     sync_jobs,
@@ -105,6 +106,15 @@ api_router.include_router(team.router, prefix="/team", tags=["team"])
 api_router.include_router(telecaller.router, prefix="/telecaller", tags=["telecaller"])
 api_router.include_router(
     shipment_staff.router, prefix="/shipment-staff", tags=["shipment-staff"]
+)
+
+# TEMPORARY -- see app/api/v1/endpoints/shiprocket_diagnostics.py's module
+# docstring for exactly what this is, why it's safe, and how to remove it
+# once the #AWL95498 investigation is closed.
+api_router.include_router(
+    shiprocket_diagnostics.router,
+    prefix="/diagnostics/shiprocket",
+    tags=["diagnostics:shiprocket (temporary)"],
 )
 
 api_router.include_router(
