@@ -3,11 +3,12 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams, useSearchParams } from "next/navigation"
-import { ExternalLink, Mail, MapPin, Phone, PhoneCall, Tag, Truck } from "lucide-react"
+import { ExternalLink, Mail, MapPin, Phone, PhoneCall, RefreshCw, Tag, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { CashfreePaymentCard } from "@/components/orders/cashfree-payment-card"
 import { ProcessShipmentDialog } from "@/components/fulfillment/process-shipment-dialog"
+import { AddressValidationBadge } from "@/components/shared/address-validation-badge"
 import { Breadcrumbs } from "@/components/shared/breadcrumbs"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
@@ -43,6 +44,7 @@ import {
   useOrderTimeline,
   useProcessExistingShipments,
   useTransitionOrderStatus,
+  useValidateOrderAddress,
 } from "@/services/orders"
 import { useShipmentsForOrder } from "@/services/shipments"
 import { ORDER_STATUS_OPTIONS, type OrderAddress, type OrderStatus } from "@/types/order"
@@ -83,6 +85,7 @@ function OrderDetailContent() {
   const refundsQuery = useRefundsForOrder(orderId)
   const transition = useTransitionOrderStatus(orderId)
   const processShipment = useProcessExistingShipments()
+  const validateAddress = useValidateOrderAddress(orderId)
 
   const [nextStatus, setNextStatus] = React.useState<OrderStatus | undefined>(undefined)
   const [dialogOpen, setDialogOpen] = React.useState(false)
@@ -117,6 +120,13 @@ function OrderDetailContent() {
           courier_name: null,
           reason: getApiErrorMessage(error),
         }),
+    })
+  }
+
+  function handleValidateAddress() {
+    validateAddress.mutate(undefined, {
+      onSuccess: () => toast.success("Address validation updated."),
+      onError: (error) => toast.error(getApiErrorMessage(error)),
     })
   }
 
@@ -300,11 +310,41 @@ function OrderDetailContent() {
               </Card>
 
               <Card>
-                <CardHeader>
-                  <CardTitle>Shipping Address</CardTitle>
+                <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <CardTitle>Shipping Address</CardTitle>
+                    <AddressValidationBadge
+                      status={order.shipping_address_validation_status}
+                      score={order.shipping_address_validation_score}
+                      hasAddress={Boolean(order.shipping_address)}
+                    />
+                  </div>
+                  {hasPermission("orders.update") && order.shipping_address && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={validateAddress.isPending}
+                      onClick={handleValidateAddress}
+                    >
+                      <RefreshCw
+                        className={`size-3.5 ${validateAddress.isPending ? "animate-spin" : ""}`}
+                      />
+                      Validate Address
+                    </Button>
+                  )}
                 </CardHeader>
                 <CardContent>
                   <AddressBlock address={order.shipping_address} />
+                  {order.shipping_address && order.shipping_address_validation_reason && (
+                    <p className="text-muted-foreground mt-3 text-xs">
+                      {order.shipping_address_validation_reason}
+                    </p>
+                  )}
+                  {order.shipping_address && order.shipping_address_validated_at && (
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      Last validated {formatDateTime(order.shipping_address_validated_at)}
+                    </p>
+                  )}
                 </CardContent>
               </Card>
             </div>

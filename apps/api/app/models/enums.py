@@ -94,6 +94,23 @@ class ShopifySyncStatus(StrEnum):
     FAILED = "failed"
 
 
+class AddressValidationStatus(StrEnum):
+    """`Order.shipping_address_validation_status` — the normalized result
+    of validating `Order.shipping_address` (see
+    `app.services.address_validation_service`), independent of which
+    provider produced it. `UNKNOWN` covers both "never validated yet" at
+    the row level (the column itself is nullable for that case) and "the
+    provider ran but could not classify the address" — it is NEVER used
+    to mean "assumed valid": a provider failure must never silently
+    become `VALID`.
+    """
+
+    VALID = "valid"
+    AMBIGUOUS = "ambiguous"
+    JUNK = "junk"
+    UNKNOWN = "unknown"
+
+
 class NDRStatus(StrEnum):
     OPEN = "open"
     CUSTOMER_CONTACTED = "customer_contacted"

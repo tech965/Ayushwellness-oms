@@ -125,6 +125,8 @@ def to_assigned_order_response(
         shipping_address=order.shipping_address,
         shipping_address_sync_status=order.shipping_address_sync_status.value,
         shipping_address_sync_error=order.shipping_address_sync_error,
+        shipping_address_validation_status=order.shipping_address_validation_status,
+        shipping_address_validation_score=order.shipping_address_validation_score,
         items=[_to_assigned_order_item_response(item) for item in items] if include_items else [],
         assignment_id=assignment.id if assignment else None,
         assigned_to=assignment.assigned_to if assignment else None,

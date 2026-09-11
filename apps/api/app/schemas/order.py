@@ -7,6 +7,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import (
+    AddressValidationStatus,
     CancellationStatus,
     FulfillmentStatus,
     OrderStatus,
@@ -100,6 +101,16 @@ class OrderResponse(BaseModel):
     shopify_shipment_status: str | None = None
     shipping_address: dict | None
     billing_address: dict | None
+    # Address validation (Shiprocket-style confidence check) -- see
+    # `Order.shipping_address_validation_status` in app/models/order.py.
+    # `shipping_address_validation_status` is `None` for "never
+    # validated yet" (including whenever there's no `shipping_address`
+    # at all) -- the frontend shows this as "Validation pending", never
+    # as any real status.
+    shipping_address_validation_status: AddressValidationStatus | None = None
+    shipping_address_validation_score: int | None = None
+    shipping_address_validation_reason: str | None = None
+    shipping_address_validated_at: datetime | None = None
     source_system: str | None
     # Telecaller attribution for the PENDING->CONFIRMED transition — see
     # `Order.confirmed_by_telecaller_id` in app/models/order.py. `None`

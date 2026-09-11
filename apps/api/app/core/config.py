@@ -164,6 +164,35 @@ class Settings(BaseSettings):
     # a wrong/unset return_url must never break checkout creation.
     CASHFREE_RETURN_URL: str | None = None
 
+    # --- Address Validation ---
+    # Primary/real provider: Google's Address Validation API
+    # (https://developers.google.com/maps/documentation/address-validation).
+    # Setting GOOGLE_ADDRESS_VALIDATION_API_KEY makes this the active
+    # provider — see app.integrations.address_validation.config.
+    # get_address_validation_provider() for the full priority order.
+    # GOOGLE_ADDRESS_VALIDATION_API_URL defaults to Google's real,
+    # documented endpoint; only override it for testing against a stub.
+    GOOGLE_ADDRESS_VALIDATION_API_KEY: str | None = None
+    GOOGLE_ADDRESS_VALIDATION_API_URL: str = (
+        "https://addressvalidation.googleapis.com/v1:validateAddress"
+    )
+    # Secondary provider slot: a generic, configurable HTTP provider
+    # (POSTs each address, expects a JSON {status, score, reason} back —
+    # no specific vendor hardcoded) for a non-Google vendor account.
+    # Never used once GOOGLE_ADDRESS_VALIDATION_API_KEY is set.
+    ADDRESS_VALIDATION_API_URL: str | None = None
+    ADDRESS_VALIDATION_API_KEY: str | None = None
+    # Deterministic, no-credentials fallback (app.integrations.
+    # address_validation.heuristic_provider) — runs only when neither
+    # provider above is configured, so the feature still works with zero
+    # setup (e.g. local development).
+    # How long a stored validation result stays trusted before it's
+    # treated as stale and re-validated on next access, independent of
+    # whether the address itself changed (addresses can become stale for
+    # reasons outside this OMS, e.g. a postal boundary change) — see
+    # `AddressValidationService.is_stale`.
+    ADDRESS_VALIDATION_STALE_DAYS: int = 90
+
     # --- WhatsApp (optional, V2) ---
     WHATSAPP_API_URL: str | None = None
     WHATSAPP_ACCESS_TOKEN: str | None = None

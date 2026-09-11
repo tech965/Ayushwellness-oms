@@ -117,6 +117,14 @@ const ROW = {
   shiprocket_order_id: null as string | null,
   awb: null,
   courier_name: null,
+  shipping_address_validation_status: null as
+    | "valid"
+    | "ambiguous"
+    | "junk"
+    | "unknown"
+    | null,
+  shipping_address_validation_score: null as number | null,
+  shipping_address_validation_reason: null as string | null,
 }
 
 function mockQueue(data = [ROW]) {
@@ -378,5 +386,42 @@ describe("FulfillmentOrdersPage", () => {
     renderWithProviders(<FulfillmentOrdersPage />)
 
     expect(screen.getByText("No confirmed orders awaiting shipment")).toBeInTheDocument()
+  })
+
+  // This is the PRIMARY operational location for address validation --
+  // staff must see a problem here, before clicking "Process Shipment",
+  // without any extra request. Sourced straight off `ShipmentQueueRow`
+  // (already loaded by `useShipmentQueue`), so this must render for
+  // every row with zero additional queue-row calls.
+  it("shows the Address Validation column so staff can spot a bad address before processing shipment", () => {
+    mockQueue([
+      { ...ROW, shipping_address_validation_status: "junk", shipping_address_validation_score: 24 },
+      {
+        ...ROW,
+        order_id: "order-2",
+        order_number: "OMS-0002",
+        shipping_address_validation_status: "valid",
+        shipping_address_validation_score: 95,
+      },
+    ])
+    mockShipHooks()
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    expect(screen.getByText("24%")).toBeInTheDocument()
+    expect(screen.getByText("Junk Address")).toBeInTheDocument()
+    expect(screen.getByText("95%")).toBeInTheDocument()
+    expect(screen.getByText("Valid Address")).toBeInTheDocument()
+  })
+
+  it("shows 'Validation pending' rather than blocking the page when an order has no stored validation yet", () => {
+    mockQueue([
+      { ...ROW, shipping_address_validation_status: null, shipping_address_validation_score: null },
+    ])
+    mockShipHooks()
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    expect(screen.getByText("Validation pending")).toBeInTheDocument()
   })
 })

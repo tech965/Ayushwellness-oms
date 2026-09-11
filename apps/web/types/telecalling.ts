@@ -1,6 +1,6 @@
 /** Mirrors apps/api/app/schemas/telecalling.py. */
 
-import type { OrderStatus } from "./order"
+import type { AddressValidationStatus, OrderStatus } from "./order"
 
 export type TelecallingStatus =
   | "not_called"
@@ -103,6 +103,8 @@ export interface AssignedOrder {
   // created order with no Shopify order behind it.
   shipping_address_sync_status: string | null
   shipping_address_sync_error: string | null
+  shipping_address_validation_status: AddressValidationStatus | null
+  shipping_address_validation_score: number | null
   // Only populated on the single-order detail response, never the list
   // (see the backend's `include_items`) — `[]` on a list row.
   items: AssignedOrderItem[]

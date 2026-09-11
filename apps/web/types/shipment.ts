@@ -1,5 +1,7 @@
 // Mirrors app/schemas/shipment.py
 
+import type { AddressValidationStatus } from "./order"
+
 export type ShipmentStatus =
   | "pending"
   | "picked_up"
@@ -119,6 +121,14 @@ export interface ShipmentQueueRow {
   // and copy this id to the clipboard, instead of calling any Shiprocket
   // create-shipment API.
   shiprocket_order_id: string | null
+  // Address validation (Shiprocket-style confidence check) -- sourced
+  // directly from this same row's `Order`, so it costs zero extra
+  // queries here. `null` means "never validated yet" (shown as
+  // "Validation pending"), not omitted whenever a `shipping_address`
+  // exists but hasn't been checked.
+  shipping_address_validation_status: AddressValidationStatus | null
+  shipping_address_validation_score: number | null
+  shipping_address_validation_reason: string | null
 }
 
 export interface ShipmentQueueFilters {

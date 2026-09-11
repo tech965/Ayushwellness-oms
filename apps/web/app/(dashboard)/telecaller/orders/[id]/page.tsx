@@ -14,6 +14,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 
+import { AddressValidationBadge } from "@/components/shared/address-validation-badge"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
@@ -330,6 +331,12 @@ export default function TelecallerOrderDetailPage() {
                             .join(", ")
                         : "—"}
                     </p>
+                    <AddressValidationBadge
+                      status={order.shipping_address_validation_status}
+                      score={order.shipping_address_validation_score}
+                      hasAddress={Boolean(order.shipping_address)}
+                      className="mt-1"
+                    />
                     {order.shipping_address_sync_status === "failed" && (
                       <p className="text-destructive mt-1 text-xs">
                         Shopify sync failed{order.shipping_address_sync_error ? ":" : "."}{" "}

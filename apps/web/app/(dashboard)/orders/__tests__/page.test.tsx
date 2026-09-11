@@ -264,6 +264,55 @@ describe("OrdersPage", () => {
     expect(screen.getAllByText("—").length).toBeGreaterThan(0)
   })
 
+  it("shows the Address Validation column status for each row, sourced from already-loaded order data", () => {
+    const order: Order = {
+      id: "3",
+      order_number: "OMS-ADDR-1",
+      shopify_order_id: "1003",
+      customer_id: null,
+      order_datetime: "2026-01-01T00:00:00Z",
+      currency: "INR",
+      subtotal: "100.00",
+      discount_amount: "0.00",
+      tax_amount: "0.00",
+      shipping_charge: "0.00",
+      total_amount: "100.00",
+      payment_type: "prepaid",
+      payment_status: "paid",
+      status: "confirmed",
+      fulfillment_status: "unfulfilled",
+      cancellation_status: "none",
+      notes: null,
+      shopify_tags: null,
+      shopify_order_note: null,
+      shopify_shipment_status: null,
+      shipping_address: null,
+      billing_address: null,
+      source_system: "shopify",
+      confirmed_by_telecaller_id: null,
+      confirmed_at: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      shipping_address_validation_status: "junk",
+      shipping_address_validation_score: 24,
+    }
+
+    mockedUseOrders.mockReturnValue(
+      baseQueryResult({
+        data: {
+          success: true,
+          message: "Success",
+          data: [order],
+          meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+        },
+      })
+    )
+    renderWithProviders(<OrdersPage />)
+
+    expect(screen.getByText("24%")).toBeInTheDocument()
+    expect(screen.getByText("Junk Address")).toBeInTheDocument()
+  })
+
   // Regression coverage for the reported "Pending filter doesn't
   // correctly filter" bug: a dashboard drill-down link (e.g. from the
   // Order Status breakdown or the "Pending Orders" KPI) lands on

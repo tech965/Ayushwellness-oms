@@ -32,6 +32,7 @@ from app.repositories.product import ProductVariantRepository
 from app.repositories.shipment import ShipmentRepository
 from app.schemas.common import PageParams, SortParams
 from app.schemas.order import OrderItemCreateRequest
+from app.services.address_validation_service import AddressValidationService
 from app.services.audit_service import AuditService
 from app.services.export_service import ExportService
 
@@ -536,6 +537,14 @@ class OrderService:
         )
         await self.session.commit()
 
+        # Address validation -- the edited address always differs from
+        # whatever was last validated (a hash mismatch, per
+        # `AddressValidationService.needs_validation`), so this always
+        # actually re-validates here, never a no-op. Runs before the
+        # Shopify push below so `AuditLog`/`OrderEvent` order matches the
+        # order these actually happen in.
+        await AddressValidationService(self.session).validate_order(order)
+
         # Local import: avoids a module-load-order dependency between
         # `order_service` and `shopify_fulfillment_service` for the one
         # code path that needs it, matching this codebase's existing
@@ -710,4 +719,14 @@ class OrderService:
         )
 
         await self.session.commit()
+
+        # Address validation (spec: Shiprocket-style confidence check) --
+        # a safe no-op whenever this sync didn't actually change
+        # `shipping_address` from what was last validated (see
+        # `AddressValidationService.needs_validation`), so a routine
+        # resync of an unchanged address never re-calls the provider.
+        # Never raises -- a provider failure is recorded as `UNKNOWN`,
+        # never allowed to fail this already-committed sync.
+        await AddressValidationService(self.session).validate_order(order)
+
         return await self.get_order(order.id), created

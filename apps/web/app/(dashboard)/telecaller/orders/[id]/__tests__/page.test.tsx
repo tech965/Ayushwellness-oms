@@ -434,4 +434,50 @@ describe("TelecallerOrderDetailPage", () => {
       expect.stringContaining("Shopify sync failed")
     )
   })
+
+  it("shows the Address Validation badge for the order's shipping address", () => {
+    mockedUseMyOrder.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: {
+        ...ORDER,
+        shipping_address_validation_status: "junk",
+        shipping_address_validation_score: 24,
+      },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useMyOrder>)
+    mockedUseCallHistory.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: CALL_HISTORY,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useCallHistory>)
+    mockedUseScheduleFollowUp.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useScheduleFollowUp>)
+    mockedUseConfirmOrder.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useConfirmOrder>)
+    mockedUseUnconfirmOrder.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUnconfirmOrder>)
+    mockedUseUpdateOrderAddress.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateOrderAddress>)
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("24%")).toBeInTheDocument()
+    expect(screen.getByText("Junk Address")).toBeInTheDocument()
+  })
 })

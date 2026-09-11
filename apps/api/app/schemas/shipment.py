@@ -7,6 +7,7 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import (
+    AddressValidationStatus,
     NDRStatus,
     PaymentStatus,
     PaymentType,
@@ -136,6 +137,17 @@ class ShipmentQueueRowResponse(BaseModel):
     # copy this id to the clipboard, instead of calling any Shiprocket
     # create-shipment API.
     shiprocket_order_id: str | None = None
+    # Address validation (Shiprocket-style confidence check) -- see
+    # `Order.shipping_address_validation_status` in app/models/order.py.
+    # Sourced directly from the SAME `Order` row this whole query already
+    # joins in (`OrderRepository.shipment_queue_query`), so showing this
+    # on the Fulfillment Queue costs zero extra queries per row -- never
+    # `None` when a `shipping_address` exists but hasn't been validated
+    # yet; that case is `status=None` (shown as "Validation pending"),
+    # not omitted.
+    shipping_address_validation_status: AddressValidationStatus | None = None
+    shipping_address_validation_score: int | None = None
+    shipping_address_validation_reason: str | None = None
 
 
 class ShipmentSummaryResponse(BaseModel):

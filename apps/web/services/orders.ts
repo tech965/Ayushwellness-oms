@@ -135,6 +135,33 @@ export function useOrderTimeline(id: string) {
   })
 }
 
+/** Explicitly (re)validates this order's shipping address right now --
+ * the Order Details page's "Validate Address" action, and the one way
+ * an order that predates this feature (`shipping_address_validation_
+ * status` still `null`, shown as "Validation pending") gets a real
+ * result without waiting for its address to next change. Deliberately
+ * NOT called automatically by any list/queue page -- see `POST
+ * /orders/{id}/validate-address`'s backend docstring for why validation
+ * must never happen as a side effect of a page load.
+ */
+export function useValidateOrderAddress(id: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async () => {
+      const response = await apiClient.post<ApiResponse<OrderDetail>>(
+        `/orders/${id}/validate-address`
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["orders", id] })
+      void queryClient.invalidateQueries({ queryKey: ["orders"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipment-staff"] })
+    },
+  })
+}
+
 export function useTransitionOrderStatus(id: string) {
   const queryClient = useQueryClient()
   return useMutation({

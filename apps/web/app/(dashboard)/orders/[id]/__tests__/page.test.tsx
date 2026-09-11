@@ -9,6 +9,7 @@ import {
   useOrder,
   useOrderTimeline,
   useProcessExistingShipments,
+  useValidateOrderAddress,
 } from "@/services/orders"
 import { usePaymentsForOrder } from "@/services/payments"
 import { useShipmentsForOrder } from "@/services/shipments"
@@ -32,6 +33,7 @@ vi.mock("@/services/orders", () => ({
   useOrderTimeline: vi.fn(),
   useTransitionOrderStatus: () => ({ mutate: vi.fn(), isPending: false }),
   useProcessExistingShipments: vi.fn(),
+  useValidateOrderAddress: vi.fn(),
 }))
 
 vi.mock("@/services/payments", () => ({
@@ -66,6 +68,7 @@ const mockedUseReturnsForOrder = vi.mocked(useReturnsForOrder)
 const mockedUseRefundsForOrder = vi.mocked(useRefundsForOrder)
 const mockedUseAuth = vi.mocked(useAuth)
 const mockedUseProcessExistingShipments = vi.mocked(useProcessExistingShipments)
+const mockedUseValidateOrderAddress = vi.mocked(useValidateOrderAddress)
 
 type ProcessOpts = {
   onSuccess?: (r: {
@@ -151,6 +154,10 @@ const BASE_ORDER: OrderDetail = {
 
 function setUpQueries(order: OrderDetail) {
   mockProcessShipments()
+  mockedUseValidateOrderAddress.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useValidateOrderAddress>)
   mockedUseOrder.mockReturnValue({
     isLoading: false,
     isError: false,
@@ -349,5 +356,142 @@ describe("OrderDetailPage — Ship Order (no shipment yet)", () => {
     renderWithProviders(<OrderDetailPage />)
 
     expect(screen.queryByRole("button", { name: /^Ship Order$/i })).not.toBeInTheDocument()
+  })
+})
+
+const SAMPLE_ADDRESS = {
+  contact_name: "Jane Doe",
+  line1: "273 House No",
+  line2: null,
+  city: "Mandsaur",
+  state: "Madhya Pradesh",
+  pin_code: "458556",
+  country: "India",
+  contact_phone: null,
+  is_default: false,
+}
+
+describe("OrderDetailPage — Address Validation card", () => {
+  afterEach(() => vi.clearAllMocks())
+
+  it("shows a Valid Address result with score, reason, and validated-at", () => {
+    setUpQueries({
+      ...BASE_ORDER,
+      shipping_address: SAMPLE_ADDRESS,
+      shipping_address_validation_status: "valid",
+      shipping_address_validation_score: 95,
+      shipping_address_validation_reason: "Address looks complete.",
+      shipping_address_validated_at: "2026-08-01T12:00:00Z",
+    })
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.getByText("95%")).toBeInTheDocument()
+    expect(screen.getByText("Valid Address")).toBeInTheDocument()
+    expect(screen.getByText("Address looks complete.")).toBeInTheDocument()
+    expect(screen.getByText(/Last validated/i)).toBeInTheDocument()
+  })
+
+  it("shows an Ambiguous Address result", () => {
+    setUpQueries({
+      ...BASE_ORDER,
+      shipping_address: { ...SAMPLE_ADDRESS, city: "", state: null },
+      shipping_address_validation_status: "ambiguous",
+      shipping_address_validation_score: 50,
+      shipping_address_validation_reason: "City is missing; state is missing.",
+      shipping_address_validated_at: "2026-08-01T12:00:00Z",
+    })
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.getByText("50%")).toBeInTheDocument()
+    expect(screen.getByText("Ambiguous Address")).toBeInTheDocument()
+  })
+
+  it("shows a Junk Address result", () => {
+    setUpQueries({
+      ...BASE_ORDER,
+      shipping_address: {
+        ...SAMPLE_ADDRESS,
+        line1: "test address asdf",
+        city: "xxxx",
+        state: null,
+        pin_code: "",
+      },
+      shipping_address_validation_status: "junk",
+      shipping_address_validation_score: 24,
+      shipping_address_validation_reason: "Address text matches a known junk pattern.",
+      shipping_address_validated_at: "2026-08-01T12:00:00Z",
+    })
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.getByText("24%")).toBeInTheDocument()
+    expect(screen.getByText("Junk Address")).toBeInTheDocument()
+  })
+
+  it("shows Validation pending when an address exists but has never been validated", () => {
+    setUpQueries({
+      ...BASE_ORDER,
+      shipping_address: SAMPLE_ADDRESS,
+      shipping_address_validation_status: null,
+      shipping_address_validation_score: null,
+    })
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.getByText("Validation pending")).toBeInTheDocument()
+  })
+
+  it("shows an unavailable state when the provider could not classify the address", () => {
+    setUpQueries({
+      ...BASE_ORDER,
+      shipping_address: SAMPLE_ADDRESS,
+      shipping_address_validation_status: "unknown",
+      shipping_address_validation_score: null,
+      shipping_address_validation_reason: "Address validation provider raised an unexpected error.",
+    })
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.getByText("Validation Unavailable")).toBeInTheDocument()
+  })
+
+  it("hides the Validate Address button without orders.update permission", () => {
+    setUpQueries({
+      ...BASE_ORDER,
+      shipping_address: SAMPLE_ADDRESS,
+    })
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => false,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(
+      screen.queryByRole("button", { name: /Validate Address/i })
+    ).not.toBeInTheDocument()
+  })
+
+  it("triggers revalidation from the Validate Address button", async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+    setUpQueries({
+      ...BASE_ORDER,
+      shipping_address: SAMPLE_ADDRESS,
+    })
+    mockedUseValidateOrderAddress.mockReturnValue({
+      mutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useValidateOrderAddress>)
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /Validate Address/i }))
+
+    expect(mutate).toHaveBeenCalled()
   })
 })

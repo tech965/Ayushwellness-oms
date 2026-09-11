@@ -50,6 +50,7 @@ from app.schemas.shiprocket import (
     ProcessExistingShipmentsResponse,
     ShiprocketShipRequest,
 )
+from app.services.address_validation_service import AddressValidationService
 from app.services.order_service import OrderService
 from app.services.shiprocket_service import ShiprocketOperationsService, shiprocket_order_id
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
@@ -316,6 +317,31 @@ async def retry_shopify_confirmation_sync(
     return ApiResponse(
         data=_to_detail_response(order), message="Shopify confirmation sync retried."
     )
+
+
+@router.post("/{order_id}/validate-address", response_model=ApiResponse[OrderDetailResponse])
+async def validate_order_address(
+    order_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("orders.update")),
+) -> ApiResponse[OrderDetailResponse]:
+    """Explicitly (re)validates this order's `shipping_address` right
+    now (`force=True` -- always calls the provider, never short-circuits
+    on a matching stored result) -- the Order Details page's "Validate
+    Address" action, and the one way an order that predates this feature
+    (`shipping_address_validation_status` still `None`, shown as
+    "Validation pending") gets a real result without waiting for its
+    address to next change. Deliberately NOT called from any listing
+    endpoint -- see `AddressValidationService`'s module docstring for
+    why validation must never happen as a side effect of a page load.
+    Never fails on a provider error -- a failure is persisted as
+    `UNKNOWN` (see that service), and this endpoint still returns 200
+    with the order's current (now-updated) state.
+    """
+    order = await OrderService(session).get_order(order_id)
+    await AddressValidationService(session).validate_order(order, force=True)
+    order = await OrderService(session).get_order(order_id)
+    return ApiResponse(data=_to_detail_response(order), message="Address validation updated.")
 
 
 @router.post("/bulk-ship/validate", response_model=ApiResponse[list[BulkShipValidationResult]])

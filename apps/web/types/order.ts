@@ -18,6 +18,11 @@ export type PaymentType = "cod" | "prepaid" | "other"
 export type FulfillmentStatus = "unfulfilled" | "partial" | "fulfilled"
 export type CancellationStatus = "none" | "requested" | "cancelled"
 
+// `app.models.enums.AddressValidationStatus` -- `null`/absent means
+// "never validated yet" (including "no shipping address at all"), shown
+// as "Validation pending", never as any of these four real statuses.
+export type AddressValidationStatus = "valid" | "ambiguous" | "junk" | "unknown"
+
 export interface OrderItem {
   id: string
   order_id: string
@@ -68,6 +73,14 @@ export interface Order {
   shopify_shipment_status: string | null
   shipping_address: OrderAddress | null
   billing_address: OrderAddress | null
+  // Address validation (Shiprocket-style confidence check) --
+  // `shipping_address_validation_status` is `null` for "never validated
+  // yet" (including "no shipping address on file"), rendered as
+  // "Validation pending" -- never guessed as any real status.
+  shipping_address_validation_status?: AddressValidationStatus | null
+  shipping_address_validation_score?: number | null
+  shipping_address_validation_reason?: string | null
+  shipping_address_validated_at?: string | null
   source_system: string | null
   // Telecaller attribution for the PENDING->CONFIRMED transition — `null`
   // for an order confirmed a different way (e.g. auto-confirmed on

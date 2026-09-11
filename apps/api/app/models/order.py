@@ -19,6 +19,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import AwareDateTime, Base, JSONType, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import (
+    AddressValidationStatus,
     CancellationStatus,
     FulfillmentStatus,
     OrderStatus,
@@ -149,6 +150,42 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     shipping_address_sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     shipping_address_synced_at: Mapped[datetime | None] = mapped_column(
         AwareDateTime(), nullable=True
+    )
+
+    # Address validation (Shiprocket-style confidence check) — see
+    # `app.services.address_validation_service.AddressValidationService`.
+    # A DIFFERENT concept from the `shipping_address_sync_*` cluster
+    # above (that one is the outbound OMS -> Shopify push state for this
+    # same address; this one is "is the address itself any good," never
+    # pushed anywhere). All nullable: `NULL` status means "never
+    # validated yet" (shown as "Validation pending" in the UI), never
+    # guessed as any real status. `shipping_address_validation_hash` is a
+    # content fingerprint of the exact `shipping_address` dict this
+    # result was computed from — comparing it against a fresh hash of
+    # the CURRENT address is how staleness is detected without an extra
+    # provider call on every read (see that service's docstring).
+    shipping_address_validation_status: Mapped[AddressValidationStatus | None] = mapped_column(
+        sa_enum(AddressValidationStatus, "address_validation_status"), nullable=True
+    )
+    # A 0-100 confidence score, matching the Shiprocket-style "82%"
+    # display this feature is modeled on — always paired with `status`
+    # above, never shown alone.
+    shipping_address_validation_score: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    shipping_address_validation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shipping_address_validated_at: Mapped[datetime | None] = mapped_column(
+        AwareDateTime(), nullable=True
+    )
+    # Whatever reference/request id the validation provider itself
+    # returned, if any (`None` for the built-in heuristic provider, which
+    # has no such concept) -- kept purely for support/debugging, never
+    # read by any business logic.
+    shipping_address_validation_provider_ref: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
+    shipping_address_validation_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
     )
 
     # Telecaller attribution for the PENDING->CONFIRMED transition (see

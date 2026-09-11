@@ -6,6 +6,7 @@ import { format, parseISO } from "date-fns"
 import { Columns3, Download, Loader2, X } from "lucide-react"
 import { toast } from "sonner"
 
+import { AddressValidationBadge } from "@/components/shared/address-validation-badge"
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import {
   DateRangePicker,
@@ -161,6 +162,22 @@ const ALL_COLUMNS: ColumnDef[] = [
         if (!address?.city && !address?.state) return "—"
         return [address?.city, address?.state].filter(Boolean).join(", ")
       },
+    },
+  },
+  {
+    id: "address_validation",
+    label: "Address Validation",
+    defaultVisible: true,
+    column: {
+      id: "address_validation",
+      header: "Address Validation",
+      cell: (o) => (
+        <AddressValidationBadge
+          status={o.shipping_address_validation_status}
+          score={o.shipping_address_validation_score}
+          hasAddress={Boolean(o.shipping_address)}
+        />
+      ),
     },
   },
   {

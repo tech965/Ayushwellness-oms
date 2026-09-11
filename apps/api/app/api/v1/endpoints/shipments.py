@@ -70,6 +70,9 @@ def _to_shipment_queue_row(order: Order, shipment: Shipment | None) -> ShipmentQ
         awb=shipment.awb if shipment else None,
         courier_name=shipment.courier.name if shipment and shipment.courier else None,
         shiprocket_order_id=shiprocket_order_id(shipment),
+        shipping_address_validation_status=order.shipping_address_validation_status,
+        shipping_address_validation_score=order.shipping_address_validation_score,
+        shipping_address_validation_reason=order.shipping_address_validation_reason,
     )
 
 

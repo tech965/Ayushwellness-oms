@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 
 import { BulkShipDialog } from "@/components/fulfillment/bulk-ship-dialog"
 import { ShipmentActionCell } from "@/components/fulfillment/shipment-action-cell"
+import { AddressValidationBadge } from "@/components/shared/address-validation-badge"
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import type { DateRangeValue } from "@/components/shared/date-range-picker"
 import { FilterBar } from "@/components/shared/filter-bar"
@@ -160,6 +161,21 @@ function FulfillmentQueueContent() {
         ) : (
           <span className="text-muted-foreground text-xs">Ready to Ship</span>
         ),
+    },
+    {
+      id: "address_validation",
+      header: "Address Validation",
+      // Primary location for this: the fulfillment user must be able to
+      // spot a problematic address BEFORE clicking "Process Shipment" --
+      // sourced straight off this row's already-loaded `Order` data
+      // (see `ShipmentQueueRowResponse` on the backend), so showing it
+      // here costs zero extra queries and no external calls per row.
+      cell: (r) => (
+        <AddressValidationBadge
+          status={r.shipping_address_validation_status}
+          score={r.shipping_address_validation_score}
+        />
+      ),
     },
     {
       id: "actions",

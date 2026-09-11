@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import (
+    AddressValidationStatus,
     FulfillmentStatus,
     LeadCategory,
     LeadPriority,
@@ -199,6 +200,11 @@ class AssignedOrderResponse(BaseModel):
     # reporting blanket success either way.
     shipping_address_sync_status: str | None = None
     shipping_address_sync_error: str | None = None
+    # Same already-loaded `Order` row as everything else on this
+    # response -- zero extra queries. `None` means "not yet validated",
+    # shown by the frontend as "Validation pending", never guessed.
+    shipping_address_validation_status: AddressValidationStatus | None = None
+    shipping_address_validation_score: int | None = None
     # Line items for the Product section (image + name + variant + SKU) —
     # see `AssignedOrderItemResponse`.
     items: list[AssignedOrderItemResponse] = []
