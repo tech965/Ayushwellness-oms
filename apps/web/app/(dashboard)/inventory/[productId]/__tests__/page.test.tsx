@@ -7,8 +7,8 @@ import InventoryProductPage, {
   EditNameDialog,
 } from "@/app/(dashboard)/inventory/[productId]/page"
 import {
-  useAdjustCatalogVariantStock,
-  useAdjustVariantStock,
+  useAddCatalogVariantStock,
+  useAddVariantStock,
   useCatalogVariantAdjustments,
   useInventoryMovements,
   useInventoryProductStock,
@@ -16,6 +16,7 @@ import {
   useSetProductName,
   useSetVariantName,
   useUpdatePacketsPerBox,
+  useUpdatePackSize,
 } from "@/services/inventory"
 import { useAuth } from "@/lib/auth-context"
 import type {
@@ -45,8 +46,9 @@ vi.mock("@/services/inventory", () => ({
   useSetVariantName: vi.fn(),
   useSetCatalogVariantName: vi.fn(),
   useUpdatePacketsPerBox: vi.fn(),
-  useAdjustVariantStock: vi.fn(),
-  useAdjustCatalogVariantStock: vi.fn(),
+  useUpdatePackSize: vi.fn(),
+  useAddVariantStock: vi.fn(),
+  useAddCatalogVariantStock: vi.fn(),
   useCatalogVariantAdjustments: vi.fn(),
 }))
 
@@ -58,8 +60,9 @@ const mockedUseSetProductName = vi.mocked(useSetProductName)
 const mockedUseSetVariantName = vi.mocked(useSetVariantName)
 const mockedUseSetCatalogVariantName = vi.mocked(useSetCatalogVariantName)
 const mockedUseUpdatePacketsPerBox = vi.mocked(useUpdatePacketsPerBox)
-const mockedUseAdjustVariantStock = vi.mocked(useAdjustVariantStock)
-const mockedUseAdjustCatalogVariantStock = vi.mocked(useAdjustCatalogVariantStock)
+const mockedUseUpdatePackSize = vi.mocked(useUpdatePackSize)
+const mockedUseAddVariantStock = vi.mocked(useAddVariantStock)
+const mockedUseAddCatalogVariantStock = vi.mocked(useAddCatalogVariantStock)
 const mockedUseCatalogVariantAdjustments = vi.mocked(useCatalogVariantAdjustments)
 const mockedUseAuth = vi.mocked(useAuth)
 
@@ -92,6 +95,7 @@ function line(
     display_title: over.sku,
     available_boxes: 100,
     packets_per_box: 1,
+    pack_size: 1,
     total_packets: 100,
     stock_status: "in_stock",
     image_url: null,
@@ -283,8 +287,9 @@ beforeEach(() => {
   mockedUseSetVariantName.mockReturnValue(mutationStub())
   mockedUseSetCatalogVariantName.mockReturnValue(mutationStub() as never)
   mockedUseUpdatePacketsPerBox.mockReturnValue(mutationStub() as never)
-  mockedUseAdjustVariantStock.mockReturnValue(mutationStub() as never)
-  mockedUseAdjustCatalogVariantStock.mockReturnValue(mutationStub() as never)
+  mockedUseUpdatePackSize.mockReturnValue(mutationStub() as never)
+  mockedUseAddVariantStock.mockReturnValue(mutationStub() as never)
+  mockedUseAddCatalogVariantStock.mockReturnValue(mutationStub() as never)
   mockedUseAuth.mockReturnValue({
     hasPermission: () => true,
   } as unknown as ReturnType<typeof useAuth>)
@@ -316,7 +321,7 @@ describe("InventoryProductPage — OMS-visible variants only", () => {
     ]) {
       expect(screen.getByText(name)).toBeInTheDocument()
     }
-    expect(screen.getAllByRole("button", { name: "Edit Stock" })).toHaveLength(3)
+    expect(screen.getAllByRole("button", { name: "Add Stock" })).toHaveLength(3)
   })
 
   it("does NOT show Pack-size / 60-120 pouch SKUs as OMS-visible variant headings", () => {
@@ -358,7 +363,7 @@ describe("InventoryProductPage — OMS-visible variants only", () => {
   it("a non-Herbal-Masala product shows exactly ONE OMS-visible variant", () => {
     setProduct(VAJRASHAKTI)
     renderWithProviders(<InventoryProductPage />)
-    expect(screen.getAllByRole("button", { name: "Edit Stock" })).toHaveLength(1)
+    expect(screen.getAllByRole("button", { name: "Add Stock" })).toHaveLength(1)
     expect(screen.getByRole("heading", { name: "Vajrashakti" })).toBeInTheDocument()
     // its 3 pack-size SKUs are all grouped into that one card and all
     // shown directly on the card face
@@ -417,18 +422,18 @@ describe("InventoryProductPage — CatalogVariant images", () => {
   })
 })
 
-describe("InventoryProductPage — Edit Stock (CatalogVariant TOTAL, never per-SKU)", () => {
-  it("a multi-SKU OMS variant (Ghutka/Red Packet-style) shows exactly ONE total-stock input", async () => {
+describe("InventoryProductPage — Add Stock (CatalogVariant TOTAL, never per-SKU)", () => {
+  it("a multi-SKU OMS variant (Ghutka/Red Packet-style) shows exactly ONE quantity-to-add input", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
 
-    // open Ghutka's Edit Stock (2nd card) -- 2 underlying SKUs (60 + 120)
-    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
+    // open Ghutka's Add Stock (2nd card) -- 2 underlying SKUs (60 + 120)
+    await user.click(screen.getAllByRole("button", { name: "Add Stock" })[1])
     const dialog = screen.getByRole("dialog")
-    expect(within(dialog).getByText("Edit Stock — Ghutka Flavour")).toBeInTheDocument()
+    expect(within(dialog).getByText("Add Stock — Ghutka Flavour")).toBeInTheDocument()
 
-    const inputs = within(dialog).getAllByLabelText("New Total Stock")
-    expect(inputs).toHaveLength(1) // ONE total field, never one per SKU
+    const inputs = within(dialog).getAllByLabelText("Quantity to Add")
+    expect(inputs).toHaveLength(1) // ONE field, never one per SKU
 
     // 60/120 pack sizes are not independently editable -- no per-SKU
     // labeled inputs exist anywhere in the dialog
@@ -436,115 +441,113 @@ describe("InventoryProductPage — Edit Stock (CatalogVariant TOTAL, never per-S
     expect(within(dialog).queryByLabelText(/AW-HM-CR-120/)).not.toBeInTheDocument()
   })
 
-  it("current total is the sum of the underlying SKUs' available_quantity", async () => {
+  it("the Quantity to Add input starts EMPTY, current stock shown separately", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
-    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1]) // Ghutka: 100 + 40
+    await user.click(screen.getAllByRole("button", { name: "Add Stock" })[1]) // Ghutka: 100 + 40
     const dialog = screen.getByRole("dialog")
-    expect(within(dialog).getByText("140 boxes")).toBeInTheDocument()
+    expect(within(dialog).getByText("140 boxes")).toBeInTheDocument() // Current Stock
+    expect(within(dialog).getByLabelText("Quantity to Add")).toHaveValue(null) // empty, never pre-filled
   })
 
-  it("Save sends ONE total target to the CatalogVariant endpoint, never per-SKU values", async () => {
+  it("Save sends ONLY the quantity added to the CatalogVariant endpoint, never a computed total or per-SKU values", async () => {
     const user = userEvent.setup()
-    const adjust = mutationStub("success")
-    mockedUseAdjustCatalogVariantStock.mockReturnValue(adjust as never)
+    const add = mutationStub("success")
+    mockedUseAddCatalogVariantStock.mockReturnValue(add as never)
     renderWithProviders(<InventoryProductPage />)
 
-    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1]) // Ghutka, total 140
+    await user.click(screen.getAllByRole("button", { name: "Add Stock" })[1]) // Ghutka, current 140
     const dialog = screen.getByRole("dialog")
-    const input = within(dialog).getByLabelText("New Total Stock")
-    await user.clear(input)
-    await user.type(input, "200")
+    await user.type(within(dialog).getByLabelText("Quantity to Add"), "60")
     await user.type(within(dialog).getByLabelText("Reason"), "warehouse recount")
-    await user.click(within(dialog).getByRole("button", { name: "Save" }))
+    await user.click(within(dialog).getByRole("button", { name: "Add Stock" }))
 
-    expect(adjust.mutateAsync).toHaveBeenCalledTimes(1)
-    expect(adjust.mutateAsync).toHaveBeenCalledWith({
+    expect(add.mutateAsync).toHaveBeenCalledTimes(1)
+    expect(add.mutateAsync).toHaveBeenCalledWith({
       catalogVariantId: "cv-gutka",
-      target_boxes: 200,
+      quantity_to_add: 60,
       reason: "warehouse recount",
     })
   })
 
-  it("Gold, Red, and Blue Packet (Royal/Ghutka/Paan flavours) all use the same total-stock UX", async () => {
+  it("Gold, Red, and Blue Packet (Royal/Ghutka/Paan flavours) all use the same Add Stock UX", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
-    const buttons = screen.getAllByRole("button", { name: "Edit Stock" })
+    const buttons = screen.getAllByRole("button", { name: "Add Stock" })
     expect(buttons).toHaveLength(3) // Royal Tobacco (Gold), Ghutka (Red), Paan Masala (Blue)
 
     for (const button of buttons) {
       await user.click(button)
       const dialog = screen.getByRole("dialog")
-      expect(within(dialog).getAllByLabelText("New Total Stock")).toHaveLength(1)
+      expect(within(dialog).getAllByLabelText("Quantity to Add")).toHaveLength(1)
       await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
     }
   })
 
-  it("a single-underlying (implicit) OMS variant still shows one field and edits that SKU directly", async () => {
+  it("a single-underlying (implicit) OMS variant still shows one field and adds to that SKU directly", async () => {
     const user = userEvent.setup()
-    const adjust = mutationStub("success")
-    mockedUseAdjustVariantStock.mockReturnValue(adjust as never)
+    const add = mutationStub("success")
+    mockedUseAddVariantStock.mockReturnValue(add as never)
     setProduct(IMPLICIT)
     renderWithProviders(<InventoryProductPage />)
 
-    await user.click(screen.getByRole("button", { name: "Edit Stock" }))
+    await user.click(screen.getByRole("button", { name: "Add Stock" }))
     const dialog = screen.getByRole("dialog")
-    const inputs = within(dialog).getAllByLabelText("New Total Stock")
+    const inputs = within(dialog).getAllByLabelText("Quantity to Add")
     expect(inputs).toHaveLength(1)
-    await user.clear(inputs[0])
     await user.type(inputs[0], "9")
     await user.type(within(dialog).getByLabelText("Reason"), "count")
-    await user.click(within(dialog).getByRole("button", { name: "Save" }))
+    await user.click(within(dialog).getByRole("button", { name: "Add Stock" }))
 
     // per-SKU endpoint, not the CatalogVariant total endpoint -- this
     // group maps 1:1 to one real ProductVariant, so there is nothing
     // ambiguous to record on the reconciliation ledger
-    expect(adjust.mutateAsync).toHaveBeenCalledWith({
+    expect(add.mutateAsync).toHaveBeenCalledWith({
       variantId: "v-only",
-      target_boxes: 9,
+      quantity_to_add: 9,
       reason: "count",
     })
   })
 
-  it("Save is disabled without a reason or a changed value; min=0 on the input; delta preview", async () => {
+  it("Save is disabled without a reason or a quantity; min=1 on the input; new-stock preview", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
-    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1]) // Ghutka, total 140
+    await user.click(screen.getAllByRole("button", { name: "Add Stock" })[1]) // Ghutka, current 140
     const dialog = screen.getByRole("dialog")
-    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled()
-    const input = within(dialog).getByLabelText("New Total Stock")
-    expect(input).toHaveAttribute("min", "0")
-    await user.clear(input)
-    await user.type(input, "200")
-    expect(within(dialog).getByText("+60 boxes")).toBeInTheDocument()
-    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled() // still no reason
+    expect(within(dialog).getByRole("button", { name: "Add Stock" })).toBeDisabled()
+    const input = within(dialog).getByLabelText("Quantity to Add")
+    expect(input).toHaveAttribute("min", "1")
+    await user.type(input, "60")
+    expect(within(dialog).getByText("New Stock: 200 boxes")).toBeInTheDocument() // 140 + 60
+    expect(within(dialog).getByRole("button", { name: "Add Stock" })).toBeDisabled() // still no reason
     await user.type(within(dialog).getByLabelText("Reason"), "x")
-    expect(within(dialog).getByRole("button", { name: "Save" })).toBeEnabled()
+    expect(within(dialog).getByRole("button", { name: "Add Stock" })).toBeEnabled()
   })
 
-  it("rejects a negative target -- Save stays disabled", async () => {
+  it("rejects a negative or zero quantity -- Save stays disabled", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
-    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
+    await user.click(screen.getAllByRole("button", { name: "Add Stock" })[1])
     const dialog = screen.getByRole("dialog")
-    const input = within(dialog).getByLabelText("New Total Stock")
-    await user.clear(input)
+    const input = within(dialog).getByLabelText("Quantity to Add")
     await user.type(input, "-5")
     await user.type(within(dialog).getByLabelText("Reason"), "x")
-    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled()
+    expect(within(dialog).getByRole("button", { name: "Add Stock" })).toBeDisabled()
+
+    await user.clear(input)
+    await user.type(input, "0")
+    expect(within(dialog).getByRole("button", { name: "Add Stock" })).toBeDisabled()
   })
 
   it("keeps the dialog open and shows the API error on a failed save", async () => {
     const user = userEvent.setup()
-    mockedUseAdjustCatalogVariantStock.mockReturnValue(mutationStub("error") as never)
+    mockedUseAddCatalogVariantStock.mockReturnValue(mutationStub("error") as never)
     renderWithProviders(<InventoryProductPage />)
-    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
+    await user.click(screen.getAllByRole("button", { name: "Add Stock" })[1])
     const dialog = screen.getByRole("dialog")
-    const input = within(dialog).getByLabelText("New Total Stock")
-    await user.clear(input)
-    await user.type(input, "150")
+    await user.type(within(dialog).getByLabelText("Quantity to Add"), "150")
     await user.type(within(dialog).getByLabelText("Reason"), "oops")
-    await user.click(within(dialog).getByRole("button", { name: "Save" }))
+    await user.click(within(dialog).getByRole("button", { name: "Add Stock" }))
     expect(toastError).toHaveBeenCalledWith("Server said no")
     expect(screen.getByRole("dialog")).toBeInTheDocument()
   })
@@ -587,7 +590,7 @@ describe("InventoryProductPage — Edit Name & History", () => {
     expect(setVariant.mutate).toHaveBeenCalledWith("Nice Name", expect.anything())
   })
 
-  it("hides Edit Stock / Edit Name for a read-only user", () => {
+  it("hides Add Stock / Edit Name for a read-only user", () => {
     mockedUseAuth.mockReturnValue({
       hasPermission: (code: string) => code !== "inventory.manage",
     } as unknown as ReturnType<typeof useAuth>)
@@ -623,7 +626,6 @@ function movement(
     catalog_variant_id: "cv-vjr",
     sku: "VJR-30",
     quantity_delta: -1,
-    previous_balance: 300,
     quantity_after: 299,
     order_id: null,
     shipment_id: null,
@@ -659,7 +661,6 @@ describe("InventoryProductPage — Movement History display", () => {
         id: "m-1",
         movement_type: "dispatch",
         quantity_delta: -1,
-        previous_balance: 300,
         quantity_after: 299,
       }),
     ])
@@ -675,7 +676,6 @@ describe("InventoryProductPage — Movement History display", () => {
         id: "m-2",
         movement_type: "rto_restock",
         quantity_delta: 1,
-        previous_balance: 298,
         quantity_after: 299,
       }),
     ])
@@ -691,14 +691,12 @@ describe("InventoryProductPage — Movement History display", () => {
         id: "m-3",
         movement_type: "manual_adjustment",
         quantity_delta: 5,
-        previous_balance: 294,
         quantity_after: 299,
       }),
       movement({
         id: "m-4",
         movement_type: "initial_stock",
         quantity_delta: 10,
-        previous_balance: 0,
         quantity_after: 10,
       }),
     ])
@@ -708,7 +706,7 @@ describe("InventoryProductPage — Movement History display", () => {
     expect(screen.getByText("Initial stock: +10 boxes")).toBeInTheDocument()
   })
 
-  it("keeps SKU visible and New balance shown in boxes alongside the combined column", async () => {
+  it("keeps SKU visible and shows Stock Balance in boxes, with no Previous Balance column", async () => {
     const user = userEvent.setup()
     setMovements([
       movement({
@@ -716,7 +714,6 @@ describe("InventoryProductPage — Movement History display", () => {
         movement_type: "dispatch",
         sku: "VJR-30",
         quantity_delta: -1,
-        previous_balance: 300,
         quantity_after: 299,
       }),
     ])
@@ -724,8 +721,10 @@ describe("InventoryProductPage — Movement History display", () => {
     await user.click(screen.getByRole("button", { name: "History" }))
     expect(screen.getByText("Shipped: -1 box")).toBeInTheDocument()
     expect(screen.getByText("VJR-30")).toBeInTheDocument()
-    expect(screen.getByText("299 boxes")).toBeInTheDocument() // New balance
-    expect(screen.getByText("300 boxes")).toBeInTheDocument() // Previous balance, unchanged
+    expect(screen.getByText("Stock Balance")).toBeInTheDocument()
+    expect(screen.getByText("299 boxes")).toBeInTheDocument()
+    expect(screen.queryByText("Previous balance")).not.toBeInTheDocument()
+    expect(screen.queryByText("Previous Balance")).not.toBeInTheDocument()
   })
 })
 
@@ -774,7 +773,6 @@ describe("InventoryProductPage — Herbal Masala pack-size labels (canonical pro
         movement_type: "dispatch",
         sku: "AW-HM-RG-60",
         quantity_delta: -1,
-        previous_balance: 11,
         quantity_after: 10,
       }),
     ])
@@ -792,7 +790,6 @@ describe("InventoryProductPage — Herbal Masala pack-size labels (canonical pro
         movement_type: "dispatch",
         sku: "VJR-30",
         quantity_delta: -1,
-        previous_balance: 301,
         quantity_after: 300,
       }),
     ])

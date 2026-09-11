@@ -323,8 +323,8 @@ async def test_grouping_does_not_change_existing_inventory_movements(
     product, variants = await _product_with_variants(
         db_session, key="MV", variants=[{"sku": "MV-60", "available_quantity": 20}]
     )
-    movement = await InventoryService(db_session).adjust_to_target(
-        variants[0].id, target_boxes=25, reason="count", actor=None
+    movement = await InventoryService(db_session).add_stock(
+        variants[0].id, quantity_to_add=5, reason="count", actor=None
     )
     before = await InventoryMovementRepository(db_session).get_by_id_with_relations(movement.id)
     snap = (
@@ -553,7 +553,7 @@ async def test_product_level_adjust_still_refuses_a_multi_variant_product(
     ) as client:
         resp = await client.post(
             f"/api/v1/inventory/products/{product.id}/adjust",
-            json={"target_boxes": 500, "reason": "no"},
+            json={"quantity_to_add": 500, "reason": "no"},
         )
         assert resp.status_code == 422
 
@@ -575,16 +575,16 @@ async def test_single_underlying_variant_edit_stock_still_works(
     async with await make_authenticated_client(
         db_session, permission_codes=["inventory.read", "inventory.manage"]
     ) as client:
-        # per-variant adjust (what the UI uses for every OMS variant row)
+        # per-variant add (what the UI uses for every OMS variant row)
         r1 = await client.post(
             f"/api/v1/inventory/stock/{variants[0].id}/adjust",
-            json={"target_boxes": 400, "reason": "received"},
+            json={"quantity_to_add": 5, "reason": "received"},
         )
         assert r1.status_code == 200 and r1.json()["data"]["quantity_delta"] == 5
-        # single-variant product-level adjust still valid too
+        # single-variant product-level add still valid too
         r2 = await client.post(
             f"/api/v1/inventory/products/{product.id}/adjust",
-            json={"target_boxes": 410, "reason": "received again"},
+            json={"quantity_to_add": 10, "reason": "received again"},
         )
         assert r2.status_code == 200 and r2.json()["data"]["quantity_after"] == 410
 
@@ -623,13 +623,13 @@ async def test_catalog_variant_total_adjust_never_touches_any_underlying_sku(
     ) as client:
         resp = await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
-            json={"target_boxes": 300, "reason": "warehouse recount"},
+            json={"quantity_to_add": 60, "reason": "warehouse recount"},
         )
         assert resp.status_code == 200
         body = resp.json()["data"]
         assert body["catalog_variant_id"] == str(cv["blue"].id)
         assert body["quantity_delta"] == 60  # 300 - 240
-        assert body["previous_balance"] == 240
+        assert "previous_balance" not in body
         assert body["quantity_after"] == 300
         assert body["reason"] == "warehouse recount"
 
@@ -669,14 +669,14 @@ async def test_catalog_variant_total_adjust_does_not_create_an_inventory_movemen
         before = (await client.get("/api/v1/inventory/movements")).json()["data"]
         await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['gold'].id}/adjust",
-            json={"target_boxes": 100, "reason": "adjustment"},
+            json={"quantity_to_add": 40, "reason": "adjustment"},
         )
         after = (await client.get("/api/v1/inventory/movements")).json()["data"]
 
     assert len(after) == len(before)  # no new InventoryMovement row
 
 
-async def test_catalog_variant_total_adjust_rejects_negative_target(
+async def test_catalog_variant_total_adjust_rejects_negative_quantity(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
     _product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
@@ -686,7 +686,22 @@ async def test_catalog_variant_total_adjust_rejects_negative_target(
     ) as client:
         resp = await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
-            json={"target_boxes": -1, "reason": "x"},
+            json={"quantity_to_add": -1, "reason": "x"},
+        )
+        assert resp.status_code == 422
+
+
+async def test_catalog_variant_total_adjust_rejects_zero_quantity(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    _product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.manage"]
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
+            json={"quantity_to_add": 0, "reason": "x"},
         )
         assert resp.status_code == 422
 
@@ -701,7 +716,7 @@ async def test_catalog_variant_total_adjust_requires_a_reason(
     ) as client:
         resp = await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
-            json={"target_boxes": 500, "reason": "   "},
+            json={"quantity_to_add": 500, "reason": "   "},
         )
         assert resp.status_code == 422
 
@@ -716,7 +731,7 @@ async def test_catalog_variant_total_adjust_requires_inventory_manage(
     ) as client:
         resp = await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
-            json={"target_boxes": 500, "reason": "x"},
+            json={"quantity_to_add": 500, "reason": "x"},
         )
         assert resp.status_code == 403
 
@@ -724,8 +739,8 @@ async def test_catalog_variant_total_adjust_requires_inventory_manage(
 async def test_catalog_variant_total_adjust_accumulates_across_edits(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
-    """The ledger sums every past adjustment, not just the most recent
-    one -- a second edit's "current total" already reflects the first.
+    """The ledger sums every past addition, not just the most recent one
+    -- a second edit's "current total" already reflects the first.
     """
     product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
 
@@ -734,16 +749,17 @@ async def test_catalog_variant_total_adjust_accumulates_across_edits(
     ) as client:
         r1 = await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['red'].id}/adjust",
-            json={"target_boxes": 200, "reason": "first"},
+            json={"quantity_to_add": 50, "reason": "first"},
         )
-        assert r1.json()["data"]["quantity_delta"] == 50  # 200 - 150
+        assert r1.json()["data"]["quantity_delta"] == 50
+        assert r1.json()["data"]["quantity_after"] == 200  # 150 + 50
 
         r2 = await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['red'].id}/adjust",
-            json={"target_boxes": 180, "reason": "second"},
+            json={"quantity_to_add": 30, "reason": "second"},
         )
-        assert r2.json()["data"]["quantity_delta"] == -20  # 180 - 200
-        assert r2.json()["data"]["previous_balance"] == 200
+        assert r2.json()["data"]["quantity_delta"] == 30
+        assert r2.json()["data"]["quantity_after"] == 230  # 200 + 30, reflects the first edit
 
         adjustments = (
             await client.get(f"/api/v1/inventory/catalog-variants/{cv['red'].id}/adjustments")
@@ -751,21 +767,6 @@ async def test_catalog_variant_total_adjust_accumulates_across_edits(
 
     assert len(adjustments) == 2
     assert {a["reason"] for a in adjustments} == {"first", "second"}
-
-
-async def test_catalog_variant_total_adjust_rejects_a_no_op_target(
-    db_session: AsyncSession, make_authenticated_client
-) -> None:
-    _product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
-
-    async with await make_authenticated_client(
-        db_session, permission_codes=["inventory.manage"]
-    ) as client:
-        resp = await client.post(
-            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
-            json={"target_boxes": 240, "reason": "same as current"},  # already 240
-        )
-        assert resp.status_code == 422
 
 
 async def test_catalog_variant_total_adjust_missing_catalog_variant_404s(
@@ -776,7 +777,7 @@ async def test_catalog_variant_total_adjust_missing_catalog_variant_404s(
     ) as client:
         resp = await client.post(
             "/api/v1/inventory/catalog-variants/00000000-0000-0000-0000-000000000000/adjust",
-            json={"target_boxes": 10, "reason": "x"},
+            json={"quantity_to_add": 10, "reason": "x"},
         )
         assert resp.status_code == 404
 
@@ -794,7 +795,7 @@ async def test_catalog_variant_total_adjust_does_not_change_grouping_or_packets(
     ) as client:
         await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
-            json={"target_boxes": 999, "reason": "x"},
+            json={"quantity_to_add": 100, "reason": "x"},
         )
         body = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
 
@@ -828,7 +829,7 @@ async def test_catalog_variant_total_packets_not_fabricated_from_the_reconciliat
 
         await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
-            json={"target_boxes": 999, "reason": "x"},
+            json={"quantity_to_add": 759, "reason": "x"},  # 240 + 759 = 999
         )
         after = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
         blue = next(g for g in after["oms_variants"] if g["name"] == "Blue Packet")
@@ -845,12 +846,10 @@ async def test_history_for_catalog_variant_spans_all_underlying_skus(
 ) -> None:
     product, by_sku, cv = await _herbal_masala(db_session)
     service = InventoryService(db_session)
-    await service.adjust_to_target(by_sku["HM-GUT-60"].id, target_boxes=90, reason="a", actor=None)
-    await service.adjust_to_target(by_sku["HM-GUT-120"].id, target_boxes=30, reason="b", actor=None)
+    await service.add_stock(by_sku["HM-GUT-60"].id, quantity_to_add=10, reason="a", actor=None)
+    await service.add_stock(by_sku["HM-GUT-120"].id, quantity_to_add=5, reason="b", actor=None)
     # a movement on a DIFFERENT flavour -- must NOT show up under Ghutka
-    await service.adjust_to_target(
-        by_sku["HM-PAAN-60"].id, target_boxes=150, reason="c", actor=None
-    )
+    await service.add_stock(by_sku["HM-PAAN-60"].id, quantity_to_add=20, reason="c", actor=None)
 
     async with await make_authenticated_client(
         db_session, permission_codes=["inventory.read"]

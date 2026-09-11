@@ -34,6 +34,7 @@ from app.schemas.inventory import (
     InventoryVariantResponse,
     OmsCatalogVariantResponse,
     PacketsPerBoxUpdateRequest,
+    PackSizeUpdateRequest,
     ProductNameUpdateRequest,
     ProductStockAdjustmentRequest,
     ProductVariantStockLine,
@@ -66,6 +67,7 @@ def _variant_response(variant, *, threshold: int) -> InventoryVariantResponse:  
         variant_title_override=variant.title_override,
         display_title=_variant_display_title(variant),
         packets_per_box=variant.packets_per_box,
+        pack_size=variant.pack_size,
         available_boxes=available,
         total_packets=available * variant.packets_per_box,
         stock_status=InventoryService.compute_stock_status(available, threshold),
@@ -84,6 +86,7 @@ def _variant_stock_line(variant, *, threshold: int) -> ProductVariantStockLine: 
         display_title=_variant_display_title(variant),
         available_boxes=variant.available_quantity,
         packets_per_box=variant.packets_per_box,
+        pack_size=variant.pack_size,
         total_packets=variant.available_quantity * variant.packets_per_box,
         stock_status=InventoryService.compute_stock_status(variant.available_quantity, threshold),
         image_url=variant.image_url,
@@ -212,7 +215,6 @@ def _catalog_variant_adjustment_response(adjustment) -> CatalogVariantStockAdjus
         id=adjustment.id,
         catalog_variant_id=adjustment.catalog_variant_id,
         quantity_delta=adjustment.quantity_delta,
-        previous_balance=adjustment.quantity_after - adjustment.quantity_delta,
         quantity_after=adjustment.quantity_after,
         actor_user_id=adjustment.actor_user_id,
         actor_label=actor_label,
@@ -245,7 +247,6 @@ def _movement_response(movement) -> InventoryMovementResponse:  # noqa: ANN001
         sku=variant.sku if variant else None,
         movement_type=movement.movement_type,
         quantity_delta=movement.quantity_delta,
-        previous_balance=movement.quantity_after - movement.quantity_delta,
         quantity_after=movement.quantity_after,
         order_id=movement.order_id,
         shipment_id=movement.shipment_id,
@@ -405,18 +406,21 @@ async def adjust_product_stock(
     session: Any = Depends(get_db),
     current_user: User = Depends(require_permission("inventory.manage")),
 ) -> ApiResponse[InventoryMovementResponse]:
-    """Product-level Edit Stock for a SINGLE-variant product only. A
-    multi-variant product returns 422 -- the client edits each variant
-    line individually (`POST /stock/{variant_id}/adjust`); no product-
-    level distribution rule is invented server-side.
+    """Product-level Add Stock for a SINGLE-variant product only. A
+    multi-variant product returns 422 -- the client adds stock to each
+    variant line individually (`POST /stock/{variant_id}/adjust`); no
+    product-level distribution rule is invented server-side.
     """
     service = InventoryService(session)
-    movement = await service.adjust_product_to_target(
-        product_id, target_boxes=payload.target_boxes, reason=payload.reason, actor=current_user
+    movement = await service.add_product_stock(
+        product_id,
+        quantity_to_add=payload.quantity_to_add,
+        reason=payload.reason,
+        actor=current_user,
     )
     resolved = await service.movements.get_by_id_with_relations(movement.id)
     assert resolved is not None
-    return ApiResponse(data=_movement_response(resolved), message="Stock adjusted.")
+    return ApiResponse(data=_movement_response(resolved), message="Stock added.")
 
 
 @router.post("/stock/{variant_id}/adjust", response_model=ApiResponse[InventoryMovementResponse])
@@ -427,15 +431,18 @@ async def adjust_stock(
     current_user: User = Depends(require_permission("inventory.manage")),
 ) -> ApiResponse[InventoryMovementResponse]:
     service = InventoryService(session)
-    movement = await service.adjust_to_target(
-        variant_id, target_boxes=payload.target_boxes, reason=payload.reason, actor=current_user
+    movement = await service.add_stock(
+        variant_id,
+        quantity_to_add=payload.quantity_to_add,
+        reason=payload.reason,
+        actor=current_user,
     )
     # Re-fetch with relationships eagerly loaded so the response can
     # include product/variant/actor labels the same way the list endpoint
-    # does -- `adjust_to_target` returns the bare, just-created row.
+    # does -- `add_stock` returns the bare, just-created row.
     resolved = await service.movements.get_by_id_with_relations(movement.id)
     assert resolved is not None  # just committed in the same session, above
-    return ApiResponse(data=_movement_response(resolved), message="Stock adjusted.")
+    return ApiResponse(data=_movement_response(resolved), message="Stock added.")
 
 
 @router.post(
@@ -448,26 +455,24 @@ async def adjust_catalog_variant_stock(
     session: Any = Depends(get_db),
     current_user: User = Depends(require_permission("inventory.manage")),
 ) -> ApiResponse[CatalogVariantStockAdjustmentResponse]:
-    """Edit Stock for a multi-SKU OMS-visible variant (e.g. Blue Packet):
-    ONE total-stock target for the whole CatalogVariant, never a per-SKU
-    value. Recorded on a separate reconciliation ledger -- see
-    `InventoryService.adjust_catalog_variant_to_target` and
+    """Add Stock for a multi-SKU OMS-visible variant (e.g. Blue Packet):
+    ONE quantity added to the whole CatalogVariant's total, never a
+    per-SKU value. Recorded on a separate reconciliation ledger -- see
+    `InventoryService.add_catalog_variant_stock` and
     `app.models.product.CatalogVariantStockAdjustment` for why. No
     `ProductVariant` row (available_quantity, SKU, Shopify id) is ever
     touched by this endpoint.
     """
     service = InventoryService(session)
-    adjustment = await service.adjust_catalog_variant_to_target(
+    adjustment = await service.add_catalog_variant_stock(
         catalog_variant_id,
-        target_boxes=payload.target_boxes,
+        quantity_to_add=payload.quantity_to_add,
         reason=payload.reason,
         actor=current_user,
     )
     resolved = await service.catalog_variant_adjustments.get_by_id_with_relations(adjustment.id)
     assert resolved is not None  # just committed in the same session, above
-    return ApiResponse(
-        data=_catalog_variant_adjustment_response(resolved), message="Stock adjusted."
-    )
+    return ApiResponse(data=_catalog_variant_adjustment_response(resolved), message="Stock added.")
 
 
 @router.get(
@@ -515,6 +520,28 @@ async def update_variant_settings(
     variant = await service.get_variant_stock(variant_id)
     return ApiResponse(
         data=_variant_response(variant, threshold=threshold), message="Packets per box updated."
+    )
+
+
+@router.patch("/stock/{variant_id}/pack-size", response_model=ApiResponse[InventoryVariantResponse])
+async def update_variant_pack_size(
+    variant_id: uuid.UUID,
+    payload: PackSizeUpdateRequest,
+    session: Any = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory.manage")),
+) -> ApiResponse[InventoryVariantResponse]:
+    """How many packets/pouches ONE unit of this variant (as ordered)
+    contains -- combined with packets-per-box, drives how many boxes a
+    future dispatch/RTO deducts/restores for this SKU (see
+    `InventoryService.apply_dispatch`). Never moves `available_boxes`
+    itself, and never rewrites past movement history.
+    """
+    service = InventoryService(session)
+    await service.update_pack_size(variant_id, pack_size=payload.pack_size, actor=current_user)
+    threshold = await service.get_low_stock_threshold()
+    variant = await service.get_variant_stock(variant_id)
+    return ApiResponse(
+        data=_variant_response(variant, threshold=threshold), message="Pack size updated."
     )
 
 

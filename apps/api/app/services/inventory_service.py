@@ -15,11 +15,19 @@ staff manual adjustment. Every move writes exactly one `InventoryMovement`
 row -- the ledger is the audit trail and, for the two automatic movement
 types, also the idempotency guard (see `apply_dispatch`/`apply_rto_restock`).
 
-`OrderItem.quantity` is in PACKETS. Each variant configures its own
-`packets_per_box` (never a hardcoded constant); a dispatch/restock
-converts packets -> boxes via ceiling division (`_ceil_div`) -- a
-partially-consumed box still consumes one whole box-equivalent of
-physical stock.
+`OrderItem.quantity` is in UNITS of a specific variant/SKU (Shopify's own
+per-line-item quantity, e.g. "1" for one 120-Pack bundle purchased), not
+already in packets. Each variant configures two independent, per-variant
+ratios (never hardcoded constants): `pack_size` (how many packets/pouches
+ONE unit of this variant contains -- 60 for a "60 Pack" SKU, 120 for a
+"120 Pack" SKU) and `packets_per_box` (how many packets fit in one
+physical warehouse box). A dispatch/restock first converts the order
+line to a true packet count (`quantity * pack_size`), then converts
+THAT to boxes via ceiling division (`_ceil_div`) against `packets_per_box`
+-- a partially-consumed box still consumes one whole box-equivalent of
+physical stock. Both ratios default to 1, so a variant with neither
+configured behaves exactly as before this two-ratio conversion existed
+(1 unit ordered == 1 box).
 
 Idempotency: `OrderItem` has no per-shipment/per-RTO quantity split (it
 only ever records the order line's full quantity), so a dispatch/restock
@@ -301,7 +309,9 @@ class InventoryService:
             )
             if variant is None:
                 continue
-            required_boxes = _ceil_div(item.quantity, variant.packets_per_box)
+            required_boxes = _ceil_div(
+                item.quantity * variant.pack_size, variant.packets_per_box
+            )
             if variant.available_quantity < required_boxes:
                 shortages.append(
                     {
@@ -355,7 +365,7 @@ class InventoryService:
             if already_moved:
                 continue
 
-            boxes = _ceil_div(item.quantity, variant.packets_per_box)
+            boxes = _ceil_div(item.quantity * variant.pack_size, variant.packets_per_box)
             new_quantity = variant.available_quantity - boxes
             try:
                 # SAVEPOINT, not a bare write: `exists_for_order` above is
@@ -449,7 +459,7 @@ class InventoryService:
             if dispatch_movement is not None:
                 boxes = abs(dispatch_movement.quantity_delta)
             else:
-                boxes = _ceil_div(item.quantity, variant.packets_per_box)
+                boxes = _ceil_div(item.quantity * variant.pack_size, variant.packets_per_box)
 
             new_quantity = variant.available_quantity + boxes
             try:
@@ -480,16 +490,18 @@ class InventoryService:
 
     # --- staff-initiated writes ------------------------------------------
 
-    async def adjust_to_target(
-        self, variant_id: uuid.UUID, *, target_boxes: int, reason: str, actor: User | None
+    async def add_stock(
+        self, variant_id: uuid.UUID, *, quantity_to_add: int, reason: str, actor: User | None
     ) -> InventoryMovement:
-        """Absolute-target manual adjustment: staff enters the new total
-        (e.g. "25 boxes"), never a raw delta -- the delta is computed and
-        recorded here so the movement ledger always shows both the
-        intent (previous -> new) and the resulting change.
+        """Add-incoming-stock manual adjustment: staff enters ONLY the
+        quantity being added (e.g. "+100 boxes"), never the resulting
+        total -- the new total is computed and recorded here (current +
+        quantity_to_add) so the movement ledger always shows both the
+        addition and the resulting balance. Never decreases stock -- a
+        downward correction is a different, not-yet-supported action.
         """
-        if target_boxes < 0:
-            raise ValidationError("Target stock cannot be negative.")
+        if quantity_to_add <= 0:
+            raise ValidationError("Quantity to add must be a positive number.")
         if not reason or not reason.strip():
             raise ValidationError("A reason is required for a manual stock adjustment.")
 
@@ -498,16 +510,14 @@ class InventoryService:
             raise NotFoundError("Product variant not found.")
 
         previous_quantity = variant.available_quantity
-        delta = target_boxes - previous_quantity
-        if delta == 0:
-            raise ValidationError("New stock must be different from the current stock.")
+        new_quantity = previous_quantity + quantity_to_add
 
-        await self.variants.update(variant, available_quantity=target_boxes)
+        await self.variants.update(variant, available_quantity=new_quantity)
         movement = await self.movements.create(
             product_variant_id=variant.id,
             movement_type=InventoryMovementType.MANUAL_ADJUSTMENT,
-            quantity_delta=delta,
-            quantity_after=target_boxes,
+            quantity_delta=quantity_to_add,
+            quantity_after=new_quantity,
             reason=reason.strip(),
             actor_user_id=actor.id if actor else None,
         )
@@ -517,25 +527,24 @@ class InventoryService:
             entity_type="product_variant",
             entity_id=str(variant.id),
             previous_value={"available_quantity": previous_quantity},
-            new_value={"available_quantity": target_boxes},
+            new_value={"available_quantity": new_quantity},
             metadata={"reason": reason.strip()},
         )
         await self.session.commit()
         return movement
 
-    async def adjust_product_to_target(
-        self, product_id: uuid.UUID, *, target_boxes: int, reason: str, actor: User | None
+    async def add_product_stock(
+        self, product_id: uuid.UUID, *, quantity_to_add: int, reason: str, actor: User | None
     ) -> InventoryMovement:
-        """Product-level Edit Stock convenience for a product that has
-        exactly ONE underlying variant -- forwards to `adjust_to_target`
-        for that variant unchanged (same movement, same audit row, same
-        negative-stock rejection).
+        """Product-level Add Stock convenience for a product that has
+        exactly ONE underlying variant -- forwards to `add_stock` for that
+        variant unchanged (same movement, same audit row).
 
         A product with more than one variant is rejected outright: there
-        is no non-arbitrary way to split a single product-level box
-        target across variants, and inventing one is explicitly out of
-        scope. The client adjusts each variant line individually via
-        `adjust_to_target` instead.
+        is no non-arbitrary way to split a single product-level addition
+        across variants, and inventing one is explicitly out of scope.
+        The client adds stock to each variant line individually via
+        `add_stock` instead.
         """
         product = await self.session.get(Product, product_id)
         if product is None:
@@ -546,12 +555,12 @@ class InventoryService:
             raise NotFoundError("This product has no variants.")
         if len(variants) > 1:
             raise ValidationError(
-                "This product has multiple variants; adjust each variant's stock "
-                "individually rather than setting a single product-level total."
+                "This product has multiple variants; add stock to each variant "
+                "individually rather than a single product-level total."
             )
 
-        return await self.adjust_to_target(
-            variants[0].id, target_boxes=target_boxes, reason=reason, actor=actor
+        return await self.add_stock(
+            variants[0].id, quantity_to_add=quantity_to_add, reason=reason, actor=actor
         )
 
     async def get_catalog_variant_total(self, catalog_variant_id: uuid.UUID) -> int:
@@ -568,28 +577,33 @@ class InventoryService:
         )
         return sku_total + adjustment_total
 
-    async def adjust_catalog_variant_to_target(
-        self, catalog_variant_id: uuid.UUID, *, target_boxes: int, reason: str, actor: User | None
+    async def add_catalog_variant_stock(
+        self,
+        catalog_variant_id: uuid.UUID,
+        *,
+        quantity_to_add: int,
+        reason: str,
+        actor: User | None,
     ) -> CatalogVariantStockAdjustment:
-        """Absolute-target manual adjustment against the OMS-visible
+        """Add-incoming-stock manual adjustment against the OMS-visible
         CatalogVariant TOTAL (e.g. Blue Packet's combined 60/120/180
-        stock) -- staff enters the new grand total, never a per-SKU
-        value, and never a raw delta.
+        stock) -- staff enters ONLY the quantity being added, never a
+        per-SKU value, and never the resulting total directly.
 
         This intentionally does NOT touch any underlying `ProductVariant`
         row: there is no non-arbitrary way to decide which pack size a
         generic total change belongs to (the same reasoning
-        `adjust_product_to_target` already applies at the product level),
-        so the delta is recorded on a separate, CatalogVariant-scoped
-        ledger instead of being distributed across 60/120/180. Dispatch,
-        RTO, and Shopify sync are completely unaware of this table and
+        `add_product_stock` already applies at the product level), so the
+        addition is recorded on a separate, CatalogVariant-scoped ledger
+        instead of being distributed across 60/120/180. Dispatch, RTO,
+        and Shopify sync are completely unaware of this table and
         continue to move only real per-SKU `available_quantity` exactly
         as before -- this is a reconciliation total layered on top, not a
         new inventory source of truth for what can actually be dispatched
         against a specific SKU.
         """
-        if target_boxes < 0:
-            raise ValidationError("Target stock cannot be negative.")
+        if quantity_to_add <= 0:
+            raise ValidationError("Quantity to add must be a positive number.")
         if not reason or not reason.strip():
             raise ValidationError("A reason is required for a manual stock adjustment.")
 
@@ -598,14 +612,12 @@ class InventoryService:
             raise NotFoundError("Catalog variant not found.")
 
         previous_total = await self.get_catalog_variant_total(catalog_variant_id)
-        delta = target_boxes - previous_total
-        if delta == 0:
-            raise ValidationError("New stock must be different from the current stock.")
+        new_total = previous_total + quantity_to_add
 
         adjustment = await self.catalog_variant_adjustments.create(
             catalog_variant_id=cv.id,
-            quantity_delta=delta,
-            quantity_after=target_boxes,
+            quantity_delta=quantity_to_add,
+            quantity_after=new_total,
             reason=reason.strip(),
             actor_user_id=actor.id if actor else None,
         )
@@ -615,7 +627,7 @@ class InventoryService:
             entity_type="catalog_variant",
             entity_id=str(cv.id),
             previous_value={"available_boxes": previous_total},
-            new_value={"available_boxes": target_boxes},
+            new_value={"available_boxes": new_total},
             metadata={"reason": reason.strip()},
         )
         await self.session.commit()
@@ -648,6 +660,37 @@ class InventoryService:
             entity_id=str(variant.id),
             previous_value={"packets_per_box": previous},
             new_value={"packets_per_box": packets_per_box},
+        )
+        await self.session.commit()
+        return variant
+
+    async def update_pack_size(
+        self, variant_id: uuid.UUID, *, pack_size: int, actor: User | None
+    ) -> ProductVariant:
+        """Changes ONLY how many packets one unit of this variant, as
+        ordered, represents -- never touches `available_quantity`. Affects
+        future dispatch/RTO box math only (see `apply_dispatch`); no past
+        `InventoryMovement` row is ever rewritten.
+        """
+        if pack_size <= 0:
+            raise ValidationError("Pack size must be a positive integer.")
+
+        variant = await self.variants.get_by_id(variant_id)
+        if variant is None:
+            raise NotFoundError("Product variant not found.")
+
+        previous = variant.pack_size
+        if previous == pack_size:
+            return variant
+
+        await self.variants.update(variant, pack_size=pack_size)
+        await self.audit.record(
+            user=actor,
+            action="inventory.pack_size_updated",
+            entity_type="product_variant",
+            entity_id=str(variant.id),
+            previous_value={"pack_size": previous},
+            new_value={"pack_size": pack_size},
         )
         await self.session.commit()
         return variant

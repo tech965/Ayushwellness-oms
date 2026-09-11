@@ -114,14 +114,16 @@ function invalidateInventory(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["inventory"] })
 }
 
-/** Absolute-target adjustment: the caller sends the new total stock (e.g.
- * "25 boxes"), never a raw delta -- the backend computes and records the
- * delta (see `InventoryService.adjust_to_target`).
+/** Add-incoming-stock: the caller sends ONLY the quantity being added
+ * (e.g. "+100 boxes"), never the resulting total -- the backend computes
+ * and records the new balance (current + quantity_to_add), see
+ * `InventoryService.add_stock`. Can only increase stock; the backend
+ * rejects a non-positive quantity.
  */
-export function useAdjustStock(variantId: string) {
+export function useAddStock(variantId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async (input: { target_boxes: number; reason: string }) => {
+    mutationFn: async (input: { quantity_to_add: number; reason: string }) => {
       const response = await apiClient.post<ApiResponse<InventoryMovement>>(
         `/inventory/stock/${variantId}/adjust`,
         input
@@ -132,14 +134,14 @@ export function useAdjustStock(variantId: string) {
   })
 }
 
-/** Absolute-target edit for a SINGLE-variant product -- the backend
- * forwards to that variant's adjustment. A multi-variant product is
- * rejected (422); use `useAdjustVariantStock` per row instead.
+/** Add-incoming-stock for a SINGLE-variant product -- the backend
+ * forwards to that variant's addition. A multi-variant product is
+ * rejected (422); use `useAddVariantStock` per row instead.
  */
-export function useAdjustProductStock(productId: string) {
+export function useAddProductStock(productId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: async (input: { target_boxes: number; reason: string }) => {
+    mutationFn: async (input: { quantity_to_add: number; reason: string }) => {
       const response = await apiClient.post<ApiResponse<InventoryMovement>>(
         `/inventory/products/${productId}/adjust`,
         input
@@ -150,16 +152,16 @@ export function useAdjustProductStock(productId: string) {
   })
 }
 
-/** Variant-agnostic absolute-target edit -- used for the one-row-per-
- * variant Edit Stock on a multi-variant product card. Pass the variant id
+/** Variant-agnostic add-incoming-stock -- used for the one-row-per-
+ * variant Add Stock on a multi-variant product card. Pass the variant id
  * per call so a single hook instance drives every row.
  */
-export function useAdjustVariantStock() {
+export function useAddVariantStock() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (input: {
       variantId: string
-      target_boxes: number
+      quantity_to_add: number
       reason: string
     }) => {
       const { variantId, ...body } = input
@@ -173,18 +175,18 @@ export function useAdjustVariantStock() {
   })
 }
 
-/** Absolute-target edit for a multi-SKU OMS-visible variant's TOTAL
- * stock (e.g. Blue Packet's combined 60/120/180) -- the caller sends
- * ONE new total, never a per-SKU value. Recorded on the CatalogVariant's
+/** Add-incoming-stock for a multi-SKU OMS-visible variant's TOTAL stock
+ * (e.g. Blue Packet's combined 60/120/180) -- the caller sends ONE
+ * quantity to add, never a per-SKU value. Recorded on the CatalogVariant's
  * own reconciliation ledger; no underlying `ProductVariant` row is ever
- * touched by this call (see `InventoryService.adjust_catalog_variant_to_target`).
+ * touched by this call (see `InventoryService.add_catalog_variant_stock`).
  */
-export function useAdjustCatalogVariantStock() {
+export function useAddCatalogVariantStock() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (input: {
       catalogVariantId: string
-      target_boxes: number
+      quantity_to_add: number
       reason: string
     }) => {
       const { catalogVariantId, ...body } = input
@@ -240,6 +242,25 @@ export function useUpdatePacketsPerBox(variantId: string) {
     mutationFn: async (input: { packets_per_box: number }) => {
       const response = await apiClient.patch<ApiResponse<InventoryVariant>>(
         `/inventory/stock/${variantId}/settings`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => invalidateInventory(queryClient),
+  })
+}
+
+/** How many packets/pouches ONE unit of this variant, as ordered,
+ * contains -- combined with packets-per-box, drives how many boxes a
+ * future dispatch/RTO deducts/restores for this SKU. Never moves
+ * `available_boxes` itself.
+ */
+export function useUpdatePackSize(variantId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { pack_size: number }) => {
+      const response = await apiClient.patch<ApiResponse<InventoryVariant>>(
+        `/inventory/stock/${variantId}/pack-size`,
         input
       )
       return response.data.data

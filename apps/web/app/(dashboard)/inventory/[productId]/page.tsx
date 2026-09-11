@@ -28,8 +28,8 @@ import { formatDateTime } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { usePaginationState } from "@/lib/use-pagination"
 import {
-  useAdjustCatalogVariantStock,
-  useAdjustVariantStock,
+  useAddCatalogVariantStock,
+  useAddVariantStock,
   useCatalogVariantAdjustments,
   useInventoryMovements,
   useInventoryProductStock,
@@ -37,6 +37,7 @@ import {
   useSetProductName,
   useSetVariantName,
   useUpdatePacketsPerBox,
+  useUpdatePackSize,
 } from "@/services/inventory"
 import {
   INVENTORY_MOVEMENT_TYPE_OPTIONS,
@@ -288,37 +289,39 @@ function CatalogVariantNameDialog({
   )
 }
 
-/** "Edit Stock" for a SINGLE-SKU OMS-visible variant (the group maps
- * 1:1 to one underlying `ProductVariant`). Absolute target against that
- * one real row via `POST /inventory/stock/{id}/adjust`.
+/** "Add Stock" for a SINGLE-SKU OMS-visible variant (the group maps 1:1
+ * to one underlying `ProductVariant`). Staff enters ONLY the incoming
+ * quantity -- never the resulting total -- via
+ * `POST /inventory/stock/{id}/adjust`.
  */
-function SingleSkuEditStockDialog({ group }: { group: OmsCatalogVariant }) {
-  const adjust = useAdjustVariantStock()
+function SingleSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
+  const add = useAddVariantStock()
   const [open, setOpen] = React.useState(false)
   const [reason, setReason] = React.useState("")
-  const [target, setTarget] = React.useState("")
+  const [quantity, setQuantity] = React.useState("")
   const variant = group.underlying_variants[0]
 
   function openDialog() {
     setReason("")
-    setTarget(variant ? String(variant.available_boxes) : "")
+    setQuantity("")
     setOpen(true)
   }
 
-  const parsed = Number(target)
-  const valid = target !== "" && Number.isInteger(parsed) && parsed >= 0
-  const delta = valid && variant ? parsed - variant.available_boxes : 0
-  const canSave = Boolean(variant) && valid && delta !== 0 && reason.trim().length > 0
+  const parsed = Number(quantity)
+  const valid = quantity !== "" && Number.isInteger(parsed) && parsed > 0
+  const canSave = Boolean(variant) && valid && reason.trim().length > 0
 
   async function save() {
     if (!variant) return
     try {
-      await adjust.mutateAsync({
+      const result = await add.mutateAsync({
         variantId: variant.id,
-        target_boxes: parsed,
+        quantity_to_add: parsed,
         reason: reason.trim(),
       })
-      toast.success("Stock adjusted.")
+      toast.success(
+        `Stock Added: +${parsed} boxes. New Stock: ${result?.quantity_after ?? "—"} boxes.`
+      )
       setOpen(false)
     } catch (error) {
       toast.error(getApiErrorMessage(error))
@@ -328,32 +331,33 @@ function SingleSkuEditStockDialog({ group }: { group: OmsCatalogVariant }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <Button variant="outline" size="sm" onClick={openDialog}>
-        Edit Stock
+        Add Stock
       </Button>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Edit Stock — {group.name}</DialogTitle>
+          <DialogTitle>Add Stock — {group.name}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <div className="text-sm">
-            Current Total Stock:{" "}
+            Current Stock:{" "}
             <span className="font-semibold">{variant?.available_boxes ?? 0} boxes</span>
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="target-total">New Total Stock</Label>
+            <Label htmlFor="quantity-to-add">Quantity to Add</Label>
             <Input
-              id="target-total"
+              id="quantity-to-add"
               type="number"
-              min={0}
+              min={1}
               className="w-32"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+              placeholder="0"
+              autoFocus
             />
           </div>
-          {valid && delta !== 0 && (
-            <span className={cn("font-semibold", delta < 0 ? "text-red-600" : "text-emerald-600")}>
-              {delta > 0 ? "+" : ""}
-              {delta} boxes
+          {valid && (
+            <span className="font-semibold text-emerald-600">
+              New Stock: {(variant?.available_boxes ?? 0) + parsed} boxes
             </span>
           )}
           <div className="flex flex-col gap-1.5">
@@ -370,8 +374,8 @@ function SingleSkuEditStockDialog({ group }: { group: OmsCatalogVariant }) {
           <Button variant="outline" onClick={() => setOpen(false)}>
             Cancel
           </Button>
-          <Button disabled={!canSave || adjust.isPending} onClick={save}>
-            {adjust.isPending ? "Saving..." : "Save"}
+          <Button disabled={!canSave || add.isPending} onClick={save}>
+            {add.isPending ? "Saving..." : "Add Stock"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -379,43 +383,44 @@ function SingleSkuEditStockDialog({ group }: { group: OmsCatalogVariant }) {
   )
 }
 
-/** "Edit Stock" for a MULTI-SKU OMS-visible variant (e.g. Blue Packet,
- * grouping 60/120/180). ONE total-stock target for the whole
- * CatalogVariant -- never a per-SKU input. The 60/120/180 rows
+/** "Add Stock" for a MULTI-SKU OMS-visible variant (e.g. Blue Packet,
+ * grouping 60/120/180). ONE incoming quantity added to the whole
+ * CatalogVariant's total -- never a per-SKU input. The 60/120/180 rows
  * underneath stay read-only informational; this dialog never shows or
  * submits their individual values. Saved via
  * `POST /inventory/catalog-variants/{id}/adjust`, which records the
- * edit on the CatalogVariant's own reconciliation ledger and never
+ * addition on the CatalogVariant's own reconciliation ledger and never
  * writes to any underlying `ProductVariant` row (see
- * `InventoryService.adjust_catalog_variant_to_target`).
+ * `InventoryService.add_catalog_variant_stock`).
  */
-function MultiSkuEditStockDialog({ group }: { group: OmsCatalogVariant }) {
+function MultiSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
   const catalogVariantId = group.catalog_variant_id
-  const adjust = useAdjustCatalogVariantStock()
+  const add = useAddCatalogVariantStock()
   const [open, setOpen] = React.useState(false)
   const [reason, setReason] = React.useState("")
-  const [target, setTarget] = React.useState("")
+  const [quantity, setQuantity] = React.useState("")
 
   function openDialog() {
     setReason("")
-    setTarget(String(group.available_boxes))
+    setQuantity("")
     setOpen(true)
   }
 
-  const parsed = Number(target)
-  const valid = target !== "" && Number.isInteger(parsed) && parsed >= 0
-  const delta = valid ? parsed - group.available_boxes : 0
-  const canSave = Boolean(catalogVariantId) && valid && delta !== 0 && reason.trim().length > 0
+  const parsed = Number(quantity)
+  const valid = quantity !== "" && Number.isInteger(parsed) && parsed > 0
+  const canSave = Boolean(catalogVariantId) && valid && reason.trim().length > 0
 
   async function save() {
     if (!catalogVariantId) return
     try {
-      await adjust.mutateAsync({
+      const result = await add.mutateAsync({
         catalogVariantId,
-        target_boxes: parsed,
+        quantity_to_add: parsed,
         reason: reason.trim(),
       })
-      toast.success("Stock adjusted.")
+      toast.success(
+        `Stock Added: +${parsed} boxes. New Stock: ${result?.quantity_after ?? "—"} boxes.`
+      )
       setOpen(false)
     } catch (error) {
       toast.error(getApiErrorMessage(error))
@@ -425,37 +430,38 @@ function MultiSkuEditStockDialog({ group }: { group: OmsCatalogVariant }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <Button variant="outline" size="sm" onClick={openDialog}>
-        Edit Stock
+        Add Stock
       </Button>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Edit Stock — {group.name}</DialogTitle>
+          <DialogTitle>Add Stock — {group.name}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <p className="text-muted-foreground text-sm">
             This is the combined total across every underlying Shopify pack size. The
-            individual pack sizes below stay as read-only reference — this edit is recorded
-            against {group.name}&apos;s own total, not any one of them.
+            individual pack sizes below stay as read-only reference — this addition is
+            recorded against {group.name}&apos;s own total, not any one of them.
           </p>
           <div className="text-sm">
-            Current Total Stock:{" "}
+            Current Stock:{" "}
             <span className="font-semibold">{group.available_boxes} boxes</span>
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="target-total">New Total Stock</Label>
+            <Label htmlFor="quantity-to-add">Quantity to Add</Label>
             <Input
-              id="target-total"
+              id="quantity-to-add"
               type="number"
-              min={0}
+              min={1}
               className="w-32"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+              placeholder="0"
+              autoFocus
             />
           </div>
-          {valid && delta !== 0 && (
-            <span className={cn("font-semibold", delta < 0 ? "text-red-600" : "text-emerald-600")}>
-              {delta > 0 ? "+" : ""}
-              {delta} boxes
+          {valid && (
+            <span className="font-semibold text-emerald-600">
+              New Stock: {group.available_boxes + parsed} boxes
             </span>
           )}
           <div className="flex flex-col gap-1.5">
@@ -472,8 +478,8 @@ function MultiSkuEditStockDialog({ group }: { group: OmsCatalogVariant }) {
           <Button variant="outline" onClick={() => setOpen(false)}>
             Cancel
           </Button>
-          <Button disabled={!canSave || adjust.isPending} onClick={save}>
-            {adjust.isPending ? "Saving..." : "Save"}
+          <Button disabled={!canSave || add.isPending} onClick={save}>
+            {add.isPending ? "Saving..." : "Add Stock"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -481,15 +487,15 @@ function MultiSkuEditStockDialog({ group }: { group: OmsCatalogVariant }) {
   )
 }
 
-/** Dispatches to the right Edit Stock UX: a multi-SKU OMS variant (e.g.
- * Blue Packet) edits its combined total as ONE number; a single-SKU
- * variant edits that one real row directly. Never both at once.
+/** Dispatches to the right Add Stock UX: a multi-SKU OMS variant (e.g.
+ * Blue Packet) adds to its combined total as ONE number; a single-SKU
+ * variant adds to that one real row directly. Never both at once.
  */
-function OmsEditStockDialog({ group }: { group: OmsCatalogVariant }) {
+function OmsAddStockDialog({ group }: { group: OmsCatalogVariant }) {
   if (group.underlying_variant_count > 1) {
-    return <MultiSkuEditStockDialog group={group} />
+    return <MultiSkuAddStockDialog group={group} />
   }
-  return <SingleSkuEditStockDialog group={group} />
+  return <SingleSkuAddStockDialog group={group} />
 }
 
 /** Packets-per-box configuration for one underlying Shopify variant --
@@ -557,6 +563,76 @@ function PacketsPerBoxDialog({ variant }: { variant: ProductVariantStockLine }) 
   )
 }
 
+/** How many packets/pouches ONE unit of this variant (as ordered, e.g.
+ * "1" for one 120-Pack bundle purchased) actually contains -- e.g. 60
+ * for a "60 Pack" SKU, 120 for a "120 Pack" SKU. Combined with Packets/
+ * box above, this drives how many boxes a FUTURE dispatch/RTO deducts/
+ * restores for this SKU (see `InventoryService.apply_dispatch`); it
+ * never moves `available_boxes` itself or rewrites past history.
+ */
+function PackSizeDialog({ variant }: { variant: ProductVariantStockLine }) {
+  const [open, setOpen] = React.useState(false)
+  const [value, setValue] = React.useState(String(variant.pack_size))
+  const update = useUpdatePackSize(variant.id)
+
+  function openDialog() {
+    setValue(String(variant.pack_size))
+    setOpen(true)
+  }
+
+  const parsed = Number(value)
+  const canSubmit = value !== "" && Number.isInteger(parsed) && parsed > 0
+
+  function submit() {
+    update.mutate(
+      { pack_size: parsed },
+      {
+        onSuccess: () => {
+          toast.success("Pack size updated.")
+          setOpen(false)
+        },
+        onError: (error) => toast.error(getApiErrorMessage(error)),
+      }
+    )
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Button variant="ghost" size="sm" onClick={openDialog}>
+        Pack size
+      </Button>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Pack size — {variant.display_title}</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          <p className="text-muted-foreground text-sm">
+            How many packets ONE unit of this SKU contains (e.g. 120 for a &quot;120
+            Pack&quot;) -- drives future shipment/RTO box math for this SKU only. The box
+            count itself (
+            {variant.available_boxes} boxes) and past movement history are not affected.
+          </p>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="pack-size">Pack size (packets per unit)</Label>
+            <Input
+              id="pack-size"
+              type="number"
+              min={1}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button disabled={!canSubmit || update.isPending} onClick={submit}>
+            {update.isPending ? "Saving..." : "Save"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** The underlying Shopify variant rows for ONE OMS variant -- kept intact
  * and shown only inside a clearly secondary, collapsible section (rows,
  * never OMS-visible cards).
@@ -597,7 +673,8 @@ function UnderlyingShopifyVariants({
                   <span className="font-medium">{label}</span>
                   <span className="text-muted-foreground">
                     {" "}
-                    · SKU {v.sku} · {v.available_boxes} boxes · {v.packets_per_box}/box
+                    · SKU {v.sku} · {v.available_boxes} boxes · {v.packets_per_box}/box · pack
+                    size {v.pack_size}
                   </span>
                 </div>
               </div>
@@ -605,6 +682,7 @@ function UnderlyingShopifyVariants({
                 <div className="flex gap-1">
                   <VariantNameEditor variant={v} />
                   <PacketsPerBoxDialog variant={v} />
+                  <PackSizeDialog variant={v} />
                 </div>
               )}
             </div>
@@ -692,12 +770,7 @@ function OmsVariantHistory({
         )
       },
     },
-    {
-      id: "previous",
-      header: "Previous balance",
-      cell: (row) => `${row.previous_balance} boxes`,
-    },
-    { id: "new", header: "New balance", cell: (row) => `${row.quantity_after} boxes` },
+    { id: "balance", header: "Stock Balance", cell: (row) => `${row.quantity_after} boxes` },
     {
       id: "reference",
       header: "Reference",
@@ -770,8 +843,7 @@ function CatalogVariantTotalAdjustmentHistory({ group }: { group: OmsCatalogVari
         </span>
       ),
     },
-    { id: "previous", header: "Previous total", cell: (row) => `${row.previous_balance} boxes` },
-    { id: "new", header: "New total", cell: (row) => `${row.quantity_after} boxes` },
+    { id: "balance", header: "Stock Balance", cell: (row) => `${row.quantity_after} boxes` },
     { id: "reason", header: "Reason", cell: (row) => row.reason },
     { id: "actor", header: "Actor/source", cell: (row) => row.actor_label },
   ]
@@ -867,7 +939,7 @@ function OmsVariantCard({
           data-testid={`oms-variant-actions-${group.catalog_variant_id ?? group.underlying_variants[0]?.id ?? group.name}`}
         >
           {canManage && group.underlying_variant_count > 0 && (
-            <OmsEditStockDialog group={group} />
+            <OmsAddStockDialog group={group} />
           )}
           {canManage && <OmsVariantNameEditor group={group} />}
           <Button variant="ghost" size="sm" onClick={() => setShowHistory((s) => !s)}>

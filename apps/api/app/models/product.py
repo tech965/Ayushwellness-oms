@@ -167,6 +167,7 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
             "source_system", "external_id", name="uq_product_variants_source_external_id"
         ),
         CheckConstraint("packets_per_box > 0", name="ck_product_variants_packets_per_box_positive"),
+        CheckConstraint("pack_size > 0", name="ck_product_variants_pack_size_positive"),
     )
 
     product_id: Mapped[uuid.UUID] = mapped_column(
@@ -210,6 +211,20 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
     packets_per_box: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )
+    # How many packets/pouches ONE unit of THIS variant (as ordered --
+    # `OrderItem.quantity` counts units of this specific SKU, e.g. "1" for
+    # one 120-Pack bundle purchased) actually contains -- deliberately
+    # per-variant, never a global constant. Combined with `packets_per_box`
+    # above, `InventoryService` converts an order line to boxes as
+    # `ceil(quantity * pack_size / packets_per_box)`, so a 120-Pack variant
+    # (pack_size=120) against a 60-pouch box (packets_per_box=60) correctly
+    # deducts 2 boxes per unit sold, not 1. Defaults to 1 for every
+    # pre-existing row so a variant with no real pack size configured yet
+    # behaves exactly as before (1 unit ordered == 1 packet == today's
+    # existing ceil(quantity/packets_per_box) formula, unchanged). Changing
+    # this value only changes future dispatch/RTO box math -- it never
+    # itself moves `available_quantity` or rewrites a past `InventoryMovement`.
+    pack_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     weight: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
     barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
     options: Mapped[dict | None] = mapped_column(JSONType, nullable=True)

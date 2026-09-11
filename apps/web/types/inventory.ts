@@ -41,6 +41,12 @@ export interface InventoryVariant {
   /** What the UI shows: override if set, else Shopify title, else SKU. */
   display_title: string
   packets_per_box: number
+  /** How many packets/pouches ONE unit of this variant, as ordered,
+   * contains (e.g. 60 for a "60 Pack" SKU, 120 for a "120 Pack" SKU).
+   * Combined with `packets_per_box`, drives how many boxes a future
+   * dispatch/RTO deducts/restores for this SKU. Defaults to 1.
+   */
+  pack_size: number
   available_boxes: number
   total_packets: number
   stock_status: StockStatus
@@ -66,6 +72,7 @@ export interface ProductVariantStockLine {
   display_title: string
   available_boxes: number
   packets_per_box: number
+  pack_size: number
   total_packets: number
   stock_status: StockStatus
   /** This row's OWN Shopify image, if Shopify assigned one distinct from
@@ -143,7 +150,6 @@ export interface InventoryMovement {
   sku: string | null
   movement_type: InventoryMovementType
   quantity_delta: number
-  previous_balance: number
   quantity_after: number
   order_id: string | null
   shipment_id: string | null
@@ -164,7 +170,6 @@ export interface CatalogVariantStockAdjustment {
   id: string
   catalog_variant_id: string
   quantity_delta: number
-  previous_balance: number
   quantity_after: number
   actor_user_id: string | null
   actor_label: string

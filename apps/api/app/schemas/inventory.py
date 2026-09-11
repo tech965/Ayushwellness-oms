@@ -27,6 +27,7 @@ class InventoryVariantResponse(BaseModel):
     variant_title_override: str | None
     display_title: str
     packets_per_box: int
+    pack_size: int
     available_boxes: int
     total_packets: int
     stock_status: StockStatus
@@ -80,6 +81,7 @@ class ProductVariantStockLine(BaseModel):
     display_title: str
     available_boxes: int
     packets_per_box: int
+    pack_size: int
     total_packets: int
     stock_status: StockStatus
     # This row's OWN Shopify image (`ProductVariant.image_url`), if
@@ -159,13 +161,14 @@ class InventoryProductStockResponse(BaseModel):
 
 
 class ProductStockAdjustmentRequest(BaseModel):
-    """Absolute-target adjustment for a SINGLE-variant product -- the same
+    """Add-incoming-stock request for a SINGLE-variant product -- the same
     contract as `InventoryAdjustmentRequest`. A product with more than one
-    variant is rejected (no invented distribution rule); the client edits
-    each variant line individually via `POST /inventory/stock/{id}/adjust`.
+    variant is rejected (no invented distribution rule); the client adds
+    stock to each variant line individually via
+    `POST /inventory/stock/{id}/adjust`.
     """
 
-    target_boxes: int = Field(ge=0, description="The new total stock, in boxes.")
+    quantity_to_add: int = Field(gt=0, description="Quantity being added, in boxes.")
     reason: str = Field(min_length=1, max_length=255)
 
 
@@ -234,7 +237,6 @@ class InventoryMovementResponse(BaseModel):
     sku: str | None
     movement_type: InventoryMovementType
     quantity_delta: int
-    previous_balance: int
     quantity_after: int
     order_id: uuid.UUID | None
     shipment_id: uuid.UUID | None
@@ -247,12 +249,14 @@ class InventoryMovementResponse(BaseModel):
 
 
 class InventoryAdjustmentRequest(BaseModel):
-    """Absolute-target adjustment -- staff enters the new total stock, not
-    a raw delta. `InventoryService.adjust_to_target` computes and records
-    the resulting delta.
+    """Add-incoming-stock request -- staff enters ONLY the quantity being
+    added, never the resulting total. `InventoryService.add_stock`
+    computes and records the resulting balance (current + quantity_to_add).
+    Rejects a non-positive quantity so this can never be used to silently
+    decrease stock.
     """
 
-    target_boxes: int = Field(ge=0, description="The new total stock, in boxes.")
+    quantity_to_add: int = Field(gt=0, description="Quantity being added, in boxes.")
     reason: str = Field(min_length=1, max_length=255)
 
 
@@ -266,7 +270,6 @@ class CatalogVariantStockAdjustmentResponse(BaseModel):
     id: uuid.UUID
     catalog_variant_id: uuid.UUID
     quantity_delta: int
-    previous_balance: int
     quantity_after: int
     actor_user_id: uuid.UUID | None
     actor_label: str
@@ -276,3 +279,9 @@ class CatalogVariantStockAdjustmentResponse(BaseModel):
 
 class PacketsPerBoxUpdateRequest(BaseModel):
     packets_per_box: int = Field(gt=0, description="Packets contained in one box.")
+
+
+class PackSizeUpdateRequest(BaseModel):
+    pack_size: int = Field(
+        gt=0, description="Packets/pouches ONE unit of this variant, as ordered, contains."
+    )
