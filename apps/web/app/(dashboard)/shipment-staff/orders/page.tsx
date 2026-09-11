@@ -2,9 +2,8 @@
 
 import * as React from "react"
 import { ExternalLink } from "lucide-react"
-import { toast } from "sonner"
 
-import { ShiprocketOrderIdDialog } from "@/components/fulfillment/shiprocket-order-id-dialog"
+import { ProcessShipmentDialog } from "@/components/fulfillment/process-shipment-dialog"
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import type { DateRangeValue } from "@/components/shared/date-range-picker"
 import { FilterBar } from "@/components/shared/filter-bar"
@@ -22,12 +21,15 @@ import {
 } from "@/components/ui/select"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatMoney } from "@/lib/format"
-import { SHIPROCKET_READY_TO_SHIP_URL } from "@/lib/shiprocket"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import { useLocateShiprocketOrdersForMyScope, useMyConfirmedOrders } from "@/services/shipment-staff"
+import {
+  useMyConfirmedOrders,
+  useProcessExistingShipmentsForMyScope,
+} from "@/services/shipment-staff"
 import { PAYMENT_TYPE_OPTIONS } from "@/types/order"
 import {
   SHIPMENT_STATUS_OPTIONS,
+  type ProcessExistingShipmentResult,
   type ShipmentQueueRow,
   type ShipmentStatus,
 } from "@/types/shipment"
@@ -60,64 +62,41 @@ export default function ShipmentStaffOrdersPage() {
 
 function ShipmentStaffOrdersContent() {
   const { filters, setFilters, clearFilters } = useUrlFilters(FILTER_DEFAULTS)
-  const locate = useLocateShiprocketOrdersForMyScope()
-  // Debounces a double-click into one `window.open`, not two tabs --
-  // opening Shiprocket's page is a read-only navigation, never a
-  // mutation, so this is purely a UX guard. Keyed per order id so
-  // opening one row's link never disables another's button.
-  const [openingOrderId, setOpeningOrderId] = React.useState<string | null>(null)
+  const processShipment = useProcessExistingShipmentsForMyScope()
   const [dialogOpen, setDialogOpen] = React.useState(false)
-  const [dialogOrderId, setDialogOrderId] = React.useState<string | null>(null)
+  const [dialogResult, setDialogResult] = React.useState<ProcessExistingShipmentResult | null>(
+    null
+  )
+  // Keyed per order id so processing one row never disables another's
+  // button.
+  const [processingOrderId, setProcessingOrderId] = React.useState<string | null>(null)
 
-  function showUnavailable(message?: string | null) {
-    toast.error("Shiprocket order ID is unavailable for this order.", {
-      description:
-        message ??
-        "The OMS doesn't have a stored Shiprocket order id for this order yet -- it hasn't " +
-          "been pushed to Shiprocket from here, and hasn't been matched back from Shiprocket " +
-          "either.",
-    })
-  }
-
-  // Opens Shiprocket's plain "Ready to Ship" page and hands `id` to the
-  // operator via `ShiprocketOrderIdDialog` -- never an automatic
-  // clipboard write here (see that dialog's docstring for exactly why:
-  // a copy chained right after `window.open()`/this async lookup
-  // reliably fails the browser's clipboard focus/activation check).
-  function openReadyToShipAndShowId(orderId: string, id: string) {
-    window.open(SHIPROCKET_READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
-    setDialogOrderId(id)
+  // Calls the API equivalent of Shiprocket's own dashboard "Bulk Ship
+  // Orders" action for this one order -- resolves its EXISTING Shiprocket
+  // shipment server-side (unchanged `locate_shiprocket_orders`) and
+  // assigns an AWB, skipping if one is already on file. Never a
+  // Shiprocket create-shipment API call.
+  function handleProcessShipment(orderId: string) {
+    setProcessingOrderId(orderId)
+    setDialogResult(null)
     setDialogOpen(true)
-    window.setTimeout(
-      () => setOpeningOrderId((current) => (current === orderId ? null : current)),
-      1000
-    )
-  }
-
-  function openShiprocketOrder(orderId: string, id: string | null) {
-    if (openingOrderId === orderId || locate.isPending) return
-    if (id) {
-      setOpeningOrderId(orderId)
-      openReadyToShipAndShowId(orderId, id)
-      return
-    }
-    // No locally-known Shiprocket order id yet -- ask the backend to
-    // locate the EXISTING order live before giving up (never creates
-    // one; see `useLocateShiprocketOrdersForMyScope`).
-    setOpeningOrderId(orderId)
-    locate.mutate([orderId], {
-      onSuccess: (results) => {
-        const result = results[0]
-        if (result?.shiprocket_order_id) {
-          openReadyToShipAndShowId(orderId, result.shiprocket_order_id)
-        } else {
-          setOpeningOrderId(null)
-          showUnavailable(result?.message)
-        }
+    processShipment.mutate([orderId], {
+      onSuccess: (data) => {
+        setProcessingOrderId(null)
+        setDialogResult(data.results[0] ?? null)
       },
       onError: (error) => {
-        setOpeningOrderId(null)
-        toast.error(getApiErrorMessage(error))
+        setProcessingOrderId(null)
+        setDialogResult({
+          order_id: orderId,
+          order_number: null,
+          status: "failed",
+          shiprocket_shipment_id: null,
+          shiprocket_order_id: null,
+          awb: null,
+          courier_name: null,
+          reason: getApiErrorMessage(error),
+        })
       },
     })
   }
@@ -186,39 +165,36 @@ function ShipmentStaffOrdersContent() {
     {
       id: "actions",
       header: "",
-      // "Ship Order"/"Process Shipment" open Shiprocket's plain "Ready
-      // to Ship" page in a new tab, then show the real Shiprocket order
-      // id via `ShiprocketOrderIdDialog` for the operator to copy --
-      // never a Shiprocket create-shipment API call from here (Shiprocket
-      // may already have this order, e.g. via its
-      // own Shopify channel connector, independent of this OMS, so
-      // creating one here risked a real duplicate-shipment bug). See
-      // `ShipmentActionCell` (Fulfillment's equivalent table) for the
-      // identical rule -- kept as a small local duplicate rather than
-      // reusing that component directly, since it also renders a "View"
-      // button pointed at `/orders/{id}`, a page this Shipment Staff
-      // role has no permission to open.
-      cell: (r) =>
-        r.shipment_id ? (
+      // "Ship Order"/"Process Shipment" -- the API equivalent of
+      // Shiprocket's own dashboard "Bulk Ship Orders" action -- never a
+      // Shiprocket create-shipment API call from here (Shiprocket may
+      // already have this order, e.g. via its own Shopify channel
+      // connector, independent of this OMS, so creating one here risked
+      // a real duplicate-shipment bug). See `ShipmentActionCell`
+      // (Fulfillment's equivalent table) for the identical rule -- kept
+      // as a small local duplicate rather than reusing that component
+      // directly, since it also renders a "View" button pointed at
+      // `/orders/{id}`, a page this Shipment Staff role has no
+      // permission to open.
+      cell: (r) => {
+        const isProcessing = processingOrderId === r.order_id
+        return r.shipment_id ? (
           <Button
             size="sm"
             variant="outline"
-            disabled={openingOrderId === r.order_id}
-            onClick={() => openShiprocketOrder(r.order_id, r.shiprocket_order_id)}
+            disabled={isProcessing}
+            onClick={() => handleProcessShipment(r.order_id)}
           >
             <ExternalLink className="size-3.5" />
-            {openingOrderId === r.order_id && locate.isPending ? "Checking..." : "Process Shipment"}
+            {isProcessing ? "Processing..." : "Process Shipment"}
           </Button>
         ) : (
-          <Button
-            size="sm"
-            disabled={openingOrderId === r.order_id}
-            onClick={() => openShiprocketOrder(r.order_id, r.shiprocket_order_id)}
-          >
+          <Button size="sm" disabled={isProcessing} onClick={() => handleProcessShipment(r.order_id)}>
             <ExternalLink className="size-3.5" />
-            {openingOrderId === r.order_id && locate.isPending ? "Checking..." : "Ship Order"}
+            {isProcessing ? "Processing..." : "Ship Order"}
           </Button>
-        ),
+        )
+      },
     },
   ]
 
@@ -301,7 +277,12 @@ function ShipmentStaffOrdersContent() {
           )}
         </QueryStates>
       </div>
-      <ShiprocketOrderIdDialog open={dialogOpen} onOpenChange={setDialogOpen} orderId={dialogOrderId} />
+      <ProcessShipmentDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        isPending={processShipment.isPending}
+        result={dialogResult}
+      />
     </>
   )
 }

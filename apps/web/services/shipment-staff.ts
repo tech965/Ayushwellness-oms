@@ -7,6 +7,7 @@ import type { OrderDetail } from "@/types/order"
 import type { RTO, RTOListFilters } from "@/types/rto"
 import type {
   LocateShiprocketOrderResult,
+  ProcessExistingShipmentsResponse,
   Shipment,
   ShipmentAnalytics,
   ShipmentEvent,
@@ -74,6 +75,30 @@ export function useLocateShiprocketOrdersForMyScope() {
         { order_ids: orderIds }
       )
       return response.data.data ?? []
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["shipment-staff"] })
+    },
+  })
+}
+
+/** Scoped equivalent of `useProcessExistingShipments` (`services/
+ * orders.ts`) -- every order id is re-checked server-side against this
+ * Shipment Staff user's own scope (`ShipmentStaffService.get_scoped_
+ * order`). NEVER creates a Shiprocket order; only assigns an AWB to an
+ * order's EXISTING Shiprocket shipment, skipping any that already has
+ * one. Backs "Process Shipment"/"Ship Order" on this page.
+ */
+export function useProcessExistingShipmentsForMyScope() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (orderIds: string[]) => {
+      const response = await apiClient.post<ApiResponse<ProcessExistingShipmentsResponse>>(
+        "/shipment-staff/orders/bulk-process-shipments",
+        { order_ids: orderIds }
+      )
+      if (!response.data.data) throw new Error("Shipment processing response not available.")
+      return response.data.data
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["shipment-staff"] })

@@ -200,7 +200,6 @@ function ConfirmedByTelecallerContent() {
           shopifySyncStatus={r.shopify_sync_status}
           orderStatus={r.status}
           fulfillmentStatus={r.fulfillment_status}
-          shiprocketOrderId={r.shiprocket_order_id}
         />
       ),
     },
@@ -312,7 +311,7 @@ function ConfirmedByTelecallerContent() {
             <span className="font-medium">Selected {selectedIds.size} orders</span>
             <div className="flex items-center gap-2">
               <Button size="sm" onClick={() => setBulkShipOpen(true)}>
-                Open in Shiprocket
+                Process Shipment
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
                 Clear Selection

@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { screen, waitFor, within } from "@testing-library/react"
+import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import FulfillmentOrdersPage from "@/app/(dashboard)/fulfillment/orders/page"
-import { toast } from "sonner"
-import { useLocateShiprocketOrders, useShipmentQueue } from "@/services/shipment-queue"
+import { useProcessExistingShipments } from "@/services/orders"
+import { useShipmentQueue } from "@/services/shipment-queue"
 import { useRetryShopifySync } from "@/services/shipments"
 import { useTeamTelecallers } from "@/services/team"
+import type { ProcessExistingShipmentResult } from "@/types/shipment"
 
 const mockPush = vi.fn()
 const READY_TO_SHIP_URL = "https://app.shiprocket.in/seller/orders/readytoship"
@@ -24,7 +25,10 @@ vi.mock("sonner", () => ({
 
 vi.mock("@/services/shipment-queue", () => ({
   useShipmentQueue: vi.fn(),
-  useLocateShiprocketOrders: vi.fn(),
+}))
+
+vi.mock("@/services/orders", () => ({
+  useProcessExistingShipments: vi.fn(),
 }))
 
 vi.mock("@/services/shipments", () => ({
@@ -37,45 +41,60 @@ vi.mock("@/services/team", () => ({
 
 const mockedUseShipmentQueue = vi.mocked(useShipmentQueue)
 const mockedUseTeamTelecallers = vi.mocked(useTeamTelecallers)
-const mockedUseLocateShiprocketOrders = vi.mocked(useLocateShiprocketOrders)
+const mockedUseProcessExistingShipments = vi.mocked(useProcessExistingShipments)
 const mockedUseRetryShopifySync = vi.mocked(useRetryShopifySync)
 
-/** Default: a locate that reports "not found" for whatever ids it's
- * handed -- individual tests override `mutate` for the found path.
+type ProcessOpts = {
+  onSuccess?: (r: { processed_count: number; skipped_count: number; failed_count: number; results: ProcessExistingShipmentResult[] }) => void
+  onError?: (e: unknown) => void
+}
+
+function _notFoundResult(id: string): ProcessExistingShipmentResult {
+  return {
+    order_id: id,
+    order_number: null,
+    status: "failed",
+    shiprocket_shipment_id: null,
+    shiprocket_order_id: null,
+    awb: null,
+    courier_name: null,
+    reason: "Existing Shiprocket order could not be located for this order.",
+  }
+}
+
+/** Default: every order id "fails to locate" -- individual tests override
+ * `mutate` for the success/skipped paths. This hook now does the whole
+ * resolve+assign in one server-side call -- no separate "locate" step on
+ * the frontend anymore.
  */
-function mockLocateHook(
-  impl: (ids: string[], opts?: { onSuccess?: (r: unknown) => void }) => void = (ids, opts) =>
-    opts?.onSuccess?.(
-      ids.map((id) => ({
-        order_id: id,
-        status: "not_found",
-        shiprocket_order_id: null,
-        message: null,
-      }))
-    )
+function mockProcessShipments(
+  impl: (orderIds: string[], opts?: ProcessOpts) => void = (orderIds, opts) => {
+    const results = orderIds.map(_notFoundResult)
+    opts?.onSuccess?.({
+      processed_count: 0,
+      skipped_count: 0,
+      failed_count: results.length,
+      results,
+    })
+  },
+  isPending = false
 ) {
-  mockedUseLocateShiprocketOrders.mockReturnValue({
-    mutate: vi.fn(impl),
-    isPending: false,
-  } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
+  const mutate = vi.fn(impl)
+  mockedUseProcessExistingShipments.mockReturnValue({
+    mutate,
+    isPending,
+    reset: vi.fn(),
+  } as unknown as ReturnType<typeof useProcessExistingShipments>)
+  return mutate
 }
 
 function mockShipHooks() {
-  mockLocateHook()
+  const mutate = mockProcessShipments()
   mockedUseRetryShopifySync.mockReturnValue({
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useRetryShopifySync>)
-}
-
-/** `navigator.clipboard` must be stubbed AFTER `userEvent.setup()` --
- * that call installs its own clipboard emulation, which would otherwise
- * clobber a stub set beforehand.
- */
-function mockClipboard() {
-  const writeText = vi.fn().mockResolvedValue(undefined)
-  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
-  return writeText
+  return mutate
 }
 
 const ROW = {
@@ -118,9 +137,17 @@ function mockQueue(data = [ROW]) {
 
 describe("FulfillmentOrdersPage", () => {
   let openSpy: ReturnType<typeof vi.spyOn>
+  let clipboardSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     openSpy = vi.spyOn(window, "open").mockReturnValue(null)
+    // 7. No clipboard dependency exists for this workflow -- stubbed only
+    // to detect an unexpected call, never relied on for the flow to work.
+    clipboardSpy = vi.fn()
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: clipboardSpy },
+      configurable: true,
+    })
   })
 
   afterEach(() => {
@@ -128,42 +155,39 @@ describe("FulfillmentOrdersPage", () => {
     vi.clearAllMocks()
   })
 
-  it("shows the unavailable message when a live locate finds no existing Shiprocket order", async () => {
+  it("calls the new process-shipment endpoint with this order's id when Ship Order is clicked", async () => {
     const user = userEvent.setup()
     mockQueue()
-    mockShipHooks()
+    const mutate = mockShipHooks()
 
     renderWithProviders(<FulfillmentOrdersPage />)
 
-    expect(screen.getByText("Orders Need Shipment")).toBeInTheDocument()
-    expect(screen.getByText("Alice")).toBeInTheDocument()
-    expect(screen.getByText("Ready to Ship")).toBeInTheDocument()
-
-    // No stored Shiprocket order id -- clicking triggers a live locate
-    // (never a create-shipment call), and when that also finds nothing
-    // the button says so instead of opening a guessed URL.
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    expect(openSpy).not.toHaveBeenCalled()
-    expect(toast.error).toHaveBeenCalledWith(
-      "Shiprocket order ID is unavailable for this order.",
-      expect.anything()
-    )
+
+    expect(mutate).toHaveBeenCalledWith(["order-1"], expect.anything())
     expect(mockPush).not.toHaveBeenCalled()
+    expect(clipboardSpy).not.toHaveBeenCalled()
   })
 
-  it("opens the plain Ready to Ship page and shows the resolved ID in a dialog when a live locate finds it", async () => {
+  it("shows the processing state, then courier + AWB on success", async () => {
     const user = userEvent.setup()
-    mockClipboard()
     mockQueue()
-    mockLocateHook((ids, opts) =>
-      opts?.onSuccess?.(
-        ids.map((id) => ({
+    mockProcessShipments((orderIds, opts) =>
+      opts?.onSuccess?.({
+        processed_count: 1,
+        skipped_count: 0,
+        failed_count: 0,
+        results: orderIds.map((id) => ({
           order_id: id,
-          status: "found",
-          shiprocket_order_id: "1576398335",
-          message: null,
-        }))
-      )
+          order_number: "OMS-0001",
+          status: "success",
+          shiprocket_shipment_id: "7001",
+          shiprocket_order_id: "1900007001",
+          awb: "AWB90001",
+          courier_name: "Delhivery",
+          reason: null,
+        })),
+      })
     )
     mockedUseRetryShopifySync.mockReturnValue({
       mutate: vi.fn(),
@@ -173,96 +197,101 @@ describe("FulfillmentOrdersPage", () => {
     renderWithProviders(<FulfillmentOrdersPage />)
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    // Ready to Ship opens with no query string -- no automatic clipboard
-    // attempt is chained after it.
-    expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
 
     const dialog = await screen.findByRole("dialog")
-    expect(within(dialog).getByDisplayValue("1576398335")).toBeInTheDocument()
+    expect(within(dialog).getByText(/Courier: Delhivery/i)).toBeInTheDocument()
+    expect(within(dialog).getByText(/AWB: AWB90001/i)).toBeInTheDocument()
+    expect(clipboardSpy).not.toHaveBeenCalled()
   })
 
-  it("copies the ID directly from the dialog's own Copy Order ID button click, not automatically", async () => {
+  it("shows the already-processed (skipped) state when the shipment already has an AWB", async () => {
     const user = userEvent.setup()
-    const writeText = mockClipboard()
-    mockQueue([{ ...ROW, shiprocket_order_id: "1576398335" }])
-    mockShipHooks()
-
-    renderWithProviders(<FulfillmentOrdersPage />)
-
-    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    const dialog = await screen.findByRole("dialog")
-    // Not copied yet -- only the dialog's own button click does that.
-    expect(writeText).not.toHaveBeenCalled()
-
-    await user.click(within(dialog).getByRole("button", { name: /^Copy Order ID$/i }))
-    expect(writeText).toHaveBeenCalledWith("1576398335")
-    expect(toast.success).toHaveBeenCalledWith("Shiprocket Order ID 1576398335 copied.")
-  })
-
-  it("leaves the ID selected in the dialog when the clipboard API fails, instead of silently doing nothing", async () => {
-    const user = userEvent.setup()
-    const writeText = vi.fn().mockRejectedValue(new DOMException("Document is not focused."))
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
-    mockQueue([{ ...ROW, shiprocket_order_id: "1576398335" }])
-    mockShipHooks()
-
-    renderWithProviders(<FulfillmentOrdersPage />)
-
-    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    const dialog = await screen.findByRole("dialog")
-    const field = within(dialog).getByDisplayValue("1576398335") as HTMLInputElement
-
-    await user.click(within(dialog).getByRole("button", { name: /^Copy Order ID$/i }))
-
-    expect(toast.warning).toHaveBeenCalledWith(
-      "Couldn't copy automatically.",
-      expect.anything()
+    mockQueue([{ ...ROW, shipment_id: "ship-1", shipment_status: "pending" }])
+    mockProcessShipments((orderIds, opts) =>
+      opts?.onSuccess?.({
+        processed_count: 0,
+        skipped_count: 1,
+        failed_count: 0,
+        results: orderIds.map((id) => ({
+          order_id: id,
+          order_number: "OMS-0001",
+          status: "skipped",
+          shiprocket_shipment_id: "7001",
+          shiprocket_order_id: "1900007001",
+          awb: "EXISTING-AWB",
+          courier_name: "Delhivery",
+          reason: "AWB already assigned.",
+        })),
+      })
     )
-    // The field is still there, still holding the real id, and selected
-    // (its value is never cleared) -- a manual Ctrl+C always works.
-    expect(field).toBeInTheDocument()
-    expect(field.value).toBe("1576398335")
-    expect(field.readOnly).toBe(true)
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Process Shipment$/i }))
+
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByText(/already has AWB EXISTING-AWB/i)).toBeInTheDocument()
   })
 
-  it("opens the plain Ready to Ship page directly when the id is already on the row", async () => {
+  it("shows the failure reason when processing fails", async () => {
     const user = userEvent.setup()
-    mockClipboard()
-    mockQueue([{ ...ROW, shiprocket_order_id: "1576398335" }])
+    mockQueue()
     mockShipHooks()
 
     renderWithProviders(<FulfillmentOrdersPage />)
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
-    expect(mockPush).not.toHaveBeenCalled()
+
+    const dialog = await screen.findByRole("dialog")
+    expect(
+      within(dialog).getByText(/Existing Shiprocket order could not be located/i)
+    ).toBeInTheDocument()
   })
 
-  it("shows Process Shipment (not Ship Order) once a shipment already exists", async () => {
+  it("shows a failure reason from a request-level error (never silently swallowed)", async () => {
     const user = userEvent.setup()
-    mockClipboard()
-    mockQueue([
-      {
-        ...ROW,
-        shipment_id: "ship-1",
-        shipment_status: "pending",
-        shiprocket_order_id: "1576398335",
-      },
-    ])
+    mockQueue()
+    mockProcessShipments((_orderIds, opts) =>
+      opts?.onError?.(new Error("Shiprocket is not configured."))
+    )
+    mockedUseRetryShopifySync.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRetryShopifySync>)
+
+    renderWithProviders(<FulfillmentOrdersPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByText(/Shiprocket is not configured\./i)).toBeInTheDocument()
+  })
+
+  it("opens the plain Ready to Ship page from the dialog, with no order_ids query parameter", async () => {
+    const user = userEvent.setup()
+    mockQueue()
     mockShipHooks()
 
     renderWithProviders(<FulfillmentOrdersPage />)
 
-    expect(screen.queryByRole("button", { name: /^Ship Order$/i })).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: /^Process Shipment$/i }))
+    await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    const dialog = await screen.findByRole("dialog")
+
+    await user.click(within(dialog).getByRole("button", { name: /^Open Shiprocket Ready to Ship$/i }))
+
     expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
-    expect(mockPush).not.toHaveBeenCalled()
+    const [openedUrl] = openSpy.mock.calls[0]
+    expect(String(openedUrl)).not.toContain("?")
+    expect(String(openedUrl)).not.toContain("order_ids")
   })
 
   it("does not open a second tab on a rapid double-click -- the dialog itself blocks re-clicking the button", async () => {
     const user = userEvent.setup()
-    mockClipboard()
-    mockQueue([{ ...ROW, shiprocket_order_id: "1576398335" }])
+    mockQueue()
     mockShipHooks()
 
     renderWithProviders(<FulfillmentOrdersPage />)
@@ -272,89 +301,42 @@ describe("FulfillmentOrdersPage", () => {
     await screen.findByRole("dialog")
 
     // The open dialog makes the underlying table inert -- a second click
-    // on the same button can't even be delivered, so at most one tab is
-    // ever opened per dialog.
-    expect(openSpy).toHaveBeenCalledTimes(1)
+    // on the same button can't even be delivered.
+    expect(openSpy).not.toHaveBeenCalled()
   })
 
-  it("bulk action locates every selected order, copies its ID, and never calls a create-shipment API", async () => {
+  it("processes every selected order in one bulk call and shows a per-order result summary", async () => {
     const user = userEvent.setup()
-    const writeText = mockClipboard()
-    const locateMutate = vi.fn((ids: string[], opts?: { onSuccess?: (r: unknown) => void }) =>
-      opts?.onSuccess?.(
-        ids.map((id) => ({
-          order_id: id,
-          status: "found",
-          shiprocket_order_id: "1600000001",
-          message: null,
-        }))
-      )
-    )
-    mockQueue()
-    mockedUseLocateShiprocketOrders.mockReturnValue({
-      mutate: locateMutate,
-      data: [
-        {
-          order_id: "order-1",
-          status: "found",
-          shiprocket_order_id: "1600000001",
-          message: null,
-        },
-      ],
-      isPending: false,
-    } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
-    mockedUseRetryShopifySync.mockReturnValue({
-      mutate: vi.fn(),
-      isPending: false,
-    } as unknown as ReturnType<typeof useRetryShopifySync>)
-
-    renderWithProviders(<FulfillmentOrdersPage />)
-
-    const checkboxes = screen.getAllByRole("checkbox")
-    await user.click(checkboxes[1])
-    expect(screen.getByText("Selected 1 orders")).toBeInTheDocument()
-
-    await user.click(screen.getByRole("button", { name: /^Open in Shiprocket$/i }))
-
-    const dialog = screen.getByRole("alertdialog")
-    expect(locateMutate).toHaveBeenCalledWith(["order-1"])
-    // No "Create Shipments"/per-row "Open" action anywhere in this
-    // dialog anymore -- only the shared "Open Ready to Ship" + per-row
-    // "Copy ID".
-    expect(
-      within(dialog).queryByRole("button", { name: /create shipment/i })
-    ).not.toBeInTheDocument()
-    expect(within(dialog).getByText("1600000001")).toBeInTheDocument()
-
-    await user.click(within(dialog).getByRole("button", { name: /^Copy ID$/i }))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith("1600000001"))
-
-    await user.click(within(dialog).getByRole("button", { name: /^Open Ready to Ship$/i }))
-    expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
-  })
-
-  it("bulk dialog reports orders whose Shiprocket order could not be located", async () => {
-    const user = userEvent.setup()
-    mockClipboard()
     mockQueue([ROW, { ...ROW, order_id: "order-2", order_number: "OMS-0002" }])
-    mockedUseLocateShiprocketOrders.mockReturnValue({
-      mutate: vi.fn(),
-      data: [
-        {
-          order_id: "order-1",
-          status: "found",
-          shiprocket_order_id: "1600000001",
-          message: null,
-        },
-        {
-          order_id: "order-2",
-          status: "not_found",
-          shiprocket_order_id: null,
-          message: "Existing Shiprocket order could not be located for this order.",
-        },
-      ],
-      isPending: false,
-    } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
+    mockProcessShipments((orderIds, opts) =>
+      opts?.onSuccess?.({
+        processed_count: 1,
+        skipped_count: 0,
+        failed_count: 1,
+        results: [
+          {
+            order_id: orderIds[0],
+            order_number: "OMS-0001",
+            status: "success",
+            shiprocket_shipment_id: "7001",
+            shiprocket_order_id: "1900007001",
+            awb: "AWB90001",
+            courier_name: "Delhivery",
+            reason: null,
+          },
+          {
+            order_id: orderIds[1],
+            order_number: "OMS-0002",
+            status: "failed",
+            shiprocket_shipment_id: null,
+            shiprocket_order_id: null,
+            awb: null,
+            courier_name: null,
+            reason: "Existing Shiprocket order could not be located for this order.",
+          },
+        ],
+      })
+    )
     mockedUseRetryShopifySync.mockReturnValue({
       mutate: vi.fn(),
       isPending: false,
@@ -364,11 +346,20 @@ describe("FulfillmentOrdersPage", () => {
 
     const checkboxes = screen.getAllByRole("checkbox")
     await user.click(checkboxes[0]) // select-all header checkbox
-    await user.click(screen.getByRole("button", { name: /^Open in Shiprocket$/i }))
+    await user.click(screen.getByRole("button", { name: /^Process Shipment$/i }))
 
-    const dialog = screen.getByRole("alertdialog")
-    expect(within(dialog).getByText(/verify manually in Shiprocket/i)).toBeInTheDocument()
-    expect(within(dialog).getByText("OMS-0002")).toBeInTheDocument()
+    const dialog = await screen.findByRole("alertdialog")
+    expect(
+      await within(dialog).findByText("Processed 1 of 2 selected orders")
+    ).toBeInTheDocument()
+    expect(within(dialog).getByText(/Courier: Delhivery — AWB: AWB90001/)).toBeInTheDocument()
+    expect(
+      within(dialog).getByText(/Existing Shiprocket order could not be located/i)
+    ).toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole("button", { name: /^Open Shiprocket Ready to Ship$/i }))
+    expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
+    expect(clipboardSpy).not.toHaveBeenCalled()
   })
 
   it("does not show the bulk toolbar when nothing is selected", () => {

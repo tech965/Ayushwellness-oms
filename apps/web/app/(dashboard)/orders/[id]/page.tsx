@@ -7,7 +7,7 @@ import { ExternalLink, Mail, MapPin, Phone, PhoneCall, Tag, Truck } from "lucide
 import { toast } from "sonner"
 
 import { CashfreePaymentCard } from "@/components/orders/cashfree-payment-card"
-import { ShiprocketOrderIdDialog } from "@/components/fulfillment/shiprocket-order-id-dialog"
+import { ProcessShipmentDialog } from "@/components/fulfillment/process-shipment-dialog"
 import { Breadcrumbs } from "@/components/shared/breadcrumbs"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
@@ -35,14 +35,18 @@ import {
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
 import { formatDateTime, formatMoney } from "@/lib/format"
-import { SHIPROCKET_READY_TO_SHIP_URL } from "@/lib/shiprocket"
 import { usePaymentsForOrder } from "@/services/payments"
 import { useRefundsForOrder } from "@/services/refunds"
 import { useReturnsForOrder } from "@/services/returns"
-import { useLocateShiprocketOrders } from "@/services/shipment-queue"
+import {
+  useOrder,
+  useOrderTimeline,
+  useProcessExistingShipments,
+  useTransitionOrderStatus,
+} from "@/services/orders"
 import { useShipmentsForOrder } from "@/services/shipments"
-import { useOrder, useOrderTimeline, useTransitionOrderStatus } from "@/services/orders"
 import { ORDER_STATUS_OPTIONS, type OrderAddress, type OrderStatus } from "@/types/order"
+import type { ProcessExistingShipmentResult } from "@/types/shipment"
 
 function OrderDetailSkeleton() {
   return (
@@ -78,50 +82,41 @@ function OrderDetailContent() {
   const returnsQuery = useReturnsForOrder(orderId)
   const refundsQuery = useRefundsForOrder(orderId)
   const transition = useTransitionOrderStatus(orderId)
-  const locate = useLocateShiprocketOrders()
+  const processShipment = useProcessExistingShipments()
 
   const [nextStatus, setNextStatus] = React.useState<OrderStatus | undefined>(undefined)
   const [dialogOpen, setDialogOpen] = React.useState(false)
-  const [dialogOrderId, setDialogOrderId] = React.useState<string | null>(null)
+  const [dialogResult, setDialogResult] = React.useState<ProcessExistingShipmentResult | null>(
+    null
+  )
 
-  // "Ship Order" opens Shiprocket's plain "Ready to Ship" page in a new
-  // tab, then shows the real Shiprocket order id via
-  // `ShiprocketOrderIdDialog` for the operator to copy -- never a
+  // "Ship Order" -- the API equivalent of Shiprocket's own dashboard
+  // "Bulk Ship Orders" action: resolves this order's EXISTING Shiprocket
+  // shipment server-side (unchanged `locate_shiprocket_orders`) and
+  // assigns it an AWB, skipping if one is already on file -- never a
   // Shiprocket create-shipment API call from here. Shiprocket may already
   // have this order (e.g. via its own Shopify channel connector,
   // independent of this OMS), so creating one here risked a real,
   // confirmed duplicate-shipment bug -- see the identical rule on
-  // `ShipmentActionCell`, the Fulfillment Queue's equivalent action.
-  // This card only ever shows the button while no `Shipment` row exists
-  // yet for this order (`!shipmentsQuery.data?.length` below), so the
-  // OMS never has a stored Shiprocket order id to use here locally -- a
-  // click asks the backend to locate the EXISTING Shiprocket order live
-  // (`useLocateShiprocketOrders`, never creates one) before falling back
-  // to the "unavailable" message. The dialog's own "Copy Order ID"
-  // button is the only place a clipboard write is ever attempted -- see
-  // its docstring for why a copy chained right after `window.open()`/
-  // this network lookup reliably fails the browser's clipboard
-  // focus/activation check instead.
+  // `ShipmentActionCell`, the Fulfillment Queue's equivalent action. This
+  // card only ever shows the button while no `Shipment` row exists yet
+  // for this order (`!shipmentsQuery.data?.length` below).
   function openShiprocketOrder() {
-    if (locate.isPending) return
-    locate.mutate([orderId], {
-      onSuccess: (results) => {
-        const result = results[0]
-        if (result?.shiprocket_order_id) {
-          window.open(SHIPROCKET_READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
-          setDialogOrderId(result.shiprocket_order_id)
-          setDialogOpen(true)
-        } else {
-          toast.error("Shiprocket order ID is unavailable for this order.", {
-            description:
-              result?.message ??
-              "The OMS doesn't have a stored Shiprocket order id for this order yet -- it hasn't " +
-                "been pushed to Shiprocket from here, and hasn't been matched back from Shiprocket " +
-                "either.",
-          })
-        }
-      },
-      onError: (error) => toast.error(getApiErrorMessage(error)),
+    setDialogResult(null)
+    setDialogOpen(true)
+    processShipment.mutate([orderId], {
+      onSuccess: (data) => setDialogResult(data.results[0] ?? null),
+      onError: (error) =>
+        setDialogResult({
+          order_id: orderId,
+          order_number: null,
+          status: "failed",
+          shiprocket_shipment_id: null,
+          shiprocket_order_id: null,
+          awb: null,
+          courier_name: null,
+          reason: getApiErrorMessage(error),
+        }),
     })
   }
 
@@ -450,9 +445,13 @@ function OrderDetailContent() {
                 <CardHeader className="flex flex-row items-center justify-between gap-2">
                   <CardTitle>Shipment</CardTitle>
                   {hasPermission("shipments.update") && !shipmentsQuery.data?.length && (
-                    <Button size="sm" disabled={locate.isPending} onClick={openShiprocketOrder}>
+                    <Button
+                      size="sm"
+                      disabled={processShipment.isPending}
+                      onClick={openShiprocketOrder}
+                    >
                       <ExternalLink className="size-3.5" />
-                      {locate.isPending ? "Checking..." : "Ship Order"}
+                      {processShipment.isPending ? "Processing..." : "Ship Order"}
                     </Button>
                   )}
                 </CardHeader>
@@ -581,7 +580,12 @@ function OrderDetailContent() {
           </div>
         )}
       </QueryStates>
-      <ShiprocketOrderIdDialog open={dialogOpen} onOpenChange={setDialogOpen} orderId={dialogOrderId} />
+      <ProcessShipmentDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        isPending={processShipment.isPending}
+        result={dialogResult}
+      />
     </>
   )
 }

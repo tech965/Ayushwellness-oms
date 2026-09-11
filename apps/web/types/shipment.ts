@@ -201,3 +201,31 @@ export interface LocateShiprocketOrderResult {
   shiprocket_order_id: string | null
   message: string | null
 }
+
+/** One order's outcome from `POST /orders/bulk-process-shipments` (or its
+ * Shipment Staff scoped equivalent) -- the API equivalent of Shiprocket's
+ * own dashboard "Bulk Ship Orders" action for an order that already has
+ * an EXISTING Shiprocket shipment. NEVER creates a Shiprocket order.
+ * `"skipped"` means the shipment already had an AWB on file (never
+ * re-assigned); `"failed"` covers everything from "order not found" to a
+ * genuine Shiprocket API error, always with a human-readable `reason`.
+ */
+export interface ProcessExistingShipmentResult {
+  order_id: string
+  order_number: string | null
+  status: "success" | "skipped" | "failed"
+  shiprocket_shipment_id: string | null
+  shiprocket_order_id: string | null
+  awb: string | null
+  // Whichever courier Shiprocket itself returned/had already assigned --
+  // this OMS never sends a courier_id, so this is purely informational.
+  courier_name: string | null
+  reason: string | null
+}
+
+export interface ProcessExistingShipmentsResponse {
+  processed_count: number
+  skipped_count: number
+  failed_count: number
+  results: ProcessExistingShipmentResult[]
+}

@@ -44,7 +44,12 @@ from app.schemas.shipment import (
     BulkShipValidationResult,
     ShipmentResponse,
 )
-from app.schemas.shiprocket import ShiprocketShipRequest
+from app.schemas.shiprocket import (
+    ProcessExistingShipmentResult,
+    ProcessExistingShipmentsRequest,
+    ProcessExistingShipmentsResponse,
+    ShiprocketShipRequest,
+)
 from app.services.order_service import OrderService
 from app.services.shiprocket_service import ShiprocketOperationsService, shiprocket_order_id
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
@@ -357,6 +362,47 @@ async def bulk_ship_orders_via_shiprocket(
             results=result_items,
         ),
         message=f"{shipped_count} of {len(result_items)} shipments created.",
+    )
+
+
+@router.post(
+    "/bulk-process-shipments", response_model=ApiResponse[ProcessExistingShipmentsResponse]
+)
+async def bulk_process_existing_shiprocket_shipments(
+    payload: ProcessExistingShipmentsRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("shipments.update")),
+) -> ApiResponse[ProcessExistingShipmentsResponse]:
+    """Process Shipment / Ship Order -- the API equivalent of Shiprocket's
+    own dashboard "Bulk Ship Orders" action, for orders that already have
+    an EXISTING Shiprocket order/shipment. Deliberately distinct from
+    `POST /bulk-ship` above: that endpoint creates a NEW Shiprocket
+    shipment via `orders/create/adhoc`; this one NEVER does that -- it
+    only resolves each order's existing shipment (via `locate_shiprocket_
+    orders`, unchanged) and assigns an AWB to it (skipping any shipment
+    that already has one). Used for both the single-order "Process
+    Shipment"/"Ship Order" button (a one-item `order_ids`) and the bulk
+    Fulfillment Queue action -- one order's failure never blocks the
+    rest; every order gets its own `status`/`reason` in the response.
+    """
+    results = await ShiprocketOperationsService(session).bulk_process_existing_shipments(
+        payload.order_ids, actor=current_user
+    )
+    result_items = [ProcessExistingShipmentResult(**r) for r in results]
+    processed_count = sum(1 for r in result_items if r.status == "success")
+    skipped_count = sum(1 for r in result_items if r.status == "skipped")
+    failed_count = sum(1 for r in result_items if r.status == "failed")
+    return ApiResponse(
+        data=ProcessExistingShipmentsResponse(
+            processed_count=processed_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            results=result_items,
+        ),
+        message=(
+            f"{processed_count} processed, {skipped_count} already had an AWB, "
+            f"{failed_count} failed."
+        ),
     )
 
 

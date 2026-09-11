@@ -9,6 +9,7 @@ import type {
   OrderListFilters,
   OrderStatus,
 } from "@/types/order"
+import type { ProcessExistingShipmentsResponse } from "@/types/shipment"
 
 interface ListParams extends OrderListFilters {
   page: number
@@ -146,6 +147,34 @@ export function useTransitionOrderStatus(id: string) {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["orders", id] })
+    },
+  })
+}
+
+/** Process Shipment / Ship Order -- the API equivalent of Shiprocket's own
+ * dashboard "Bulk Ship Orders" action, for orders that already have an
+ * EXISTING Shiprocket order/shipment (`POST /orders/bulk-process-shipments`).
+ * NEVER creates a Shiprocket order -- only resolves each order's existing
+ * shipment and assigns an AWB to it, skipping any that already have one.
+ * Used for both the single-order "Process Shipment"/"Ship Order" button (a
+ * one-item `orderIds`) and the bulk Fulfillment Queue action -- every order
+ * gets its own `status`/`reason` in the response, never all-or-nothing.
+ */
+export function useProcessExistingShipments() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (orderIds: string[]) => {
+      const response = await apiClient.post<ApiResponse<ProcessExistingShipmentsResponse>>(
+        "/orders/bulk-process-shipments",
+        { order_ids: orderIds }
+      )
+      if (!response.data.data) throw new Error("Shipment processing response not available.")
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
+      void queryClient.invalidateQueries({ queryKey: ["shipments"] })
+      void queryClient.invalidateQueries({ queryKey: ["orders"] })
     },
   })
 }

@@ -240,6 +240,42 @@ class ShipmentStaffService:
         await self.get_scoped_shipment(shipment_id, actor=actor)
         return await self.shiprocket_ops.assign_awb(shipment_id, actor=actor, courier_id=courier_id)
 
+    async def bulk_process_existing_shipments_for_my_scope(
+        self, order_ids: list[uuid.UUID], *, actor: User
+    ) -> list[dict[str, object]]:
+        """Scoped equivalent of `ShiprocketOperationsService.
+        bulk_process_existing_shipments` -- every order is re-resolved
+        through `get_scoped_order` first (never trusted from the client),
+        so this can only ever process one of this Shipment Staff user's
+        own scoped orders. Delegates the actual work to `ShiprocketOperations
+        Service.process_shipment_for_order` (same as Fulfillment/Admin's
+        `POST /orders/bulk-process-shipments`) -- no duplicated Shiprocket
+        logic, and it NEVER creates a Shiprocket order for the identical
+        reason that endpoint doesn't.
+        """
+        results: list[dict[str, object]] = []
+        for order_id in order_ids:
+            try:
+                order = await self.get_scoped_order(order_id, actor=actor)
+            except (NotFoundError, AuthorizationError):
+                results.append(
+                    {
+                        "order_id": order_id,
+                        "order_number": None,
+                        "status": "failed",
+                        "shiprocket_shipment_id": None,
+                        "shiprocket_order_id": None,
+                        "awb": None,
+                        "courier_name": None,
+                        "reason": "Order not found or not in your scope.",
+                    }
+                )
+                continue
+            results.append(
+                await self.shiprocket_ops.process_shipment_for_order(order, actor=actor)
+            )
+        return results
+
     async def request_pickup(self, shipment_id: uuid.UUID, *, actor: User) -> Shipment:
         await self.get_scoped_shipment(shipment_id, actor=actor)
         return await self.shiprocket_ops.request_pickup(shipment_id, actor=actor)

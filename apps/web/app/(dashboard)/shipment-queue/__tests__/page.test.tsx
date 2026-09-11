@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { screen } from "@testing-library/react"
+import { screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import ShipmentQueuePage from "@/app/(dashboard)/shipment-queue/page"
-import { toast } from "sonner"
-import { useLocateShiprocketOrders, useShipmentQueue } from "@/services/shipment-queue"
+import { useProcessExistingShipments } from "@/services/orders"
+import { useShipmentQueue } from "@/services/shipment-queue"
 import { useRetryShopifySync } from "@/services/shipments"
 import { useTeamTelecallers } from "@/services/team"
+import type { ProcessExistingShipmentResult } from "@/types/shipment"
 
 const mockPush = vi.fn()
 const READY_TO_SHIP_URL = "https://app.shiprocket.in/seller/orders/readytoship"
@@ -24,7 +25,10 @@ vi.mock("sonner", () => ({
 
 vi.mock("@/services/shipment-queue", () => ({
   useShipmentQueue: vi.fn(),
-  useLocateShiprocketOrders: vi.fn(),
+}))
+
+vi.mock("@/services/orders", () => ({
+  useProcessExistingShipments: vi.fn(),
 }))
 
 vi.mock("@/services/shipments", () => ({
@@ -37,7 +41,7 @@ vi.mock("@/services/team", () => ({
 
 const mockedUseShipmentQueue = vi.mocked(useShipmentQueue)
 const mockedUseTeamTelecallers = vi.mocked(useTeamTelecallers)
-const mockedUseLocateShiprocketOrders = vi.mocked(useLocateShiprocketOrders)
+const mockedUseProcessExistingShipments = vi.mocked(useProcessExistingShipments)
 const mockedUseRetryShopifySync = vi.mocked(useRetryShopifySync)
 
 const ROW = {
@@ -62,42 +66,57 @@ const ROW = {
   courier_name: null,
 }
 
-function mockShipHooks() {
-  mockedUseLocateShiprocketOrders.mockReturnValue({
-    mutate: vi.fn((ids: string[], opts?: { onSuccess?: (r: unknown) => void }) =>
-      opts?.onSuccess?.(
-        ids.map((id) => ({
-          order_id: id,
-          status: "not_found",
-          shiprocket_order_id: null,
-          message: null,
-        }))
-      )
-    ),
-    data: undefined,
+type ProcessOpts = {
+  onSuccess?: (r: {
+    processed_count: number
+    skipped_count: number
+    failed_count: number
+    results: ProcessExistingShipmentResult[]
+  }) => void
+  onError?: (e: unknown) => void
+}
+
+function mockShipHooks(
+  impl: (orderIds: string[], opts?: ProcessOpts) => void = (orderIds, opts) =>
+    opts?.onSuccess?.({
+      processed_count: 0,
+      skipped_count: 0,
+      failed_count: orderIds.length,
+      results: orderIds.map((id) => ({
+        order_id: id,
+        order_number: null,
+        status: "failed",
+        shiprocket_shipment_id: null,
+        shiprocket_order_id: null,
+        awb: null,
+        courier_name: null,
+        reason: "Existing Shiprocket order could not be located for this order.",
+      })),
+    })
+) {
+  mockedUseProcessExistingShipments.mockReturnValue({
+    mutate: vi.fn(impl),
     isPending: false,
-  } as unknown as ReturnType<typeof useLocateShiprocketOrders>)
+  } as unknown as ReturnType<typeof useProcessExistingShipments>)
   mockedUseRetryShopifySync.mockReturnValue({
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useRetryShopifySync>)
 }
 
-/** `navigator.clipboard` must be stubbed AFTER `userEvent.setup()` --
- * that call installs its own clipboard emulation, which would otherwise
- * clobber a stub set beforehand.
- */
-function mockClipboard() {
-  const writeText = vi.fn().mockResolvedValue(undefined)
-  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
-  return writeText
-}
-
 describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
   let openSpy: ReturnType<typeof vi.spyOn>
+  let clipboardSpy: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     openSpy = vi.spyOn(window, "open").mockReturnValue(null)
+    // No clipboard dependency exists for this workflow -- stubbed only to
+    // detect an unexpected call, never relied on for the flow to work.
+    clipboardSpy = vi.fn()
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: clipboardSpy },
+      configurable: true,
+    })
   })
 
   afterEach(() => {
@@ -105,9 +124,8 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
     vi.clearAllMocks()
   })
 
-  it("renders orders needing shipment with a Ship Order action that opens the plain Shiprocket Ready to Ship page", async () => {
+  it("renders orders needing shipment; Ship Order processes it and opens the plain Shiprocket Ready to Ship page from the result dialog", async () => {
     const user = userEvent.setup()
-    mockClipboard()
     mockedUseShipmentQueue.mockReturnValue({
       isLoading: false,
       isError: false,
@@ -121,7 +139,23 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
     mockedUseTeamTelecallers.mockReturnValue({
       data: [{ telecaller_id: "tc-1", telecaller_name: "Sourabh" }],
     } as unknown as ReturnType<typeof useTeamTelecallers>)
-    mockShipHooks()
+    mockShipHooks((orderIds, opts) =>
+      opts?.onSuccess?.({
+        processed_count: 1,
+        skipped_count: 0,
+        failed_count: 0,
+        results: orderIds.map((id) => ({
+          order_id: id,
+          order_number: "OMS-0001",
+          status: "success",
+          shiprocket_shipment_id: "7001",
+          shiprocket_order_id: "1900007001",
+          awb: "AWB90001",
+          courier_name: "Delhivery",
+          reason: null,
+        })),
+      })
+    )
 
     renderWithProviders(<ShipmentQueuePage />)
 
@@ -130,10 +164,17 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
     expect(screen.getByText("Ready to Ship")).toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
+    const dialog = await screen.findByRole("dialog")
+    expect(within(dialog).getByText(/Courier: Delhivery/i)).toBeInTheDocument()
+
+    await user.click(
+      within(dialog).getByRole("button", { name: /^Open Shiprocket Ready to Ship$/i })
+    )
     expect(openSpy).toHaveBeenCalledWith(READY_TO_SHIP_URL, "_blank", "noopener,noreferrer")
+    expect(clipboardSpy).not.toHaveBeenCalled()
   })
 
-  it("shows the unavailable message instead of calling any Shiprocket API when no order id is stored", async () => {
+  it("shows the failure reason, never a Shiprocket create-shipment API call, when no shipment can be resolved", async () => {
     const user = userEvent.setup()
     mockedUseShipmentQueue.mockReturnValue({
       isLoading: false,
@@ -153,11 +194,10 @@ describe("ShipmentQueuePage (legacy alias for /fulfillment/orders)", () => {
     renderWithProviders(<ShipmentQueuePage />)
 
     await user.click(screen.getByRole("button", { name: /^Ship Order$/i }))
-    expect(openSpy).not.toHaveBeenCalled()
-    expect(toast.error).toHaveBeenCalledWith(
-      "Shiprocket order ID is unavailable for this order.",
-      expect.anything()
-    )
+    const dialog = await screen.findByRole("dialog")
+    expect(
+      within(dialog).getByText(/Existing Shiprocket order could not be located/i)
+    ).toBeInTheDocument()
   })
 
   it("shows an empty state when there are no confirmed orders awaiting shipment", () => {

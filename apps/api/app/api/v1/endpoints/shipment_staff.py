@@ -46,6 +46,9 @@ from app.schemas.shipment_staff import ShipmentStaffPerformanceResponse
 from app.schemas.shiprocket import (
     LocateShiprocketOrderRequest,
     LocateShiprocketOrderResult,
+    ProcessExistingShipmentResult,
+    ProcessExistingShipmentsRequest,
+    ProcessExistingShipmentsResponse,
     ShiprocketAssignAwbRequest,
     ShiprocketNdrReattemptRequest,
     ShiprocketShipRequest,
@@ -140,6 +143,44 @@ async def locate_shiprocket_order_for_my_scope(
             )
         )
     return ApiResponse(data=results)
+
+
+@router.post(
+    "/orders/bulk-process-shipments",
+    response_model=ApiResponse[ProcessExistingShipmentsResponse],
+)
+async def bulk_process_existing_shipments_for_my_scope(
+    payload: ProcessExistingShipmentsRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("shipment_staff.manage")),
+) -> ApiResponse[ProcessExistingShipmentsResponse]:
+    """Scoped equivalent of `POST /orders/bulk-process-shipments` — the
+    API equivalent of Shiprocket's own dashboard "Bulk Ship Orders"
+    action, restricted to this Shipment Staff user's own scoped orders
+    (see `ShipmentStaffService.bulk_process_existing_shipments_for_my_
+    scope`). NEVER creates a Shiprocket order; only assigns an AWB to an
+    order's EXISTING Shiprocket shipment, skipping any that already has
+    one. One order's failure never blocks the rest.
+    """
+    results = await ShipmentStaffService(session).bulk_process_existing_shipments_for_my_scope(
+        payload.order_ids, actor=current_user
+    )
+    result_items = [ProcessExistingShipmentResult(**r) for r in results]
+    processed_count = sum(1 for r in result_items if r.status == "success")
+    skipped_count = sum(1 for r in result_items if r.status == "skipped")
+    failed_count = sum(1 for r in result_items if r.status == "failed")
+    return ApiResponse(
+        data=ProcessExistingShipmentsResponse(
+            processed_count=processed_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            results=result_items,
+        ),
+        message=(
+            f"{processed_count} processed, {skipped_count} already had an AWB, "
+            f"{failed_count} failed."
+        ),
+    )
 
 
 @router.get("/orders/{order_id}", response_model=ApiResponse[OrderDetailResponse])

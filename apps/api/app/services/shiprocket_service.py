@@ -499,6 +499,179 @@ class ShiprocketOperationsService:
             )
         return shipment
 
+    async def _courier_name(self, courier_id: uuid.UUID | None) -> str | None:
+        if courier_id is None:
+            return None
+        try:
+            courier = await self.courier_service.get_courier(courier_id)
+        except NotFoundError:
+            return None
+        return courier.name
+
+    async def process_existing_shipment_for_order(
+        self, order_id: uuid.UUID, *, actor: User | None
+    ) -> dict[str, object]:
+        """Unscoped, org-wide entry point for `process_shipment_for_order`
+        below -- looks the order up itself (no ownership/scope check; see
+        `ShipmentStaffService.bulk_process_existing_shipments_for_my_scope`
+        for the scoped equivalent, which resolves its own `Order` first
+        and calls `process_shipment_for_order` directly instead of this).
+        """
+        order = await self.orders.get_by_id(order_id)
+        if order is None:
+            return {
+                "order_id": order_id,
+                "order_number": None,
+                "status": "failed",
+                "shiprocket_shipment_id": None,
+                "shiprocket_order_id": None,
+                "awb": None,
+                "courier_name": None,
+                "reason": "Order not found.",
+            }
+        return await self.process_shipment_for_order(order, actor=actor)
+
+    async def process_shipment_for_order(
+        self, order: Order, *, actor: User | None
+    ) -> dict[str, object]:
+        """The API equivalent of Shiprocket's own "Bulk Ship Orders"
+        dashboard action, for ONE already-resolved order -- see
+        `bulk_process_existing_shipments`. Resolves the order's EXISTING
+        Shiprocket shipment via `locate_shiprocket_orders` (unchanged
+        matching logic, never creates an order -- no `orders/create/adhoc`
+        call anywhere in this method or anything it calls), skips if that
+        shipment already has an AWB (so calling this twice, or a
+        duplicate order id inside one bulk request, never re-assigns),
+        then reuses `assign_awb` above with `courier_id=None` so
+        Shiprocket's own account-side courier selection applies -- this
+        OMS never invents or computes a courier id itself.
+
+        `courier_id=None` is expected to make Shiprocket apply this
+        account's configured Courier Priority, the same way its own
+        dashboard "Bulk Ship Orders" button does — but that has only been
+        confirmed for the dashboard action itself, not independently
+        verified for this API call. `courier_name`/`awb` are always
+        returned on every outcome specifically so this can be checked
+        against one real order before being trusted at volume.
+
+        Never raises -- every outcome (no existing Shiprocket shipment
+        locatable, already has an AWB, or a genuine Shiprocket API
+        failure) is reported via the returned `status`/`reason` instead,
+        so `bulk_process_existing_shipments` can run a whole batch with
+        no all-or-nothing failure. Takes an already-resolved `order`
+        (never re-fetches/re-authorizes it) so a caller that has already
+        done its own scope check (`ShipmentStaffService`) never needs a
+        second, unscoped lookup.
+        """
+        resolved = await locate_shiprocket_orders(self.session, [order])
+        resolved_order_id = resolved.get(order.id)
+        if not resolved_order_id:
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": "failed",
+                "shiprocket_shipment_id": None,
+                "shiprocket_order_id": None,
+                "awb": None,
+                "courier_name": None,
+                "reason": "Existing Shiprocket order could not be located for this order.",
+            }
+
+        existing_shipments = await self.shipments.list_for_order(order.id)
+        shipment = next(
+            (s for s in existing_shipments if shiprocket_order_id(s) == resolved_order_id), None
+        )
+        if shipment is None or not shipment.shiprocket_shipment_id:
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": "failed",
+                "shiprocket_shipment_id": None,
+                "shiprocket_order_id": resolved_order_id,
+                "awb": None,
+                "courier_name": None,
+                "reason": "Located Shiprocket order has no shipment id on file.",
+            }
+
+        if shipment.awb:
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": "skipped",
+                "shiprocket_shipment_id": shipment.shiprocket_shipment_id,
+                "shiprocket_order_id": resolved_order_id,
+                "awb": shipment.awb,
+                "courier_name": await self._courier_name(shipment.courier_id),
+                "reason": "AWB already assigned.",
+            }
+
+        try:
+            # `courier_id=None` deliberately -- see this method's
+            # docstring. Never invented/computed here.
+            updated = await self.assign_awb(shipment.id, actor=actor, courier_id=None)
+        except (NotFoundError, ConflictError, IntegrationError) as exc:
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": "failed",
+                "shiprocket_shipment_id": shipment.shiprocket_shipment_id,
+                "shiprocket_order_id": resolved_order_id,
+                "awb": None,
+                "courier_name": None,
+                "reason": exc.message,
+            }
+        except Exception:
+            await self.session.rollback()
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": "failed",
+                "shiprocket_shipment_id": shipment.shiprocket_shipment_id,
+                "shiprocket_order_id": resolved_order_id,
+                "awb": None,
+                "courier_name": None,
+                "reason": "Could not process shipment for this order.",
+            }
+
+        if not updated.awb:
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": "failed",
+                "shiprocket_shipment_id": updated.shiprocket_shipment_id,
+                "shiprocket_order_id": resolved_order_id,
+                "awb": None,
+                "courier_name": None,
+                "reason": "Shiprocket did not return an AWB for this shipment.",
+            }
+
+        return {
+            "order_id": order.id,
+            "order_number": order.order_number,
+            "status": "success",
+            "shiprocket_shipment_id": updated.shiprocket_shipment_id,
+            "shiprocket_order_id": resolved_order_id,
+            "awb": updated.awb,
+            "courier_name": await self._courier_name(updated.courier_id),
+            "reason": None,
+        }
+
+    async def bulk_process_existing_shipments(
+        self, order_ids: list[uuid.UUID], *, actor: User | None
+    ) -> list[dict[str, object]]:
+        """Per-order-independent equivalent of Shiprocket's own "Bulk Ship
+        Orders" dashboard action, for orders that already have an
+        existing Shiprocket shipment -- see `process_existing_shipment_
+        for_order`. One order's failure never blocks or rolls back the
+        rest. Distinct from `bulk_create_shipments_for_orders`, which
+        this does NOT replace -- that one still creates new Shiprocket
+        orders via `orders/create/adhoc`; this one never does.
+        """
+        return [
+            await self.process_existing_shipment_for_order(order_id, actor=actor)
+            for order_id in order_ids
+        ]
+
     async def cancel_shipment(self, shipment_id: uuid.UUID, *, actor: User | None) -> Shipment:
         shipment = await self._get_shipment(shipment_id)
         if not shipment.shiprocket_shipment_id:

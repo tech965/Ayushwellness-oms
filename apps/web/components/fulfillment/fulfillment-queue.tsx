@@ -172,7 +172,6 @@ function FulfillmentQueueContent() {
           shopifySyncStatus={r.shopify_sync_status}
           orderStatus="confirmed"
           fulfillmentStatus="unfulfilled"
-          shiprocketOrderId={r.shiprocket_order_id}
         />
       ),
     },
@@ -262,7 +261,7 @@ function FulfillmentQueueContent() {
             <span className="font-medium">Selected {selectedIds.size} orders</span>
             <div className="flex items-center gap-2">
               <Button size="sm" onClick={() => setBulkShipOpen(true)}>
-                Open in Shiprocket
+                Process Shipment
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
                 Clear Selection

@@ -49,6 +49,46 @@ class ShiprocketAssignAwbRequest(BaseModel):
     courier_id: str | None = None
 
 
+class ProcessExistingShipmentsRequest(BaseModel):
+    """One or many OMS order ids to process via the API equivalent of
+    Shiprocket's own dashboard "Bulk Ship Orders" action -- see
+    `app.services.shiprocket_service.ShiprocketOperationsService.
+    bulk_process_existing_shipments`. Every order must already have an
+    existing Shiprocket shipment (resolved the same way `locate_
+    shiprocket_orders` does); this NEVER calls `/orders/create/adhoc`.
+    """
+
+    order_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+
+
+class ProcessExistingShipmentResult(BaseModel):
+    """One order's outcome from `bulk_process_existing_shipments` --
+    `"skipped"` means the shipment already had an AWB on file (never
+    re-assigned); `"failed"` covers everything from "order not found" to
+    a genuine Shiprocket API error, always with a human-readable
+    `reason`, never hidden.
+    """
+
+    order_id: uuid.UUID
+    order_number: str | None = None
+    status: Literal["success", "skipped", "failed"]
+    shiprocket_shipment_id: str | None = None
+    shiprocket_order_id: str | None = None
+    awb: str | None = None
+    # Whatever courier Shiprocket itself returned/had already assigned --
+    # `courier_id` is deliberately never sent to Shiprocket by this flow,
+    # so this is purely informational, not a choice this OMS made.
+    courier_name: str | None = None
+    reason: str | None = None
+
+
+class ProcessExistingShipmentsResponse(BaseModel):
+    processed_count: int
+    skipped_count: int
+    failed_count: int
+    results: list[ProcessExistingShipmentResult]
+
+
 class ShiprocketNdrReattemptRequest(BaseModel):
     address_1: str = Field(min_length=1, max_length=255)
     address_2: str | None = None
