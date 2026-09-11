@@ -3,12 +3,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.models.enums import InventoryMovementType, ProductStatus
 from app.models.inventory import InventoryMovement
-from app.models.product import Product, ProductVariant
+from app.models.product import (
+    CatalogVariant,
+    CatalogVariantStockAdjustment,
+    Product,
+    ProductVariant,
+)
 from app.repositories.base import AppendOnlyRepository, BaseRepository
 
 
@@ -141,6 +146,65 @@ class InventoryStockRepository(BaseRepository[ProductVariant]):
         )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+
+class CatalogVariantStockAdjustmentRepository(AppendOnlyRepository[CatalogVariantStockAdjustment]):
+    """Ledger for a manual "Total Stock" edit made directly against a
+    `CatalogVariant` -- see `app.models.product.CatalogVariantStockAdjustment`
+    for why this is a separate table from `inventory_movements`.
+    """
+
+    model = CatalogVariantStockAdjustment
+
+    async def get_by_id_with_relations(
+        self, id_: uuid.UUID
+    ) -> CatalogVariantStockAdjustment | None:
+        stmt = (
+            select(CatalogVariantStockAdjustment)
+            .where(CatalogVariantStockAdjustment.id == id_)
+            .options(selectinload(CatalogVariantStockAdjustment.actor))
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def sum_for_catalog_variant(self, catalog_variant_id: uuid.UUID) -> int:
+        """Cumulative reconciliation offset recorded so far -- 0 with no
+        prior adjustments. Summed live, never cached, so it can never
+        drift out of sync with the rows that back it.
+        """
+        total = await self.session.scalar(
+            select(func.coalesce(func.sum(CatalogVariantStockAdjustment.quantity_delta), 0)).where(
+                CatalogVariantStockAdjustment.catalog_variant_id == catalog_variant_id
+            )
+        )
+        return int(total or 0)
+
+    async def sum_by_product(self, product_id: uuid.UUID) -> dict[uuid.UUID, int]:
+        """Every CatalogVariant's cumulative offset for one product, in a
+        single query -- used to build the product detail page without an
+        N+1 (one query per OMS-visible variant).
+        """
+        stmt = (
+            select(
+                CatalogVariantStockAdjustment.catalog_variant_id,
+                func.sum(CatalogVariantStockAdjustment.quantity_delta),
+            )
+            .join(
+                CatalogVariant,
+                CatalogVariant.id == CatalogVariantStockAdjustment.catalog_variant_id,
+            )
+            .where(CatalogVariant.product_id == product_id)
+            .group_by(CatalogVariantStockAdjustment.catalog_variant_id)
+        )
+        result = await self.session.execute(stmt)
+        return {row[0]: int(row[1] or 0) for row in result.all()}
+
+    def search_query(self, *, catalog_variant_id: uuid.UUID):
+        return (
+            self._base_query()
+            .where(CatalogVariantStockAdjustment.catalog_variant_id == catalog_variant_id)
+            .options(selectinload(CatalogVariantStockAdjustment.actor))
+        )
 
 
 class InventoryProductRepository(BaseRepository[Product]):

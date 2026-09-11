@@ -39,6 +39,11 @@ class ProductVariantRepository(BaseRepository[ProductVariant]):
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_for_catalog_variant(self, catalog_variant_id: uuid.UUID) -> list[ProductVariant]:
+        stmt = select(ProductVariant).where(ProductVariant.catalog_variant_id == catalog_variant_id)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
 
 class CatalogVariantRepository(BaseRepository[CatalogVariant]):
     """OMS-visible catalog variants -- the presentation/grouping layer.

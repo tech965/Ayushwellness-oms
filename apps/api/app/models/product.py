@@ -8,7 +8,9 @@ constraint operators actually search by; `SyncMetadataMixin` +
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     Boolean,
@@ -19,13 +21,17 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
     true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base, JSONType, TimestampMixin, UUIDPrimaryKeyMixin
+from app.db.base import AwareDateTime, Base, JSONType, TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.enums import ProductStatus, sa_enum
 from app.models.mixins import SyncMetadataMixin
+
+if TYPE_CHECKING:
+    from app.models.auth import User
 
 
 class Product(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
@@ -113,6 +119,45 @@ class CatalogVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     product: Mapped[Product] = relationship(back_populates="catalog_variants")
     product_variants: Mapped[list[ProductVariant]] = relationship(back_populates="catalog_variant")
+
+
+class CatalogVariantStockAdjustment(Base, UUIDPrimaryKeyMixin):
+    """Append-only ledger for a manual "Total Stock" edit made directly
+    against a `CatalogVariant` (e.g. Blue Packet's combined 60/120/180
+    total), never against a single underlying `ProductVariant`.
+
+    Deliberately separate from `InventoryMovement`, which is documented
+    and constrained as backing exactly one `ProductVariant`'s own
+    balance (`product_variant_id` NOT NULL) -- a CatalogVariant total
+    edit is NOT attributed to any one pack-size SKU, so it cannot be
+    expressed as a row there without violating that invariant.
+
+    `available_boxes` for a CatalogVariant = SUM(underlying
+    ProductVariant.available_quantity) + SUM(this table's
+    quantity_delta for that catalog_variant_id) -- see
+    `app.api.v1.endpoints.inventory._oms_variant_response`. This extra
+    amount is a reconciliation total, not stock attached to a specific
+    sellable SKU: dispatch/RTO/Shopify sync never read or write this
+    table, and no `ProductVariant` row is ever touched by it.
+    """
+
+    __tablename__ = "catalog_variant_stock_adjustments"
+
+    catalog_variant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("catalog_variants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    quantity_delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        AwareDateTime(), server_default=func.now(), nullable=False, index=True
+    )
+
+    catalog_variant: Mapped[CatalogVariant] = relationship()
+    actor: Mapped[User | None] = relationship()
 
 
 class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):

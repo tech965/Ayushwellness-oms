@@ -256,5 +256,23 @@ class InventoryAdjustmentRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=255)
 
 
+class CatalogVariantStockAdjustmentResponse(BaseModel):
+    """One entry in a CatalogVariant's own "Total Stock" reconciliation
+    ledger (`app.models.product.CatalogVariantStockAdjustment`) -- never
+    attributed to a single underlying SKU, so this carries no `sku` or
+    `product_variant_id` field, unlike `InventoryMovementResponse`.
+    """
+
+    id: uuid.UUID
+    catalog_variant_id: uuid.UUID
+    quantity_delta: int
+    previous_balance: int
+    quantity_after: int
+    actor_user_id: uuid.UUID | None
+    actor_label: str
+    reason: str
+    created_at: datetime
+
+
 class PacketsPerBoxUpdateRequest(BaseModel):
     packets_per_box: int = Field(gt=0, description="Packets contained in one box.")

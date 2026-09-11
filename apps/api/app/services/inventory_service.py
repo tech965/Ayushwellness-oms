@@ -57,9 +57,15 @@ from app.core.logging import get_logger
 from app.models.auth import User
 from app.models.enums import InventoryMovementType, StockStatus
 from app.models.inventory import InventoryMovement
-from app.models.product import CatalogVariant, Product, ProductVariant
+from app.models.product import (
+    CatalogVariant,
+    CatalogVariantStockAdjustment,
+    Product,
+    ProductVariant,
+)
 from app.models.settings import AppSettings
 from app.repositories.inventory import (
+    CatalogVariantStockAdjustmentRepository,
     InventoryMovementRepository,
     InventoryProductRepository,
     InventoryStockRepository,
@@ -103,6 +109,7 @@ class InventoryService:
         self.stock = InventoryStockRepository(session)
         self.variants = ProductVariantRepository(session)
         self.catalog_variants = CatalogVariantRepository(session)
+        self.catalog_variant_adjustments = CatalogVariantStockAdjustmentRepository(session)
         self.movements = InventoryMovementRepository(session)
         self.order_items = OrderItemRepository(session)
         self.audit = AuditService(session)
@@ -110,9 +117,7 @@ class InventoryService:
     # --- reads ----------------------------------------------------------
 
     async def get_low_stock_threshold(self) -> int:
-        row = (
-            await self.session.execute(select(AppSettings).limit(1))
-        ).scalar_one_or_none()
+        row = (await self.session.execute(select(AppSettings).limit(1))).scalar_one_or_none()
         values = row.values if row is not None else {}
         return AppSettingsData.model_validate(values or {}).inventory.low_stock_threshold
 
@@ -548,6 +553,73 @@ class InventoryService:
         return await self.adjust_to_target(
             variants[0].id, target_boxes=target_boxes, reason=reason, actor=actor
         )
+
+    async def get_catalog_variant_total(self, catalog_variant_id: uuid.UUID) -> int:
+        """The number shown as an OMS-visible variant's "Current Total
+        Stock" -- SUM of every underlying `ProductVariant.available_quantity`
+        plus every reconciliation adjustment ever recorded against this
+        `CatalogVariant` (see `adjust_catalog_variant_to_target`). Always
+        recomputed live from both sources; nothing is cached.
+        """
+        members = await self.variants.list_for_catalog_variant(catalog_variant_id)
+        sku_total = sum(v.available_quantity for v in members)
+        adjustment_total = await self.catalog_variant_adjustments.sum_for_catalog_variant(
+            catalog_variant_id
+        )
+        return sku_total + adjustment_total
+
+    async def adjust_catalog_variant_to_target(
+        self, catalog_variant_id: uuid.UUID, *, target_boxes: int, reason: str, actor: User | None
+    ) -> CatalogVariantStockAdjustment:
+        """Absolute-target manual adjustment against the OMS-visible
+        CatalogVariant TOTAL (e.g. Blue Packet's combined 60/120/180
+        stock) -- staff enters the new grand total, never a per-SKU
+        value, and never a raw delta.
+
+        This intentionally does NOT touch any underlying `ProductVariant`
+        row: there is no non-arbitrary way to decide which pack size a
+        generic total change belongs to (the same reasoning
+        `adjust_product_to_target` already applies at the product level),
+        so the delta is recorded on a separate, CatalogVariant-scoped
+        ledger instead of being distributed across 60/120/180. Dispatch,
+        RTO, and Shopify sync are completely unaware of this table and
+        continue to move only real per-SKU `available_quantity` exactly
+        as before -- this is a reconciliation total layered on top, not a
+        new inventory source of truth for what can actually be dispatched
+        against a specific SKU.
+        """
+        if target_boxes < 0:
+            raise ValidationError("Target stock cannot be negative.")
+        if not reason or not reason.strip():
+            raise ValidationError("A reason is required for a manual stock adjustment.")
+
+        cv = await self.catalog_variants.get_by_id(catalog_variant_id)
+        if cv is None:
+            raise NotFoundError("Catalog variant not found.")
+
+        previous_total = await self.get_catalog_variant_total(catalog_variant_id)
+        delta = target_boxes - previous_total
+        if delta == 0:
+            raise ValidationError("New stock must be different from the current stock.")
+
+        adjustment = await self.catalog_variant_adjustments.create(
+            catalog_variant_id=cv.id,
+            quantity_delta=delta,
+            quantity_after=target_boxes,
+            reason=reason.strip(),
+            actor_user_id=actor.id if actor else None,
+        )
+        await self.audit.record(
+            user=actor,
+            action="inventory.catalog_variant_total_adjustment",
+            entity_type="catalog_variant",
+            entity_id=str(cv.id),
+            previous_value={"available_boxes": previous_total},
+            new_value={"available_boxes": target_boxes},
+            metadata={"reason": reason.strip()},
+        )
+        await self.session.commit()
+        return adjustment
 
     async def update_packets_per_box(
         self, variant_id: uuid.UUID, *, packets_per_box: int, actor: User | None

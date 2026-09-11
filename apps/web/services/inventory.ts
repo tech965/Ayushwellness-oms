@@ -4,6 +4,7 @@ import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
   CatalogName,
+  CatalogVariantStockAdjustment,
   InventoryMovement,
   InventoryMovementFilters,
   InventoryProductStock,
@@ -169,6 +170,64 @@ export function useAdjustVariantStock() {
       return response.data.data
     },
     onSuccess: () => invalidateInventory(queryClient),
+  })
+}
+
+/** Absolute-target edit for a multi-SKU OMS-visible variant's TOTAL
+ * stock (e.g. Blue Packet's combined 60/120/180) -- the caller sends
+ * ONE new total, never a per-SKU value. Recorded on the CatalogVariant's
+ * own reconciliation ledger; no underlying `ProductVariant` row is ever
+ * touched by this call (see `InventoryService.adjust_catalog_variant_to_target`).
+ */
+export function useAdjustCatalogVariantStock() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: {
+      catalogVariantId: string
+      target_boxes: number
+      reason: string
+    }) => {
+      const { catalogVariantId, ...body } = input
+      const response = await apiClient.post<ApiResponse<CatalogVariantStockAdjustment>>(
+        `/inventory/catalog-variants/${catalogVariantId}/adjust`,
+        body
+      )
+      return response.data.data
+    },
+    onSuccess: () => invalidateInventory(queryClient),
+  })
+}
+
+interface CatalogVariantAdjustmentListParams {
+  page: number
+  pageSize: number
+}
+
+async function fetchCatalogVariantAdjustments(
+  catalogVariantId: string,
+  params: CatalogVariantAdjustmentListParams
+): Promise<PaginatedResponse<CatalogVariantStockAdjustment>> {
+  const response = await apiClient.get<PaginatedResponse<CatalogVariantStockAdjustment>>(
+    `/inventory/catalog-variants/${catalogVariantId}/adjustments`,
+    { params: { page: params.page, page_size: params.pageSize } }
+  )
+  return response.data
+}
+
+/** History of Total-Stock edits for one OMS-visible variant -- shown
+ * alongside, never merged into, its underlying SKUs' own dispatch/RTO/
+ * manual movement history (`useInventoryMovements`), which this never
+ * touches.
+ */
+export function useCatalogVariantAdjustments(
+  catalogVariantId: string,
+  params: CatalogVariantAdjustmentListParams
+) {
+  return useQuery({
+    queryKey: ["inventory", "catalog-variants", catalogVariantId, "adjustments", params],
+    queryFn: () => fetchCatalogVariantAdjustments(catalogVariantId, params),
+    enabled: Boolean(catalogVariantId),
+    placeholderData: (previous) => previous,
   })
 }
 

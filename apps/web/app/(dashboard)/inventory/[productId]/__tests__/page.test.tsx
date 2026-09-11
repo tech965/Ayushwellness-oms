@@ -7,7 +7,9 @@ import InventoryProductPage, {
   EditNameDialog,
 } from "@/app/(dashboard)/inventory/[productId]/page"
 import {
+  useAdjustCatalogVariantStock,
   useAdjustVariantStock,
+  useCatalogVariantAdjustments,
   useInventoryMovements,
   useInventoryProductStock,
   useSetCatalogVariantName,
@@ -44,6 +46,8 @@ vi.mock("@/services/inventory", () => ({
   useSetCatalogVariantName: vi.fn(),
   useUpdatePacketsPerBox: vi.fn(),
   useAdjustVariantStock: vi.fn(),
+  useAdjustCatalogVariantStock: vi.fn(),
+  useCatalogVariantAdjustments: vi.fn(),
 }))
 
 vi.mock("@/lib/auth-context", () => ({ useAuth: vi.fn() }))
@@ -55,6 +59,8 @@ const mockedUseSetVariantName = vi.mocked(useSetVariantName)
 const mockedUseSetCatalogVariantName = vi.mocked(useSetCatalogVariantName)
 const mockedUseUpdatePacketsPerBox = vi.mocked(useUpdatePacketsPerBox)
 const mockedUseAdjustVariantStock = vi.mocked(useAdjustVariantStock)
+const mockedUseAdjustCatalogVariantStock = vi.mocked(useAdjustCatalogVariantStock)
+const mockedUseCatalogVariantAdjustments = vi.mocked(useCatalogVariantAdjustments)
 const mockedUseAuth = vi.mocked(useAuth)
 
 function mutationStub(behaviour: "success" | "error" = "success") {
@@ -278,6 +284,7 @@ beforeEach(() => {
   mockedUseSetCatalogVariantName.mockReturnValue(mutationStub() as never)
   mockedUseUpdatePacketsPerBox.mockReturnValue(mutationStub() as never)
   mockedUseAdjustVariantStock.mockReturnValue(mutationStub() as never)
+  mockedUseAdjustCatalogVariantStock.mockReturnValue(mutationStub() as never)
   mockedUseAuth.mockReturnValue({
     hasPermission: () => true,
   } as unknown as ReturnType<typeof useAuth>)
@@ -288,6 +295,13 @@ beforeEach(() => {
     error: null,
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useInventoryMovements>)
+  mockedUseCatalogVariantAdjustments.mockReturnValue({
+    data: { data: [], meta: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } },
+    isLoading: false,
+    isError: false,
+    error: null,
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useCatalogVariantAdjustments>)
   setProduct(HERBAL_MASALA)
 })
 
@@ -403,34 +417,70 @@ describe("InventoryProductPage — CatalogVariant images", () => {
   })
 })
 
-describe("InventoryProductPage — Edit Stock (per underlying SKU, never distributed)", () => {
-  it("a grouped OMS variant gets one row per underlying SKU; one call per changed row", async () => {
+describe("InventoryProductPage — Edit Stock (CatalogVariant TOTAL, never per-SKU)", () => {
+  it("a multi-SKU OMS variant (Ghutka/Red Packet-style) shows exactly ONE total-stock input", async () => {
     const user = userEvent.setup()
-    const adjust = mutationStub("success")
-    mockedUseAdjustVariantStock.mockReturnValue(adjust as never)
     renderWithProviders(<InventoryProductPage />)
 
-    // open Ghutka's Edit Stock (2nd card)
+    // open Ghutka's Edit Stock (2nd card) -- 2 underlying SKUs (60 + 120)
     await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
     const dialog = screen.getByRole("dialog")
     expect(within(dialog).getByText("Edit Stock — Ghutka Flavour")).toBeInTheDocument()
-    const inputs = within(dialog).getAllByLabelText("New")
-    expect(inputs).toHaveLength(2) // one row per underlying Shopify SKU
 
-    await user.clear(inputs[0])
-    await user.type(inputs[0], "150")
-    await user.type(within(dialog).getByLabelText("Reason"), "stocktake")
+    const inputs = within(dialog).getAllByLabelText("New Total Stock")
+    expect(inputs).toHaveLength(1) // ONE total field, never one per SKU
+
+    // 60/120 pack sizes are not independently editable -- no per-SKU
+    // labeled inputs exist anywhere in the dialog
+    expect(within(dialog).queryByLabelText(/AW-HM-CR-60/)).not.toBeInTheDocument()
+    expect(within(dialog).queryByLabelText(/AW-HM-CR-120/)).not.toBeInTheDocument()
+  })
+
+  it("current total is the sum of the underlying SKUs' available_quantity", async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1]) // Ghutka: 100 + 40
+    const dialog = screen.getByRole("dialog")
+    expect(within(dialog).getByText("140 boxes")).toBeInTheDocument()
+  })
+
+  it("Save sends ONE total target to the CatalogVariant endpoint, never per-SKU values", async () => {
+    const user = userEvent.setup()
+    const adjust = mutationStub("success")
+    mockedUseAdjustCatalogVariantStock.mockReturnValue(adjust as never)
+    renderWithProviders(<InventoryProductPage />)
+
+    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1]) // Ghutka, total 140
+    const dialog = screen.getByRole("dialog")
+    const input = within(dialog).getByLabelText("New Total Stock")
+    await user.clear(input)
+    await user.type(input, "200")
+    await user.type(within(dialog).getByLabelText("Reason"), "warehouse recount")
     await user.click(within(dialog).getByRole("button", { name: "Save" }))
 
     expect(adjust.mutateAsync).toHaveBeenCalledTimes(1)
     expect(adjust.mutateAsync).toHaveBeenCalledWith({
-      variantId: "v-gu60",
-      target_boxes: 150,
-      reason: "stocktake",
+      catalogVariantId: "cv-gutka",
+      target_boxes: 200,
+      reason: "warehouse recount",
     })
   })
 
-  it("a single-underlying OMS variant gets one field and still edits that SKU directly", async () => {
+  it("Gold, Red, and Blue Packet (Royal/Ghutka/Paan flavours) all use the same total-stock UX", async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<InventoryProductPage />)
+    const buttons = screen.getAllByRole("button", { name: "Edit Stock" })
+    expect(buttons).toHaveLength(3) // Royal Tobacco (Gold), Ghutka (Red), Paan Masala (Blue)
+
+    for (const button of buttons) {
+      await user.click(button)
+      const dialog = screen.getByRole("dialog")
+      expect(within(dialog).getAllByLabelText("New Total Stock")).toHaveLength(1)
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }))
+    }
+  })
+
+  it("a single-underlying (implicit) OMS variant still shows one field and edits that SKU directly", async () => {
     const user = userEvent.setup()
     const adjust = mutationStub("success")
     mockedUseAdjustVariantStock.mockReturnValue(adjust as never)
@@ -439,13 +489,16 @@ describe("InventoryProductPage — Edit Stock (per underlying SKU, never distrib
 
     await user.click(screen.getByRole("button", { name: "Edit Stock" }))
     const dialog = screen.getByRole("dialog")
-    const inputs = within(dialog).getAllByLabelText("New")
+    const inputs = within(dialog).getAllByLabelText("New Total Stock")
     expect(inputs).toHaveLength(1)
     await user.clear(inputs[0])
     await user.type(inputs[0], "9")
     await user.type(within(dialog).getByLabelText("Reason"), "count")
     await user.click(within(dialog).getByRole("button", { name: "Save" }))
 
+    // per-SKU endpoint, not the CatalogVariant total endpoint -- this
+    // group maps 1:1 to one real ProductVariant, so there is nothing
+    // ambiguous to record on the reconciliation ledger
     expect(adjust.mutateAsync).toHaveBeenCalledWith({
       variantId: "v-only",
       target_boxes: 9,
@@ -453,31 +506,43 @@ describe("InventoryProductPage — Edit Stock (per underlying SKU, never distrib
     })
   })
 
-  it("Save is disabled without a reason or a changed row; min=0 on inputs; delta preview", async () => {
+  it("Save is disabled without a reason or a changed value; min=0 on the input; delta preview", async () => {
     const user = userEvent.setup()
     renderWithProviders(<InventoryProductPage />)
-    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
+    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1]) // Ghutka, total 140
     const dialog = screen.getByRole("dialog")
     expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled()
-    const inputs = within(dialog).getAllByLabelText("New")
-    expect(inputs[0]).toHaveAttribute("min", "0")
-    await user.clear(inputs[0])
-    await user.type(inputs[0], "150")
-    expect(within(dialog).getByText("+50 boxes")).toBeInTheDocument()
+    const input = within(dialog).getByLabelText("New Total Stock")
+    expect(input).toHaveAttribute("min", "0")
+    await user.clear(input)
+    await user.type(input, "200")
+    expect(within(dialog).getByText("+60 boxes")).toBeInTheDocument()
     expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled() // still no reason
     await user.type(within(dialog).getByLabelText("Reason"), "x")
     expect(within(dialog).getByRole("button", { name: "Save" })).toBeEnabled()
   })
 
-  it("keeps the dialog open and shows the API error on a failed save", async () => {
+  it("rejects a negative target -- Save stays disabled", async () => {
     const user = userEvent.setup()
-    mockedUseAdjustVariantStock.mockReturnValue(mutationStub("error") as never)
     renderWithProviders(<InventoryProductPage />)
     await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
     const dialog = screen.getByRole("dialog")
-    const inputs = within(dialog).getAllByLabelText("New")
-    await user.clear(inputs[0])
-    await user.type(inputs[0], "150")
+    const input = within(dialog).getByLabelText("New Total Stock")
+    await user.clear(input)
+    await user.type(input, "-5")
+    await user.type(within(dialog).getByLabelText("Reason"), "x")
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled()
+  })
+
+  it("keeps the dialog open and shows the API error on a failed save", async () => {
+    const user = userEvent.setup()
+    mockedUseAdjustCatalogVariantStock.mockReturnValue(mutationStub("error") as never)
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getAllByRole("button", { name: "Edit Stock" })[1])
+    const dialog = screen.getByRole("dialog")
+    const input = within(dialog).getByLabelText("New Total Stock")
+    await user.clear(input)
+    await user.type(input, "150")
     await user.type(within(dialog).getByLabelText("Reason"), "oops")
     await user.click(within(dialog).getByRole("button", { name: "Save" }))
     expect(toastError).toHaveBeenCalledWith("Server said no")

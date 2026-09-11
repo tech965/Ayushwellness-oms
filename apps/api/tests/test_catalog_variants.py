@@ -534,31 +534,28 @@ async def test_shopify_resync_preserves_catalog_variant_assignments(
 # --- 13-14: Edit Stock safety -----------------------------------------
 
 
-async def test_no_aggregate_target_endpoint_exists_for_a_grouped_oms_variant(
+async def test_product_level_adjust_still_refuses_a_multi_variant_product(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
-    """Editing a grouped OMS variant's stock is always per underlying
-    ProductVariant. The product-level adjust endpoint refuses a
-    multi-variant product (no auto-distribution); there is no
-    catalog-variant-level stock endpoint at all.
+    """The product-level `/products/{id}/adjust` endpoint (a SINGLE
+    total across the whole product, pre-dating CatalogVariant grouping)
+    still refuses a multi-variant product outright -- no auto-
+    distribution invented there. A grouped OMS variant's own total is
+    edited via `/catalog-variants/{id}/adjust` instead (see the
+    `test_catalog_variant_total_*` tests above), which records its
+    total on a separate ledger and -- just like this endpoint -- never
+    auto-distributes across the underlying SKUs.
     """
-    product, _by_sku, cv = await _herbal_masala(db_session)
+    product, _by_sku, _cv = await _herbal_masala(db_session)
 
     async with await make_authenticated_client(
         db_session, permission_codes=["inventory.manage"]
     ) as client:
-        # product-level adjust -> 422 (6 underlying variants)
         resp = await client.post(
             f"/api/v1/inventory/products/{product.id}/adjust",
             json={"target_boxes": 500, "reason": "no"},
         )
         assert resp.status_code == 422
-        # there is no /catalog-variants/{id}/adjust route
-        missing = await client.post(
-            f"/api/v1/inventory/catalog-variants/{cv['gutka'].id}/adjust",
-            json={"target_boxes": 500, "reason": "no"},
-        )
-        assert missing.status_code == 404
 
     # nothing moved
     for v in await ProductVariantRepository(db_session).list_for_product(product.id):
@@ -593,6 +590,251 @@ async def test_single_underlying_variant_edit_stock_still_works(
 
     refreshed = await ProductVariantRepository(db_session).get_by_id(variants[0].id)
     assert refreshed.available_quantity == 410
+
+
+# --- CatalogVariant TOTAL-stock edit (reconciliation ledger, not a SKU
+# allocation) -----------------------------------------------------------
+
+
+async def test_catalog_variant_total_matches_sum_of_underlying_skus_before_any_edit(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read"]
+    ) as client:
+        body = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
+
+    by_name = {g["name"]: g for g in body["oms_variants"]}
+    assert by_name["Blue Packet"]["available_boxes"] == 70 + 80 + 90  # 240
+    assert by_name["Red Packet"]["available_boxes"] == 40 + 50 + 60  # 150
+    assert by_name["Gold Packet"]["available_boxes"] == 10 + 20 + 30  # 60
+    assert body["available_boxes"] == 240 + 150 + 60
+
+
+async def test_catalog_variant_total_adjust_never_touches_any_underlying_sku(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
+            json={"target_boxes": 300, "reason": "warehouse recount"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()["data"]
+        assert body["catalog_variant_id"] == str(cv["blue"].id)
+        assert body["quantity_delta"] == 60  # 300 - 240
+        assert body["previous_balance"] == 240
+        assert body["quantity_after"] == 300
+        assert body["reason"] == "warehouse recount"
+
+        product_body = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()[
+            "data"
+        ]
+
+    by_name = {g["name"]: g for g in product_body["oms_variants"]}
+    assert by_name["Blue Packet"]["available_boxes"] == 300
+    # the other two flavours are completely untouched
+    assert by_name["Red Packet"]["available_boxes"] == 150
+    assert by_name["Gold Packet"]["available_boxes"] == 60
+    # product-level total folds the new offset in too
+    assert product_body["available_boxes"] == 300 + 150 + 60
+
+    # the REAL underlying rows never moved -- not one of the 3 pack-size
+    # SKUs was written to
+    for sku in ("AW-HM-PN-60", "AW-HM-PN-120", "AW-HM-PN-180"):
+        refreshed = await ProductVariantRepository(db_session).get_by_id(by_sku[sku].id)
+        assert refreshed.available_quantity == by_sku[sku].available_quantity
+        assert (
+            refreshed.inventory_quantity == by_sku[sku].inventory_quantity
+        )  # Shopify ref untouched
+
+
+async def test_catalog_variant_total_adjust_does_not_create_an_inventory_movement_row(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """It must never write to `inventory_movements` -- that table is
+    documented as backing exactly one ProductVariant's own balance.
+    """
+    product, by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        before = (await client.get("/api/v1/inventory/movements")).json()["data"]
+        await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['gold'].id}/adjust",
+            json={"target_boxes": 100, "reason": "adjustment"},
+        )
+        after = (await client.get("/api/v1/inventory/movements")).json()["data"]
+
+    assert len(after) == len(before)  # no new InventoryMovement row
+
+
+async def test_catalog_variant_total_adjust_rejects_negative_target(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    _product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.manage"]
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
+            json={"target_boxes": -1, "reason": "x"},
+        )
+        assert resp.status_code == 422
+
+
+async def test_catalog_variant_total_adjust_requires_a_reason(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    _product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.manage"]
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
+            json={"target_boxes": 500, "reason": "   "},
+        )
+        assert resp.status_code == 422
+
+
+async def test_catalog_variant_total_adjust_requires_inventory_manage(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    _product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read"]
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
+            json={"target_boxes": 500, "reason": "x"},
+        )
+        assert resp.status_code == 403
+
+
+async def test_catalog_variant_total_adjust_accumulates_across_edits(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """The ledger sums every past adjustment, not just the most recent
+    one -- a second edit's "current total" already reflects the first.
+    """
+    product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        r1 = await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['red'].id}/adjust",
+            json={"target_boxes": 200, "reason": "first"},
+        )
+        assert r1.json()["data"]["quantity_delta"] == 50  # 200 - 150
+
+        r2 = await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['red'].id}/adjust",
+            json={"target_boxes": 180, "reason": "second"},
+        )
+        assert r2.json()["data"]["quantity_delta"] == -20  # 180 - 200
+        assert r2.json()["data"]["previous_balance"] == 200
+
+        adjustments = (
+            await client.get(f"/api/v1/inventory/catalog-variants/{cv['red'].id}/adjustments")
+        ).json()["data"]
+
+    assert len(adjustments) == 2
+    assert {a["reason"] for a in adjustments} == {"first", "second"}
+
+
+async def test_catalog_variant_total_adjust_rejects_a_no_op_target(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    _product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.manage"]
+    ) as client:
+        resp = await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
+            json={"target_boxes": 240, "reason": "same as current"},  # already 240
+        )
+        assert resp.status_code == 422
+
+
+async def test_catalog_variant_total_adjust_missing_catalog_variant_404s(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.manage"]
+    ) as client:
+        resp = await client.post(
+            "/api/v1/inventory/catalog-variants/00000000-0000-0000-0000-000000000000/adjust",
+            json={"target_boxes": 10, "reason": "x"},
+        )
+        assert resp.status_code == 404
+
+
+async def test_catalog_variant_total_adjust_does_not_change_grouping_or_packets(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """CatalogVariant membership and each SKU's own packets_per_box are
+    presentation/config, untouched by a stock reconciliation edit.
+    """
+    product, by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
+            json={"target_boxes": 999, "reason": "x"},
+        )
+        body = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
+
+    by_name = {g["name"]: g for g in body["oms_variants"]}
+    assert by_name["Blue Packet"]["underlying_variant_count"] == 3
+    assert {u["sku"] for u in by_name["Blue Packet"]["underlying_variants"]} == {
+        "AW-HM-PN-60",
+        "AW-HM-PN-120",
+        "AW-HM-PN-180",
+    }
+    for u in by_name["Blue Packet"]["underlying_variants"]:
+        assert u["packets_per_box"] == 1
+
+
+async def test_catalog_variant_total_packets_not_fabricated_from_the_reconciliation_total(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """total_packets has no defined meaning for the offset (it has no
+    pack size), so it must stay a plain sum of the REAL rows only, even
+    while available_boxes includes the offset.
+    """
+    product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        before = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
+        before_packets = next(g for g in before["oms_variants"] if g["name"] == "Blue Packet")[
+            "total_packets"
+        ]
+
+        await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
+            json={"target_boxes": 999, "reason": "x"},
+        )
+        after = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
+        blue = next(g for g in after["oms_variants"] if g["name"] == "Blue Packet")
+
+    assert blue["available_boxes"] == 999
+    assert blue["total_packets"] == before_packets  # unchanged by the offset
 
 
 # --- 15: history aggregates underlying movements ----------------------
@@ -768,9 +1010,7 @@ async def test_gold_red_blue_packet_variant_count_is_three_everywhere(
         db_session, permission_codes=["inventory.read"]
     ) as client:
         list_rows = (await client.get("/api/v1/inventory/stock")).json()["data"]
-        detail = (
-            await client.get(f"/api/v1/inventory/products/{product.id}/stock")
-        ).json()["data"]
+        detail = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
 
     by_id = {r["id"]: r for r in list_rows}
     assert by_id[str(product.id)]["variant_count"] == 3

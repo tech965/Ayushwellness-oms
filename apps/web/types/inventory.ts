@@ -155,6 +155,23 @@ export interface InventoryMovement {
   created_at: string
 }
 
+/** One entry in a CatalogVariant's own "Total Stock" reconciliation
+ * ledger -- never attributed to a single underlying SKU, unlike
+ * `InventoryMovement`. See the OMS variant's `available_boxes`: SUM of
+ * underlying SKUs' `available_boxes` PLUS the sum of this ledger.
+ */
+export interface CatalogVariantStockAdjustment {
+  id: string
+  catalog_variant_id: string
+  quantity_delta: number
+  previous_balance: number
+  quantity_after: number
+  actor_user_id: string | null
+  actor_label: string
+  reason: string
+  created_at: string
+}
+
 export interface InventoryStockFilters {
   q?: string
 }

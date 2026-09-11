@@ -25,6 +25,7 @@ from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.inventory import (
     CatalogNameResponse,
     CatalogVariantNameUpdateRequest,
+    CatalogVariantStockAdjustmentResponse,
     InventoryAdjustmentRequest,
     InventoryMovementResponse,
     InventoryProductStockResponse,
@@ -89,9 +90,7 @@ def _variant_stock_line(variant, *, threshold: int) -> ProductVariantStockLine: 
     )
 
 
-def _resolve_oms_variant_image(
-    members, product_image_url: str | None
-) -> str | None:  # noqa: ANN001
+def _resolve_oms_variant_image(members, product_image_url: str | None) -> str | None:  # noqa: ANN001
     """Explicit Shopify variant/image association ONLY -- the underlying
     `ProductVariant` with the lexicographically smallest `sku` among
     those that have their own `image_url` (Shopify actually assigned one
@@ -113,16 +112,26 @@ def _resolve_oms_variant_image(
 
 
 def _oms_variant_response(
-    group: OmsVariantGroup, *, threshold: int, product_image_url: str | None
+    group: OmsVariantGroup,
+    *,
+    threshold: int,
+    product_image_url: str | None,
+    adjustment_total: int = 0,
 ) -> OmsCatalogVariantResponse:
     """Aggregate ONE OMS-visible variant from its underlying Shopify
     `ProductVariant` rows. `available_boxes` is a plain SUM of boxes (the
-    common unit); `total_packets` sums each row's own
-    `boxes * packets_per_box`; `packets_per_box_uniform` is False when the
-    grouped rows disagree -- NO single conversion ratio is invented.
+    common unit) PLUS `adjustment_total` -- the cumulative total the
+    group's own `CatalogVariantStockAdjustment` ledger has recorded (see
+    that model's docstring), 0 for an implicit (ungrouped) OMS variant,
+    which can never have one. `total_packets` is deliberately NOT
+    adjusted the same way: a reconciliation total has no pack size, so
+    there is no packets-per-box to convert it with -- it stays a plain
+    SUM of each real row's own `boxes * packets_per_box`.
+    `packets_per_box_uniform` is False when the grouped rows disagree --
+    NO single conversion ratio is invented.
     """
     members = group.variants
-    available_boxes = sum(v.available_quantity for v in members)
+    available_boxes = sum(v.available_quantity for v in members) + adjustment_total
     total_packets = sum(v.available_quantity * v.packets_per_box for v in members)
     pack_sizes = {v.packets_per_box for v in members}
     return OmsCatalogVariantResponse(
@@ -141,16 +150,23 @@ def _oms_variant_response(
 
 
 def _product_stock_response(  # noqa: ANN001
-    product, oms_groups, *, threshold: int
+    product, oms_groups, *, threshold: int, adjustment_totals: dict | None = None
 ) -> InventoryProductStockResponse:
     """Product detail payload. `oms_variants` is the only variant view the
     UI shows (3 for Aayush Herbal Masala, 1 for every other grouped
-    product). Product totals sum across EVERY underlying `ProductVariant`,
-    same formula as each OMS-variant aggregate. Nothing is stored --
-    recomputed from live rows on every read.
+    product). Product totals sum across EVERY underlying `ProductVariant`
+    PLUS every CatalogVariant's own reconciliation total (`adjustment_totals`,
+    keyed by `catalog_variant_id` -- see `_oms_variant_response`), so the
+    product-level header always agrees with the sum of the OMS-variant
+    cards shown below it. `total_packets` is not adjusted the same way
+    -- see `_oms_variant_response`. Nothing is stored -- recomputed from
+    live rows on every read.
     """
+    adjustment_totals = adjustment_totals or {}
     all_underlying = [v for g in oms_groups for v in g.variants]
-    available_boxes = sum(v.available_quantity for v in all_underlying)
+    available_boxes = sum(v.available_quantity for v in all_underlying) + sum(
+        adjustment_totals.values()
+    )
     total_packets = sum(v.available_quantity * v.packets_per_box for v in all_underlying)
     pack_sizes = {v.packets_per_box for v in all_underlying}
     return InventoryProductStockResponse(
@@ -167,7 +183,12 @@ def _product_stock_response(  # noqa: ANN001
         oms_variant_count=len(oms_groups),
         underlying_variant_count=len(all_underlying),
         oms_variants=[
-            _oms_variant_response(g, threshold=threshold, product_image_url=product.image_url)
+            _oms_variant_response(
+                g,
+                threshold=threshold,
+                product_image_url=product.image_url,
+                adjustment_total=adjustment_totals.get(g.catalog_variant_id, 0),
+            )
             for g in oms_groups
         ],
     )
@@ -182,6 +203,21 @@ def _catalog_name_response(obj) -> CatalogNameResponse:  # noqa: ANN001
         title=obj.title,
         title_override=obj.title_override,
         display_title=obj.title_override or obj.title or getattr(obj, "sku", None) or "",
+    )
+
+
+def _catalog_variant_adjustment_response(adjustment) -> CatalogVariantStockAdjustmentResponse:  # noqa: ANN001
+    actor_label = adjustment.actor.name if adjustment.actor is not None else "System"
+    return CatalogVariantStockAdjustmentResponse(
+        id=adjustment.id,
+        catalog_variant_id=adjustment.catalog_variant_id,
+        quantity_delta=adjustment.quantity_delta,
+        previous_balance=adjustment.quantity_after - adjustment.quantity_delta,
+        quantity_after=adjustment.quantity_after,
+        actor_user_id=adjustment.actor_user_id,
+        actor_label=actor_label,
+        reason=adjustment.reason,
+        created_at=adjustment.created_at,
     )
 
 
@@ -312,7 +348,12 @@ async def get_product_stock(
     service = InventoryService(session)
     threshold = await service.get_low_stock_threshold()
     product, oms_groups = await service.get_oms_variants_for_product(product_id)
-    return ApiResponse(data=_product_stock_response(product, oms_groups, threshold=threshold))
+    adjustment_totals = await service.catalog_variant_adjustments.sum_by_product(product_id)
+    return ApiResponse(
+        data=_product_stock_response(
+            product, oms_groups, threshold=threshold, adjustment_totals=adjustment_totals
+        )
+    )
 
 
 @router.get("/stock/{variant_id}", response_model=ApiResponse[InventoryVariantResponse])
@@ -395,6 +436,68 @@ async def adjust_stock(
     resolved = await service.movements.get_by_id_with_relations(movement.id)
     assert resolved is not None  # just committed in the same session, above
     return ApiResponse(data=_movement_response(resolved), message="Stock adjusted.")
+
+
+@router.post(
+    "/catalog-variants/{catalog_variant_id}/adjust",
+    response_model=ApiResponse[CatalogVariantStockAdjustmentResponse],
+)
+async def adjust_catalog_variant_stock(
+    catalog_variant_id: uuid.UUID,
+    payload: InventoryAdjustmentRequest,
+    session: Any = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory.manage")),
+) -> ApiResponse[CatalogVariantStockAdjustmentResponse]:
+    """Edit Stock for a multi-SKU OMS-visible variant (e.g. Blue Packet):
+    ONE total-stock target for the whole CatalogVariant, never a per-SKU
+    value. Recorded on a separate reconciliation ledger -- see
+    `InventoryService.adjust_catalog_variant_to_target` and
+    `app.models.product.CatalogVariantStockAdjustment` for why. No
+    `ProductVariant` row (available_quantity, SKU, Shopify id) is ever
+    touched by this endpoint.
+    """
+    service = InventoryService(session)
+    adjustment = await service.adjust_catalog_variant_to_target(
+        catalog_variant_id,
+        target_boxes=payload.target_boxes,
+        reason=payload.reason,
+        actor=current_user,
+    )
+    resolved = await service.catalog_variant_adjustments.get_by_id_with_relations(adjustment.id)
+    assert resolved is not None  # just committed in the same session, above
+    return ApiResponse(
+        data=_catalog_variant_adjustment_response(resolved), message="Stock adjusted."
+    )
+
+
+@router.get(
+    "/catalog-variants/{catalog_variant_id}/adjustments",
+    response_model=PaginatedResponse[CatalogVariantStockAdjustmentResponse],
+)
+async def list_catalog_variant_adjustments(
+    catalog_variant_id: uuid.UUID,
+    page_params: PageParams = Depends(pagination_params),
+    sort_params: SortParams = Depends(sort_params_dep),
+    session: Any = Depends(get_db),
+    _: User = Depends(require_permission("inventory.read")),
+) -> PaginatedResponse[CatalogVariantStockAdjustmentResponse]:
+    """History of Total-Stock edits for one OMS-visible variant -- shown
+    alongside (not merged into) its underlying SKUs' regular dispatch/
+    RTO/manual movement history, which is untouched by this ledger.
+    """
+    service = InventoryService(session)
+    items, total = await service.catalog_variant_adjustments.list(
+        page_params=page_params,
+        sort_params=sort_params,
+        query=service.catalog_variant_adjustments.search_query(
+            catalog_variant_id=catalog_variant_id
+        ),
+        default_sort_column="created_at",
+    )
+    return PaginatedResponse(
+        data=[_catalog_variant_adjustment_response(a) for a in items],
+        meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
 
 
 @router.patch("/stock/{variant_id}/settings", response_model=ApiResponse[InventoryVariantResponse])
@@ -496,7 +599,13 @@ async def set_catalog_variant_name(
     threshold = await service.get_low_stock_threshold()
     product, oms_groups = await service.get_oms_variants_for_product(cv.product_id)
     group = next(g for g in oms_groups if g.catalog_variant_id == cv.id)
+    adjustment_total = await service.catalog_variant_adjustments.sum_for_catalog_variant(cv.id)
     return ApiResponse(
-        data=_oms_variant_response(group, threshold=threshold, product_image_url=product.image_url),
+        data=_oms_variant_response(
+            group,
+            threshold=threshold,
+            product_image_url=product.image_url,
+            adjustment_total=adjustment_total,
+        ),
         message="Catalog variant renamed.",
     )
