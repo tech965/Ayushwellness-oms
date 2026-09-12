@@ -18,16 +18,22 @@ types, also the idempotency guard (see `apply_dispatch`/`apply_rto_restock`).
 `OrderItem.quantity` is in UNITS of a specific variant/SKU (Shopify's own
 per-line-item quantity, e.g. "1" for one 120-Pack bundle purchased), not
 already in packets. Each variant configures two independent, per-variant
-ratios (never hardcoded constants): `pack_size` (how many packets/pouches
-ONE unit of this variant contains -- 60 for a "60 Pack" SKU, 120 for a
-"120 Pack" SKU) and `packets_per_box` (how many packets fit in one
-physical warehouse box). A dispatch/restock first converts the order
-line to a true packet count (`quantity * pack_size`), then converts
-THAT to boxes via ceiling division (`_ceil_div`) against `packets_per_box`
--- a partially-consumed box still consumes one whole box-equivalent of
-physical stock. Both ratios default to 1, so a variant with neither
-configured behaves exactly as before this two-ratio conversion existed
-(1 unit ordered == 1 box).
+values (never hardcoded constants): `pack_size` (how many boxes ONE unit
+of this variant consumes on dispatch) and `packets_per_box` (how many
+packets fit in one physical warehouse box -- a SEPARATE concept, used
+only when a variant is genuinely sold in loose-packet quantities). A
+dispatch/restock computes boxes as `ceil(quantity * pack_size /
+packets_per_box)` -- a partially-consumed box still consumes one whole
+box-equivalent of physical stock. `packets_per_box` defaults to 1 (never
+configured for this business's real catalog), which reduces the formula
+to `boxes = quantity * pack_size` -- i.e. `pack_size` directly IS the
+box-count a unit consumes, driven by whatever the real approved
+business rule for that pack size is (see `scripts/backfill_pack_sizes.
+py`'s `_PACK_SIZE_TO_BOXES` for the currently-approved 60/120/180
+mapping -- business data, not a formula, already revised once without
+any code change here). Both values default to 1, so a variant with
+neither configured behaves exactly as
+before this mechanism existed (1 unit ordered == 1 box).
 
 Idempotency: `OrderItem` has no per-shipment/per-RTO quantity split (it
 only ever records the order line's full quantity), so a dispatch/restock
@@ -667,10 +673,10 @@ class InventoryService:
     async def update_pack_size(
         self, variant_id: uuid.UUID, *, pack_size: int, actor: User | None
     ) -> ProductVariant:
-        """Changes ONLY how many packets one unit of this variant, as
-        ordered, represents -- never touches `available_quantity`. Affects
-        future dispatch/RTO box math only (see `apply_dispatch`); no past
-        `InventoryMovement` row is ever rewritten.
+        """Changes ONLY how many boxes one unit of this variant, as
+        ordered, consumes on dispatch -- never touches `available_quantity`.
+        Affects future dispatch/RTO box math only (see `apply_dispatch`);
+        no past `InventoryMovement` row is ever rewritten.
         """
         if pack_size <= 0:
             raise ValidationError("Pack size must be a positive integer.")

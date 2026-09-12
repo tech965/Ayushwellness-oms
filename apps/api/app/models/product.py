@@ -211,17 +211,21 @@ class ProductVariant(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixi
     packets_per_box: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )
-    # How many packets/pouches ONE unit of THIS variant (as ordered --
+    # How many boxes ONE unit of THIS variant (as ordered --
     # `OrderItem.quantity` counts units of this specific SKU, e.g. "1" for
-    # one 120-Pack bundle purchased) actually contains -- deliberately
-    # per-variant, never a global constant. Combined with `packets_per_box`
-    # above, `InventoryService` converts an order line to boxes as
-    # `ceil(quantity * pack_size / packets_per_box)`, so a 120-Pack variant
-    # (pack_size=120) against a 60-pouch box (packets_per_box=60) correctly
-    # deducts 2 boxes per unit sold, not 1. Defaults to 1 for every
-    # pre-existing row so a variant with no real pack size configured yet
-    # behaves exactly as before (1 unit ordered == 1 packet == today's
-    # existing ceil(quantity/packets_per_box) formula, unchanged). Changing
+    # one 120-Pack bundle purchased) consumes on dispatch -- deliberately
+    # per-variant, never a global constant, and driven by whatever the
+    # real approved business rule is for that variant's pack size (see
+    # `scripts/backfill_pack_sizes.py`'s `_PACK_SIZE_TO_BOXES` for the
+    # currently-approved values -- this table has already changed once
+    # and may change again, without needing any code/formula change
+    # here). `InventoryService` converts an order line to boxes as
+    # `ceil(quantity * pack_size / packets_per_box)`, and for this
+    # business's real configuration `packets_per_box` is left at its
+    # default of 1, so this reduces to `boxes = quantity * pack_size` --
+    # `pack_size` directly IS the box-count. Defaults to 1 for every
+    # pre-existing row so a variant with no real value configured yet
+    # behaves exactly as before (1 unit ordered == 1 box). Changing
     # this value only changes future dispatch/RTO box math -- it never
     # itself moves `available_quantity` or rewrites a past `InventoryMovement`.
     pack_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")

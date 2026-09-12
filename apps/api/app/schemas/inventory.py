@@ -283,5 +283,9 @@ class PacketsPerBoxUpdateRequest(BaseModel):
 
 class PackSizeUpdateRequest(BaseModel):
     pack_size: int = Field(
-        gt=0, description="Packets/pouches ONE unit of this variant, as ordered, contains."
+        gt=0,
+        description=(
+            "Boxes ONE unit of this variant consumes on dispatch "
+            "(combined with packets_per_box; see InventoryService.apply_dispatch)."
+        ),
     )

@@ -530,8 +530,8 @@ async def update_variant_pack_size(
     session: Any = Depends(get_db),
     current_user: User = Depends(require_permission("inventory.manage")),
 ) -> ApiResponse[InventoryVariantResponse]:
-    """How many packets/pouches ONE unit of this variant (as ordered)
-    contains -- combined with packets-per-box, drives how many boxes a
+    """How many boxes ONE unit of this variant (as ordered) consumes on
+    dispatch -- combined with packets-per-box, drives how many boxes a
     future dispatch/RTO deducts/restores for this SKU (see
     `InventoryService.apply_dispatch`). Never moves `available_boxes`
     itself, and never rewrites past movement history.

@@ -187,17 +187,19 @@ async def test_dispatch_uses_each_variants_own_packets_per_box(db_session: Async
     assert refreshed_b.available_quantity == 9  # ceil(90 / 100) = 1 box
 
 
-# --- pack_size: a bundle-SKU unit (e.g. a "120 Pack") -> real packet
-# count -> boxes, never a hardcoded -1 regardless of pack size ----------
+# --- pack_size: approved business rule -------------------------------
+# 60 Pack -> 1 box, 120 Pack -> 2 boxes, 180 Pack -> 3 boxes (see
+# `scripts/backfill_pack_sizes.py`'s `_PACK_SIZE_TO_BOXES` -- this rule
+# has already been revised once; only that table changes, never this
+# service's formula). `pack_size` directly holds this box-count
+# (`packets_per_box` stays at its default of 1, so `ceil(quantity *
+# pack_size / 1) == quantity * pack_size`) -- never a hardcoded -1
+# regardless of pack size.
 
 
-async def test_60_pack_shipment_deducts_1_box_per_unit(db_session: AsyncSession) -> None:
-    """A `pack_size=60` SKU ("60 Pack") against a 60-pouch box
-    (`packets_per_box=60`, the same base box size as every other pack
-    size of this product) deducts exactly 1 box per unit ordered.
-    """
+async def test_60_pack_shipment_deducts_exactly_1_box(db_session: AsyncSession) -> None:
     _, variant = await _make_variant(
-        db_session, sku="SKU-60PACK", available_quantity=100, pack_size=60, packets_per_box=60
+        db_session, sku="SKU-60PACK", available_quantity=100, pack_size=1
     )
     order = await _make_order_with_item(
         db_session,
@@ -213,12 +215,12 @@ async def test_60_pack_shipment_deducts_1_box_per_unit(db_session: AsyncSession)
     assert refreshed.available_quantity == 99  # 100 - 1
 
 
-async def test_120_pack_shipment_deducts_2_boxes_per_unit(db_session: AsyncSession) -> None:
-    """A `pack_size=120` SKU ("120 Pack") against the SAME 60-pouch box
-    deducts 2 boxes per unit -- never the same -1 a 60-Pack SKU gets.
+async def test_120_pack_shipment_deducts_exactly_2_boxes(db_session: AsyncSession) -> None:
+    """Never -1 (matching quantity) and never -3 (a prior, now-superseded
+    revision of this rule) -- the currently approved rule is 2.
     """
     _, variant = await _make_variant(
-        db_session, sku="SKU-120PACK", available_quantity=100, pack_size=120, packets_per_box=60
+        db_session, sku="SKU-120PACK", available_quantity=100, pack_size=2
     )
     order = await _make_order_with_item(
         db_session,
@@ -234,10 +236,50 @@ async def test_120_pack_shipment_deducts_2_boxes_per_unit(db_session: AsyncSessi
     assert refreshed.available_quantity == 98  # 100 - 2
 
 
-async def test_multiple_units_of_a_120_pack_multiply_correctly(db_session: AsyncSession) -> None:
-    """2 units of a 120-Pack SKU: 2 x 2 boxes = -4 boxes, not -2."""
+async def test_180_pack_shipment_deducts_exactly_3_boxes(db_session: AsyncSession) -> None:
+    """Distinct from a 120-Pack (2 boxes) -- each pack size has its own
+    independently-configured value, never a shared/derived one.
+    """
     _, variant = await _make_variant(
-        db_session, sku="SKU-120PACK-X2", available_quantity=100, pack_size=120, packets_per_box=60
+        db_session, sku="SKU-180PACK", available_quantity=100, pack_size=3
+    )
+    order = await _make_order_with_item(
+        db_session,
+        order_number="ORD-180PACK",
+        sku="SKU-180PACK",
+        quantity=1,
+        product_variant_id=variant.id,
+    )
+    shipment = await _make_shipment(db_session, order_id=order.id, awb="AWB-180PACK")
+    await InventoryService(db_session).apply_dispatch(order_id=order.id, shipment_id=shipment.id)
+
+    refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert refreshed.available_quantity == 97  # 100 - 3
+
+
+async def test_multiple_units_of_a_60_pack_multiply_correctly(db_session: AsyncSession) -> None:
+    """2 x 60-Pack: 2 x 1 box = -2 boxes."""
+    _, variant = await _make_variant(
+        db_session, sku="SKU-60PACK-X2", available_quantity=100, pack_size=1
+    )
+    order = await _make_order_with_item(
+        db_session,
+        order_number="ORD-60PACK-X2",
+        sku="SKU-60PACK-X2",
+        quantity=2,
+        product_variant_id=variant.id,
+    )
+    shipment = await _make_shipment(db_session, order_id=order.id, awb="AWB-60PACK-X2")
+    await InventoryService(db_session).apply_dispatch(order_id=order.id, shipment_id=shipment.id)
+
+    refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert refreshed.available_quantity == 98  # 100 - 2
+
+
+async def test_multiple_units_of_a_120_pack_multiply_correctly(db_session: AsyncSession) -> None:
+    """2 x 120-Pack: 2 x 2 boxes = -4 boxes, not -2."""
+    _, variant = await _make_variant(
+        db_session, sku="SKU-120PACK-X2", available_quantity=100, pack_size=2
     )
     order = await _make_order_with_item(
         db_session,
@@ -253,29 +295,31 @@ async def test_multiple_units_of_a_120_pack_multiply_correctly(db_session: Async
     assert refreshed.available_quantity == 96  # 100 - 4
 
 
-async def test_multiple_units_of_a_60_pack_multiply_correctly(db_session: AsyncSession) -> None:
-    """3 units of a 60-Pack SKU: 3 x 1 box = -3 boxes."""
+async def test_multiple_units_of_a_180_pack_multiply_correctly(db_session: AsyncSession) -> None:
+    """2 x 180-Pack: 2 x 3 boxes = -6 boxes."""
     _, variant = await _make_variant(
-        db_session, sku="SKU-60PACK-X3", available_quantity=100, pack_size=60, packets_per_box=60
+        db_session, sku="SKU-180PACK-X2", available_quantity=100, pack_size=3
     )
     order = await _make_order_with_item(
         db_session,
-        order_number="ORD-60PACK-X3",
-        sku="SKU-60PACK-X3",
-        quantity=3,
+        order_number="ORD-180PACK-X2",
+        sku="SKU-180PACK-X2",
+        quantity=2,
         product_variant_id=variant.id,
     )
-    shipment = await _make_shipment(db_session, order_id=order.id, awb="AWB-60PACK-X3")
+    shipment = await _make_shipment(db_session, order_id=order.id, awb="AWB-180PACK-X2")
     await InventoryService(db_session).apply_dispatch(order_id=order.id, shipment_id=shipment.id)
 
     refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
-    assert refreshed.available_quantity == 97  # 100 - 3
+    assert refreshed.available_quantity == 94  # 100 - 6
 
 
 async def test_default_pack_size_of_1_behaves_exactly_as_before(db_session: AsyncSession) -> None:
     """A variant with no real pack size configured (the default for
     every pre-existing row) behaves exactly like before `pack_size`
-    existed -- 1 unit ordered still deducts exactly 1 box.
+    existed -- 1 unit ordered still deducts exactly 1 box. Also the
+    backward-compatibility guarantee for any existing variant that
+    hasn't been through the backfill yet.
     """
     _, variant = await _make_variant(db_session, sku="SKU-DEFAULT-PACK", available_quantity=10)
     order = await _make_order_with_item(
@@ -295,13 +339,13 @@ async def test_default_pack_size_of_1_behaves_exactly_as_before(db_session: Asyn
 async def test_rto_restores_the_exact_boxes_a_120_pack_dispatch_removed(
     db_session: AsyncSession,
 ) -> None:
-    """A 120-Pack shipment deducts -2 boxes; its RTO must restore +2, not
-    +1 -- the ledger-based restock reads back the real dispatch amount,
-    so it's automatically correct for any pack size, including a
-    changed `pack_size` after the fact.
+    """A 120-Pack shipment deducts -2 boxes; its RTO must restore +2,
+    never +1 -- the ledger-based restock reads back the real dispatch
+    amount, so it's automatically correct for any pack size, including
+    a changed `pack_size` after the fact.
     """
     _, variant = await _make_variant(
-        db_session, sku="SKU-RTO-120PACK", available_quantity=50, pack_size=120, packets_per_box=60
+        db_session, sku="SKU-RTO-120PACK", available_quantity=50, pack_size=2
     )
     order = await _make_order_with_item(
         db_session,
@@ -337,6 +381,75 @@ async def test_rto_restores_the_exact_boxes_a_120_pack_dispatch_removed(
     restock = next(m for m in movements if m.movement_type == InventoryMovementType.RTO_RESTOCK)
     assert dispatch.quantity_delta == -2
     assert restock.quantity_delta == 2  # exactly what dispatch removed, never a fresh 1x guess
+
+
+async def test_rto_restores_the_exact_boxes_a_180_pack_dispatch_removed(
+    db_session: AsyncSession,
+) -> None:
+    """A 180-Pack shipment deducts -3 boxes; RTO restores +3."""
+    _, variant = await _make_variant(
+        db_session, sku="SKU-RTO-180PACK", available_quantity=50, pack_size=3
+    )
+    order = await _make_order_with_item(
+        db_session,
+        order_number="ORD-RTO-180PACK",
+        sku="SKU-RTO-180PACK",
+        quantity=1,
+        product_variant_id=variant.id,
+    )
+    shipment = await _make_shipment(db_session, order_id=order.id, awb="AWB-RTO-180PACK")
+    service = InventoryService(db_session)
+    await service.apply_dispatch(order_id=order.id, shipment_id=shipment.id)
+
+    after_dispatch = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert after_dispatch.available_quantity == 47  # 50 - 3
+
+    rto, _ = await RTORepository(db_session).upsert_by_external_id(
+        source_system="shiprocket",
+        external_id="AWB-RTO-180PACK",
+        shipment_id=shipment.id,
+        order_id=order.id,
+        status=RTOStatus.RECEIVED,
+    )
+    await db_session.commit()
+    await service.apply_rto_restock(order_id=order.id, rto_id=rto.id)
+
+    after_rto = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert after_rto.available_quantity == 50  # 47 + 3
+
+
+async def test_rto_restock_falls_back_correctly_for_a_120_pack_with_no_matching_dispatch(
+    db_session: AsyncSession,
+) -> None:
+    """No DISPATCH movement was ever recorded through this OMS for this
+    (order, variant) -- the fallback conversion (`ceil(quantity *
+    pack_size / packets_per_box)`) must still apply the approved 2-box
+    rule, not a naive -1.
+    """
+    _, variant = await _make_variant(
+        db_session, sku="SKU-RTO-NO-DISPATCH-120", available_quantity=5, pack_size=2
+    )
+    order = await _make_order_with_item(
+        db_session,
+        order_number="ORD-RTO-NO-DISPATCH-120",
+        sku="SKU-RTO-NO-DISPATCH-120",
+        quantity=1,
+        product_variant_id=variant.id,
+    )
+    shipment = await _make_shipment(db_session, order_id=order.id, awb="AWB-RTO-NO-DISPATCH-120")
+    rto, _ = await RTORepository(db_session).upsert_by_external_id(
+        source_system="shiprocket",
+        external_id="AWB-RTO-NO-DISPATCH-120",
+        shipment_id=shipment.id,
+        order_id=order.id,
+        status=RTOStatus.RECEIVED,
+    )
+    await db_session.commit()
+
+    await InventoryService(db_session).apply_rto_restock(order_id=order.id, rto_id=rto.id)
+
+    refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert refreshed.available_quantity == 7  # 5 + 2, not 5 + 1
 
 
 async def test_multiple_variants_in_one_order_calculated_independently(
@@ -870,18 +983,18 @@ async def test_update_pack_size_endpoint(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
     _, variant = await _make_variant(
-        db_session, sku="SKU-EP-PACKSIZE", available_quantity=100, pack_size=60, packets_per_box=60
+        db_session, sku="SKU-EP-PACKSIZE", available_quantity=100, pack_size=1
     )
 
     async with await make_authenticated_client(
         db_session, permission_codes=["inventory.read", "inventory.manage"]
     ) as auth_client:
         response = await auth_client.patch(
-            f"/api/v1/inventory/stock/{variant.id}/pack-size", json={"pack_size": 120}
+            f"/api/v1/inventory/stock/{variant.id}/pack-size", json={"pack_size": 3}
         )
         assert response.status_code == 200
         body = response.json()["data"]
-        assert body["pack_size"] == 120
+        assert body["pack_size"] == 3
         assert body["available_boxes"] == 100  # unchanged by a pack_size edit
 
         invalid = await auth_client.patch(
@@ -902,7 +1015,7 @@ async def test_update_pack_size_endpoint(
             order_id=order.id, shipment_id=shipment.id
         )
         refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
-        assert refreshed.available_quantity == 98  # 100 - ceil(120/60) = 100 - 2
+        assert refreshed.available_quantity == 97  # 100 - 3
 
 
 async def test_movement_history_endpoint_includes_product_and_variant_names(
