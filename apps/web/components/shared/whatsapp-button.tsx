@@ -1,9 +1,9 @@
-import { MessageCircle } from "lucide-react"
-
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { buildWhatsAppUrl } from "@/lib/whatsapp"
+
+import { WhatsAppIcon } from "./whatsapp-icon"
 
 interface WhatsAppButtonProps {
   phone: string | null | undefined
@@ -12,10 +12,11 @@ interface WhatsAppButtonProps {
 
 /** Compact icon-button that opens a WhatsApp click-to-chat conversation
  * for the customer's phone number (Telecaller Order Detail's "Customer &
- * Order" card, right beside the phone number). No new icon dependency —
- * lucide-react ships no branded WhatsApp mark, so `MessageCircle` (its
- * closest generic chat-bubble icon) stands in, tinted WhatsApp's brand
- * green so it still reads as "WhatsApp" at a glance in both themes.
+ * Order" card, right beside the phone number). Renders the actual
+ * WhatsApp brand glyph (`WhatsAppIcon` — an inline SVG, no new icon-
+ * library dependency), sized at 24px (`size-6`) so it's clearly
+ * recognizable beside the phone number rather than the tiny generic
+ * chat-bubble icon this used to be.
  *
  * Renders nothing when the phone number isn't usable (missing, or too
  * short/malformed to normalize) — never a button that opens a broken
@@ -33,13 +34,10 @@ export function WhatsAppButton({ phone, className }: WhatsAppButtonProps) {
           variant="ghost"
           size="icon-sm"
           aria-label="Open WhatsApp chat with customer"
-          className={cn(
-            "text-[#25D366] hover:bg-[#25D366]/10 hover:text-[#25D366] dark:hover:bg-[#25D366]/15",
-            className
-          )}
+          className={cn("hover:bg-[#25D366]/10", className)}
           onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
         >
-          <MessageCircle />
+          <WhatsAppIcon className="size-6" />
         </Button>
       </TooltipTrigger>
       <TooltipContent>Open WhatsApp chat</TooltipContent>
