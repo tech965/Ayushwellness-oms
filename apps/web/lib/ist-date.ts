@@ -77,6 +77,21 @@ export function istCalendarDateAsLocalMidnight(instant: Date): Date {
   return new Date(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate())
 }
 
+/** The IST calendar date of `instant` as a `YYYY-MM-DD` string — the
+ * shape every "stock date"/date-only query param on the backend expects
+ * (`date` in FastAPI, never a full timestamp — see
+ * `app.core.timezone.ist_day_bounds_for_date`). Built off the same
+ * Y/M/D components `istCalendarDateAsLocalMidnight` reads, just
+ * formatted instead of turned into a local-midnight `Date`.
+ */
+export function istDateKey(instant: Date): string {
+  const shifted = new Date(instant.getTime() + IST_OFFSET_MS)
+  const year = shifted.getUTCFullYear()
+  const month = String(shifted.getUTCMonth() + 1).padStart(2, "0")
+  const day = String(shifted.getUTCDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
+
 /** True when both instants fall in the same IST calendar day — used to
  * detect "the active range is exactly today" for the Today-vs-Yesterday
  * comparison chart.

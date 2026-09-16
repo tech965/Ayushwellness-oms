@@ -18,6 +18,11 @@ import {
   useUpdatePacketsPerBox,
   useUpdatePackSize,
 } from "@/services/inventory"
+import {
+  useProductPlatformStock,
+  useProductShipmentSummary,
+  usePlatformMovementHistory,
+} from "@/services/platform-inventory"
 import { useAuth } from "@/lib/auth-context"
 import type {
   InventoryMovement,
@@ -25,6 +30,7 @@ import type {
   OmsCatalogVariant,
   ProductVariantStockLine,
 } from "@/types/inventory"
+import type { ProductPlatformStock, ProductShipmentSummary } from "@/types/platform-inventory"
 
 const toastSuccess = vi.fn()
 const toastError = vi.fn()
@@ -52,6 +58,13 @@ vi.mock("@/services/inventory", () => ({
   useCatalogVariantAdjustments: vi.fn(),
 }))
 
+vi.mock("@/services/platform-inventory", () => ({
+  useProductPlatformStock: vi.fn(),
+  useProductShipmentSummary: vi.fn(),
+  usePlatformMovementHistory: vi.fn(),
+  useRecordPlatformStockMovement: vi.fn(),
+}))
+
 vi.mock("@/lib/auth-context", () => ({ useAuth: vi.fn() }))
 
 const mockedUseProductStock = vi.mocked(useInventoryProductStock)
@@ -64,6 +77,9 @@ const mockedUseUpdatePackSize = vi.mocked(useUpdatePackSize)
 const mockedUseAddVariantStock = vi.mocked(useAddVariantStock)
 const mockedUseAddCatalogVariantStock = vi.mocked(useAddCatalogVariantStock)
 const mockedUseCatalogVariantAdjustments = vi.mocked(useCatalogVariantAdjustments)
+const mockedUseProductPlatformStock = vi.mocked(useProductPlatformStock)
+const mockedUseProductShipmentSummary = vi.mocked(useProductShipmentSummary)
+const mockedUsePlatformMovementHistory = vi.mocked(usePlatformMovementHistory)
 const mockedUseAuth = vi.mocked(useAuth)
 
 function mutationStub(behaviour: "success" | "error" = "success") {
@@ -307,6 +323,27 @@ beforeEach(() => {
     error: null,
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useCatalogVariantAdjustments>)
+  mockedUseProductPlatformStock.mockReturnValue({
+    data: undefined,
+    isLoading: false,
+    isError: false,
+    error: null,
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useProductPlatformStock>)
+  mockedUseProductShipmentSummary.mockReturnValue({
+    data: undefined,
+    isLoading: false,
+    isError: false,
+    error: null,
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useProductShipmentSummary>)
+  mockedUsePlatformMovementHistory.mockReturnValue({
+    data: { data: [], meta: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } },
+    isLoading: false,
+    isError: false,
+    error: null,
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof usePlatformMovementHistory>)
   setProduct(HERBAL_MASALA)
 })
 
@@ -911,5 +948,217 @@ describe("EditNameDialog", () => {
     await user.click(screen.getByRole("button", { name: "Reset to Shopify Name" }))
     expect(mutation.mutate).toHaveBeenCalledWith(null, expect.anything())
     expect(toastSuccess).toHaveBeenCalledWith("Reset to Shopify name.")
+  })
+})
+
+// --- Multi-platform inventory (Marketplace Stock / Shipments / History) ---
+
+const PLATFORM_STOCK_FIXTURE: ProductPlatformStock = {
+  product_id: "prod-1",
+  product_title: "Vajrashakti",
+  stock_date: "2026-09-11",
+  variants: [
+    {
+      product_variant_id: "v-1",
+      sku: "VJR-30",
+      variant_title: "Pack of 1",
+      stock_date: "2026-09-11",
+      platforms: [
+        {
+          platform: "shopify",
+          platform_label: "Shopify",
+          is_automatic: true,
+          opening_stock: null,
+          stock_added: 0,
+          stock_deducted: 35,
+          current_stock: 1200,
+          last_updated: "2026-09-11T09:00:00Z",
+        },
+        {
+          platform: "amazon",
+          platform_label: "Amazon",
+          is_automatic: false,
+          opening_stock: 500,
+          stock_added: 30,
+          stock_deducted: 0,
+          current_stock: 530,
+          last_updated: null,
+        },
+        {
+          platform: "flipkart",
+          platform_label: "Flipkart",
+          is_automatic: false,
+          opening_stock: 0,
+          stock_added: 0,
+          stock_deducted: 0,
+          current_stock: 0,
+          last_updated: null,
+        },
+        {
+          platform: "blinkit",
+          platform_label: "Blinkit",
+          is_automatic: false,
+          opening_stock: 0,
+          stock_added: 0,
+          stock_deducted: 0,
+          current_stock: 0,
+          last_updated: null,
+        },
+        {
+          platform: "meesho",
+          platform_label: "Meesho",
+          is_automatic: false,
+          opening_stock: 0,
+          stock_added: 0,
+          stock_deducted: 0,
+          current_stock: 0,
+          last_updated: null,
+        },
+        {
+          platform: "manual_other",
+          platform_label: "Manual / Other",
+          is_automatic: false,
+          opening_stock: 0,
+          stock_added: 0,
+          stock_deducted: 0,
+          current_stock: 0,
+          last_updated: null,
+        },
+      ],
+    },
+  ],
+}
+
+const SHIPMENT_SUMMARY_FIXTURE: ProductShipmentSummary = {
+  product_id: "prod-1",
+  stock_date: "2026-09-11",
+  in_transit: 12,
+  out_for_delivery: 4,
+  delivered_on_date: 18,
+  rto: 2,
+  variants: [
+    { product_variant_id: "v-1", sku: "VJR-30", in_transit: 12, out_for_delivery: 4, delivered_on_date: 18, rto: 2 },
+  ],
+}
+
+describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)", () => {
+  it("renders the Stock Date selector, Marketplace Stock, and Shipments sections", () => {
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: PLATFORM_STOCK_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+    mockedUseProductShipmentSummary.mockReturnValue({
+      data: SHIPMENT_SUMMARY_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductShipmentSummary>)
+
+    renderWithProviders(<InventoryProductPage />)
+
+    expect(screen.getByText("Stock Date")).toBeInTheDocument()
+    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+    expect(screen.getByText("Shipments")).toBeInTheDocument()
+    expect(screen.getByText("Amazon")).toBeInTheDocument()
+    expect(screen.getByText("530")).toBeInTheDocument() // Amazon current stock
+    expect(screen.getByText("12 boxes")).toBeInTheDocument() // In Transit
+  })
+
+  it("shows Shopify's live current stock, never a fabricated historical balance", () => {
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: PLATFORM_STOCK_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+    mockedUseProductShipmentSummary.mockReturnValue({
+      data: SHIPMENT_SUMMARY_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductShipmentSummary>)
+
+    renderWithProviders(<InventoryProductPage />)
+
+    expect(screen.getByText("Automatic")).toBeInTheDocument()
+    expect(screen.getByText("1200")).toBeInTheDocument() // Shopify's live current stock
+  })
+
+  it("never crashes when the product has no manual platform stock data yet", () => {
+    setProduct(VAJRASHAKTI)
+    // Defaults from beforeEach: isLoading/isError false, data undefined.
+    renderWithProviders(<InventoryProductPage />)
+
+    // The existing Shopify section still renders fine (PageHeader title +
+    // the OMS variant card both say "Vajrashakti" -- getAllByText, never
+    // an ambiguous singular match).
+    expect(screen.getAllByText("Vajrashakti").length).toBeGreaterThan(0)
+    // The new section renders its own clean empty state, not a crash.
+    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+  })
+
+  it("shows a loading state for the Marketplace Stock section without crashing", () => {
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+  })
+
+  it("shows an API error state for the Shipments section without crashing", () => {
+    setProduct(VAJRASHAKTI)
+    mockedUseProductShipmentSummary.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      error: new Error("Network error"),
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductShipmentSummary>)
+
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.getByText("Shipments")).toBeInTheDocument()
+    expect(screen.getByText("Something went wrong")).toBeInTheDocument()
+  })
+
+  it("toggles the Platform Stock Movement History section", async () => {
+    const user = userEvent.setup()
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: PLATFORM_STOCK_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+
+    renderWithProviders(<InventoryProductPage />)
+
+    expect(screen.queryByText(/Platform Stock Movement History/i)).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Show Movement History" }))
+    expect(screen.getByText(/Platform Stock Movement History/i)).toBeInTheDocument()
+  })
+
+  it("existing Shopify product-detail rendering is unaffected by the new section", () => {
+    setProduct(VAJRASHAKTI)
+    renderWithProviders(<InventoryProductPage />)
+
+    // Same assertions the pre-existing "Aayush Herbal Masala..." suite
+    // makes for Vajrashakti elsewhere in this file -- the Shopify card
+    // still renders exactly as before.
+    expect(screen.getByText("900")).toBeInTheDocument() // total available boxes
   })
 })

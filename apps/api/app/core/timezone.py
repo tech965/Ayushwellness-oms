@@ -20,7 +20,7 @@ could silently drift and reintroduce the bug.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
@@ -48,3 +48,24 @@ def ist_day_bounds(reference: datetime | None = None) -> tuple[datetime, datetim
     start_of_today_utc = ist_midnight - IST_OFFSET
     start_of_tomorrow_utc = start_of_today_utc + timedelta(days=1)
     return start_of_today_utc, start_of_tomorrow_utc
+
+
+def ist_today() -> date:
+    """The current IST calendar date — the correct default for any "stock
+    date"/"business day" field, since this OMS's business day is IST (see
+    module docstring), never `datetime.now(UTC).date()` (wrong for the
+    same 00:00-05:29 IST window `ist_day_bounds` exists to fix).
+    """
+    return to_ist(datetime.now(UTC)).date()
+
+
+def ist_day_bounds_for_date(day: date) -> tuple[datetime, datetime]:
+    """`ist_day_bounds` for an arbitrary IST calendar date (not just "now")
+    — e.g. a user-selected "Stock Date" on the platform-inventory page.
+    Noon UTC on `day` is always still within `day`'s own IST calendar date
+    (IST is UTC+5:30, so noon UTC = 17:30 IST — nowhere near either
+    boundary), so this is a safe, simple `reference` to feed to
+    `ist_day_bounds` for any date, not just today.
+    """
+    reference = datetime.combine(day, time(hour=12), tzinfo=UTC)
+    return ist_day_bounds(reference)

@@ -10,6 +10,10 @@ import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { ProductThumbnail } from "@/components/shared/product-thumbnail"
 import { QueryStates } from "@/components/shared/query-states"
+import { StockDatePicker } from "@/components/shared/stock-date-picker"
+import { PlatformMovementHistory } from "@/components/inventory/platform-movement-history"
+import { PlatformStockSection } from "@/components/inventory/platform-stock-section"
+import { ShipmentSummarySection } from "@/components/inventory/shipment-summary-section"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -25,6 +29,7 @@ import { Label } from "@/components/ui/label"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
 import { formatDateTime } from "@/lib/format"
+import { istDateKey, istStartOfDay } from "@/lib/ist-date"
 import { cn } from "@/lib/utils"
 import { usePaginationState } from "@/lib/use-pagination"
 import {
@@ -39,6 +44,7 @@ import {
   useUpdatePacketsPerBox,
   useUpdatePackSize,
 } from "@/services/inventory"
+import { useProductPlatformStock, useProductShipmentSummary } from "@/services/platform-inventory"
 import {
   INVENTORY_MOVEMENT_TYPE_OPTIONS,
   STOCK_STATUS_BADGE_CLASSES,
@@ -1007,6 +1013,68 @@ function ProductInventory({ product }: { product: InventoryProductStock }) {
   )
 }
 
+/** Marketplace Stock + Shipments + Platform Movement History — the new
+ * multi-platform inventory feature, entirely below the existing Shopify
+ * section above and entirely date-scoped by its own `stockDate`. Shopify
+ * itself stays exactly as `ProductInventory` already renders it (always
+ * live, never date-filtered) -- this section only ADDS to the page.
+ */
+function MultiPlatformInventorySection({ productId }: { productId: string }) {
+  const [stockDate, setStockDate] = React.useState(() => istStartOfDay(new Date()))
+  const [showHistory, setShowHistory] = React.useState(false)
+  const { hasPermission } = useAuth()
+  const canManage = hasPermission("inventory.manage")
+  const stockDateKey = istDateKey(stockDate)
+
+  const platformStockQuery = useProductPlatformStock(productId, stockDateKey)
+  const shipmentSummaryQuery = useProductShipmentSummary(productId, stockDateKey)
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="bg-card border-border flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3">
+        <StockDatePicker value={stockDate} onChange={setStockDate} />
+        <p className="text-muted-foreground text-xs">
+          &ldquo;Stock Balance&rdquo; is as of the selected date; &ldquo;Stock Added&rdquo;/&ldquo;Sold&rdquo;
+          are movements DURING that date.
+        </p>
+      </div>
+
+      <PlatformStockSection
+        productTitle={platformStockQuery.data?.product_title ?? ""}
+        isLoading={platformStockQuery.isLoading}
+        isError={platformStockQuery.isError}
+        error={platformStockQuery.error}
+        data={platformStockQuery.data}
+        onRetry={() => void platformStockQuery.refetch()}
+        canManage={canManage}
+        stockDate={stockDateKey}
+      />
+
+      <ShipmentSummarySection
+        isLoading={shipmentSummaryQuery.isLoading}
+        isError={shipmentSummaryQuery.isError}
+        error={shipmentSummaryQuery.error}
+        data={shipmentSummaryQuery.data}
+        onRetry={() => void shipmentSummaryQuery.refetch()}
+      />
+
+      <div>
+        <Button variant="outline" size="sm" onClick={() => setShowHistory((v) => !v)}>
+          {showHistory ? "Hide Movement History" : "Show Movement History"}
+        </Button>
+      </div>
+      {showHistory &&
+        platformStockQuery.data?.variants.map((variant) => (
+          <PlatformMovementHistory
+            key={variant.product_variant_id}
+            variantId={variant.product_variant_id}
+            variantLabel={variant.variant_title || variant.sku}
+          />
+        ))}
+    </div>
+  )
+}
+
 export default function InventoryProductPage() {
   const params = useParams<{ productId: string }>()
   const productId = params.productId
@@ -1030,7 +1098,12 @@ export default function InventoryProductPage() {
         emptyTitle="No stock records"
         emptyDescription="This product has no variants yet."
       >
-        {(data) => <ProductInventory product={data} />}
+        {(data) => (
+          <div className="flex flex-col gap-8">
+            <ProductInventory product={data} />
+            <MultiPlatformInventorySection productId={productId} />
+          </div>
+        )}
       </QueryStates>
     </>
   )

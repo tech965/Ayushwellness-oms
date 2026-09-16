@@ -11,16 +11,18 @@ input for anything in this module (see `InventoryService`'s docstring).
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
+from app.core.timezone import ist_today
 from app.db.session import get_db
 from app.dependencies.auth import require_permission
 from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
-from app.models.enums import InventoryMovementType
+from app.models.enums import InventoryMovementType, PlatformStockMovementType
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.inventory import (
     CatalogNameResponse,
@@ -40,8 +42,16 @@ from app.schemas.inventory import (
     ProductVariantStockLine,
     VariantNameUpdateRequest,
 )
+from app.schemas.platform_inventory import (
+    PlatformStockMovementCreateRequest,
+    PlatformStockMovementResponse,
+    ProductPlatformStockResponse,
+    ProductShipmentSummaryResponse,
+    UnifiedStockMovementResponse,
+)
 from app.schemas.response import ApiResponse, PaginatedResponse
 from app.services.inventory_service import InventoryService, OmsVariantGroup
+from app.services.platform_inventory_service import PlatformInventoryService, to_movement_response
 
 router = APIRouter()
 
@@ -636,3 +646,127 @@ async def set_catalog_variant_name(
         ),
         message="Catalog variant renamed.",
     )
+
+
+# ----------------------------------------------------------------------
+# Multi-platform (Amazon/Flipkart/Blinkit/Meesho/Manual) marketplace
+# stock -- a manual, date-wise ledger alongside the Shopify/OMS system
+# above, never inside it. See `app.services.platform_inventory_service`.
+# ----------------------------------------------------------------------
+
+
+@router.get(
+    "/products/{product_id}/platform-stock",
+    response_model=ApiResponse[ProductPlatformStockResponse],
+)
+async def get_product_platform_stock(
+    product_id: uuid.UUID,
+    stock_date: date | None = Query(
+        default=None, description="IST business date. Defaults to today (IST)."
+    ),
+    session: Any = Depends(get_db),
+    _: User = Depends(require_permission("inventory.read")),
+) -> ApiResponse[ProductPlatformStockResponse]:
+    """Marketplace Stock table: Shopify (read-only, automatic) plus every
+    manual platform, for every real Shopify SKU under this product, as of
+    `stock_date`. One endpoint serves both "get platform inventory for
+    product/variant" and "for a selected date" -- the date is just a
+    query param, never a second endpoint.
+    """
+    service = PlatformInventoryService(session)
+    data = await service.get_product_platform_stock(
+        product_id, stock_date=stock_date or ist_today()
+    )
+    return ApiResponse(data=data)
+
+
+@router.post(
+    "/stock/{variant_id}/platform-stock/movements",
+    response_model=ApiResponse[PlatformStockMovementResponse],
+    status_code=201,
+)
+async def record_platform_stock_movement(
+    variant_id: uuid.UUID,
+    payload: PlatformStockMovementCreateRequest,
+    session: Any = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory.manage")),
+) -> ApiResponse[PlatformStockMovementResponse]:
+    """Add Stock / Record Sale for one manual platform. Additive-only,
+    same contract as `POST /stock/{variant_id}/adjust`: the request
+    carries only the quantity being added/deducted -- the resulting
+    balance is always computed server-side from the last recorded
+    balance, never trusted from the client. `actor` is always the
+    authenticated caller, never a client-supplied user id.
+    """
+    service = PlatformInventoryService(session)
+    movement = await service.record_movement(
+        variant_id,
+        platform=payload.platform,
+        movement_type=PlatformStockMovementType(payload.movement_type),
+        quantity=payload.quantity,
+        reason=payload.reason,
+        stock_date=payload.stock_date,
+        actor=current_user,
+    )
+    resolved = await service.movements.get_by_id_with_relations(movement.id)
+    return ApiResponse(
+        data=to_movement_response(resolved or movement), message="Stock movement recorded."
+    )
+
+
+@router.get(
+    "/stock/{variant_id}/platform-stock/movements",
+    response_model=PaginatedResponse[UnifiedStockMovementResponse],
+)
+async def list_platform_stock_movements(
+    variant_id: uuid.UUID,
+    platform: str | None = Query(
+        default=None, description="Filter to one platform (including 'shopify')."
+    ),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    page_params: PageParams = Depends(pagination_params),
+    session: Any = Depends(get_db),
+    _: User = Depends(require_permission("inventory.read")),
+) -> PaginatedResponse[UnifiedStockMovementResponse]:
+    """Platform Stock Movement History: this variant's manual platform
+    movements interleaved with its existing Shopify movements, sorted by
+    time -- never a replacement for the existing standalone Shopify
+    movement-history endpoint (`GET /movements`), which is untouched.
+    """
+    service = PlatformInventoryService(session)
+    rows, total = await service.get_movement_history(
+        variant_id,
+        platform=platform,
+        date_from=date_from,
+        date_to=date_to,
+        page_params=page_params,
+    )
+    return PaginatedResponse(
+        data=rows, meta=build_pagination_meta(total_items=total, page_params=page_params)
+    )
+
+
+@router.get(
+    "/products/{product_id}/shipment-summary",
+    response_model=ApiResponse[ProductShipmentSummaryResponse],
+)
+async def get_product_shipment_summary(
+    product_id: uuid.UUID,
+    stock_date: date | None = Query(
+        default=None, description="IST business date, used only for 'delivered on date'."
+    ),
+    session: Any = Depends(get_db),
+    _: User = Depends(require_permission("inventory.read")),
+) -> ApiResponse[ProductShipmentSummaryResponse]:
+    """In Transit / Out for Delivery / Delivered (on date) / RTO, for
+    every real SKU under this product -- derived entirely from the
+    existing `InventoryMovement` DISPATCH rows joined to `Shipment.
+    current_status`, never a fabricated or duplicated shipment-tracking
+    mechanism.
+    """
+    service = PlatformInventoryService(session)
+    data = await service.get_product_shipment_summary(
+        product_id, stock_date=stock_date or ist_today()
+    )
+    return ApiResponse(data=data)

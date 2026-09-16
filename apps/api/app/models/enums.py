@@ -167,6 +167,18 @@ class InventoryMovementType(StrEnum):
     INITIAL_STOCK = "initial_stock"
 
 
+class PlatformStockMovementType(StrEnum):
+    """What changed a `PlatformStockMovement`'s balance — see
+    `app.services.platform_inventory_service.PlatformInventoryService`.
+    A separate, smaller enum from `InventoryMovementType` above: platform
+    stock is manually entered only (no dispatch/RTO automation), so it
+    only ever needs "added" or "deducted".
+    """
+
+    STOCK_ADDED = "stock_added"
+    STOCK_DEDUCTED = "stock_deducted"
+
+
 class StockStatus(StrEnum):
     """Computed from `available_quantity` (boxes) vs. the configured
     `AppSettings.values.inventory.low_stock_threshold` -- never persisted,
