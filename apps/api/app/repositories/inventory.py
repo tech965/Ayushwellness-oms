@@ -129,46 +129,101 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
             stmt = stmt.where(InventoryMovement.created_at <= date_to)
         return stmt
 
-    async def dispatch_and_restock_totals_bulk(
+    async def movement_totals_by_sign_bulk(
         self,
         *,
         product_variant_ids: list[uuid.UUID],
         created_from: datetime,
         created_to: datetime,
     ) -> dict[uuid.UUID, tuple[int, int]]:
-        """`{variant_id: (dispatched_boxes, restocked_boxes)}` for every
-        variant in `product_variant_ids` within one UTC timestamp window
+        """`{variant_id: (added_boxes, deducted_boxes)}` for every variant
+        in `product_variant_ids` within one UTC timestamp window
         (typically one IST calendar day's bounds) -- one query, no N+1
         across a product's several SKUs. Backs the multi-platform
-        inventory feature's "Shopify: stock sold/restocked on the
+        inventory feature's "Shopify: stock added/deducted on the
         selected date" row, reusing this EXISTING ledger (never a
         duplicate/estimated figure -- see `app.services.
         platform_inventory_service`).
+
+        Buckets by the sign of `quantity_delta`, across EVERY
+        `InventoryMovementType` (DISPATCH, RTO_RESTOCK, MANUAL_ADJUSTMENT,
+        INITIAL_STOCK) -- not just DISPATCH/RTO_RESTOCK. "Stock Added"/
+        "Sold or Deducted" means every positive/negative Shopify movement
+        on that date, including a staff manual adjustment made through
+        the existing (non-platform) Add Stock action -- narrowing to two
+        hardcoded movement types would silently under-report that case.
         """
         if not product_variant_ids:
             return {}
         stmt = select(
             InventoryMovement.product_variant_id,
-            InventoryMovement.movement_type,
             func.sum(InventoryMovement.quantity_delta),
         ).where(
             InventoryMovement.product_variant_id.in_(product_variant_ids),
-            InventoryMovement.movement_type.in_(
-                [InventoryMovementType.DISPATCH, InventoryMovementType.RTO_RESTOCK]
-            ),
+            InventoryMovement.quantity_delta > 0,
             InventoryMovement.created_at >= created_from,
             InventoryMovement.created_at < created_to,
-        ).group_by(InventoryMovement.product_variant_id, InventoryMovement.movement_type)
+        ).group_by(InventoryMovement.product_variant_id)
+        added_result = await self.session.execute(stmt)
+        added: dict[uuid.UUID, int] = {
+            variant_id: int(total or 0) for variant_id, total in added_result.all()
+        }
+
+        stmt = select(
+            InventoryMovement.product_variant_id,
+            func.sum(InventoryMovement.quantity_delta),
+        ).where(
+            InventoryMovement.product_variant_id.in_(product_variant_ids),
+            InventoryMovement.quantity_delta < 0,
+            InventoryMovement.created_at >= created_from,
+            InventoryMovement.created_at < created_to,
+        ).group_by(InventoryMovement.product_variant_id)
+        deducted_result = await self.session.execute(stmt)
+        deducted: dict[uuid.UUID, int] = {
+            variant_id: -int(total or 0) for variant_id, total in deducted_result.all()
+        }
+
+        return {
+            variant_id: (added.get(variant_id, 0), deducted.get(variant_id, 0))
+            for variant_id in set(added) | set(deducted)
+        }
+
+    async def get_latest_as_of_bulk(
+        self, *, product_variant_ids: list[uuid.UUID], created_to: datetime
+    ) -> dict[uuid.UUID, InventoryMovement]:
+        """The latest `InventoryMovement` row (by `created_at`) strictly
+        before `created_to`, for every variant in `product_variant_ids` --
+        one query, no N+1. `quantity_after` on the returned row IS the
+        variant's Shopify stock balance at that instant (each movement
+        already records the resulting running balance, the same
+        mechanism `PlatformStockMovementRepository.get_latest_as_of`
+        already uses for the manual marketplace ledger) -- this
+        reconstructs a HISTORICAL Shopify balance from the existing
+        ledger, never `ProductVariant.available_quantity` (which is only
+        ever today's LIVE value, see `app.services.
+        platform_inventory_service`).
+
+        A variant absent from the returned dict means no movement exists
+        before `created_to` -- the ledger genuinely cannot reconstruct a
+        balance for that cutoff (it may predate the variant's first-ever
+        movement); the caller must treat this as "unknown", never guess 0.
+        """
+        if not product_variant_ids:
+            return {}
+        stmt = (
+            select(InventoryMovement)
+            .where(
+                InventoryMovement.product_variant_id.in_(product_variant_ids),
+                InventoryMovement.created_at < created_to,
+            )
+            .order_by(InventoryMovement.product_variant_id, InventoryMovement.created_at.desc())
+        )
         result = await self.session.execute(stmt)
-        totals: dict[uuid.UUID, tuple[int, int]] = {}
-        for variant_id, movement_type, total in result.all():
-            dispatched, restocked = totals.get(variant_id, (0, 0))
-            if movement_type == InventoryMovementType.DISPATCH:
-                dispatched += -int(total or 0)  # DISPATCH deltas are negative -- store as positive
-            else:
-                restocked += int(total or 0)
-            totals[variant_id] = (dispatched, restocked)
-        return totals
+        latest: dict[uuid.UUID, InventoryMovement] = {}
+        for movement in result.scalars().all():
+            if movement.product_variant_id not in latest:
+                latest[movement.product_variant_id] = movement
+        return latest
 
     async def last_movement_at_bulk(
         self, *, product_variant_ids: list[uuid.UUID], created_to: datetime

@@ -75,13 +75,19 @@ export interface UnifiedStockMovement {
 /** One platform's row in the "Marketplace Stock" table, for one product
  * variant, on the selected stock date.
  *
- * `is_automatic=true` (Shopify) only: `opening_stock` is always `null`
- * and `current_stock` is always the LIVE current value, regardless of
- * `stock_date` — Shopify has no historical day-by-day balance snapshot,
- * so a past date's balance is never fabricated (only its real
- * `stock_added`/`stock_deducted` movement totals for that date are
- * shown). Never treat a `null` `opening_stock` as "0" in the UI — it
- * means "not applicable", not "zero".
+ * `is_automatic=true` (Shopify): `current_stock` is the true LIVE value
+ * only when `stock_date` is TODAY. For a PAST date, `current_stock`/
+ * `opening_stock` are reconstructed from Shopify's own existing movement
+ * ledger (never fabricated) and are `null` — never `0` — when that
+ * ledger has no row before the relevant cutoff (it may predate the
+ * variant's first-ever movement). Render `null` as "historical data not
+ * available" (e.g. "—"), never as zero — a `null` reading must never be
+ * mistaken for "no stock".
+ *
+ * `is_automatic=false` (manual platforms): `current_stock` defaults to
+ * `0` (never `null`) when nothing has ever been recorded — unlike
+ * Shopify, this ledger IS the only source of truth for a manual
+ * platform, so "nothing recorded" legitimately means 0.
  */
 export interface PlatformStockSummaryRow {
   platform: string
@@ -90,7 +96,7 @@ export interface PlatformStockSummaryRow {
   opening_stock: number | null
   stock_added: number
   stock_deducted: number
-  current_stock: number
+  current_stock: number | null
   last_updated: string | null
 }
 

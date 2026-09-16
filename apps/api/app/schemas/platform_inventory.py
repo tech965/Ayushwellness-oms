@@ -85,18 +85,32 @@ class PlatformStockSummaryRow(BaseModel):
     """One platform's row in the "Marketplace Stock" table for one
     product variant, on the selected `stock_date`.
 
-    `is_automatic=True` (Shopify) only: `opening_stock` is always `None`
-    and `current_stock` is always the LIVE value (`ProductVariant.
-    available_quantity`) regardless of `stock_date` — Shopify has no
-    historical day-by-day balance snapshot in this codebase (only a live
-    total + a movement ledger), so a past date's Shopify BALANCE is never
-    fabricated; only its real, date-scoped `stock_added`/`stock_deducted`
-    movement totals are shown for a past date.
+    `is_automatic=True` (Shopify): `current_stock` is the true LIVE value
+    (`ProductVariant.available_quantity`) only when `stock_date` is
+    TODAY (IST) — always exact, never reconstructed, even if some
+    non-ledger process ever touched it. For a PAST `stock_date`,
+    `current_stock`/`opening_stock` are reconstructed from the existing
+    `InventoryMovement` ledger: each movement already records
+    `quantity_after` (its resulting running balance), so the latest
+    movement at/before a cutoff IS the balance at that instant — the
+    exact same technique `PlatformStockMovementRepository.get_latest_
+    as_of` already uses for the manual marketplace ledger, just applied
+    to Shopify's own existing ledger instead of a second one.
+    `stock_added`/`stock_deducted` are always genuinely date-scoped
+    movement totals for both Shopify and every manual platform.
+
+    `current_stock`/`opening_stock` are `None` (never a guessed 0) when
+    no `InventoryMovement` row exists before the relevant cutoff — the
+    ledger genuinely cannot reconstruct that date's Shopify balance (it
+    may predate the variant's first-ever movement); the frontend must
+    render this as "historical data not available", never as zero.
 
     `is_automatic=False` (Amazon/Flipkart/Blinkit/Meesho/Manual):
     `current_stock` is the true closing balance AS OF `stock_date`
-    (`PlatformStockMovementRepository.get_latest_as_of`), and
-    `opening_stock` is that same balance as of the day before.
+    (`PlatformStockMovementRepository.get_latest_as_of`), defaulting to
+    `0` (never `None`) when no movement has ever been recorded — unlike
+    Shopify, "never told about any stock yet" legitimately means 0 for a
+    platform whose only source of truth IS this ledger.
     """
 
     platform: str
@@ -105,7 +119,7 @@ class PlatformStockSummaryRow(BaseModel):
     opening_stock: int | None
     stock_added: int
     stock_deducted: int
-    current_stock: int
+    current_stock: int | None
     last_updated: datetime | None
 
 

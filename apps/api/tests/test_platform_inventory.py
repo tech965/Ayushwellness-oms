@@ -11,14 +11,20 @@ from decimal import Decimal
 
 import pytest
 from app.core.exceptions import ValidationError
-from app.core.timezone import ist_today
+from app.core.timezone import ist_day_bounds_for_date, ist_today
 from app.integrations.shiprocket.sync import apply_tracking_event
-from app.models.enums import PaymentType, PlatformStockMovementType, ShipmentStatus
+from app.models.enums import (
+    InventoryMovementType,
+    PaymentType,
+    PlatformStockMovementType,
+    ShipmentStatus,
+)
 from app.models.platform_inventory import InventoryPlatform
-from app.repositories.order import OrderItemRepository
+from app.repositories.inventory import InventoryMovementRepository
 from app.repositories.product import ProductRepository, ProductVariantRepository
 from app.schemas.common import PageParams
 from app.schemas.order import OrderItemCreateRequest
+from app.schemas.platform_inventory import ProductPlatformStockResponse
 from app.services.inventory_service import InventoryService
 from app.services.order_service import OrderService
 from app.services.platform_inventory_service import PlatformInventoryService
@@ -47,7 +53,9 @@ async def _make_variant(
     return product, variant
 
 
-async def _make_order_with_item(session: AsyncSession, *, order_number: str, sku: str, quantity: int, product_variant_id):
+async def _make_order_with_item(
+    session: AsyncSession, *, order_number: str, sku: str, quantity: int, product_variant_id
+):
     return await OrderService(session).create_order(
         actor=None,
         order_number=order_number,
@@ -73,6 +81,40 @@ async def _make_shipment(session: AsyncSession, *, order_id, awb: str):
     return await ShipmentService(session).create_shipment(
         actor=None, order_id=order_id, awb=awb, courier_id=None, expected_delivery_date=None
     )
+
+
+async def _add_shopify_movement(
+    session: AsyncSession,
+    *,
+    variant_id,
+    movement_type: InventoryMovementType,
+    quantity_delta: int,
+    quantity_after: int,
+    on_date: date,
+    hour: int = 12,
+) -> None:
+    """Directly inserts a historical `InventoryMovement` row dated to a
+    specific IST calendar day (via the exact `ist_day_bounds_for_date`
+    helper the fix itself uses, so the test can't disagree with the
+    implementation about what "that IST day" means) -- simulates real
+    Shopify dispatch/RTO/manual-adjustment history predating "today",
+    which `apply_tracking_event`'s real flow always dates to "now".
+    """
+    day_start, _ = ist_day_bounds_for_date(on_date)
+    created_at = day_start + timedelta(hours=hour)
+    await InventoryMovementRepository(session).create(
+        product_variant_id=variant_id,
+        movement_type=movement_type,
+        quantity_delta=quantity_delta,
+        quantity_after=quantity_after,
+        created_at=created_at,
+    )
+    await session.commit()
+
+
+def _shopify_row(summary: ProductPlatformStockResponse):
+    rows = {row.platform: row for row in summary.variants[0].platforms}
+    return rows["shopify"]
 
 
 def _tracking_event(*, status: ShipmentStatus) -> dict:
@@ -619,3 +661,269 @@ async def test_shipment_summary_endpoint_requires_inventory_read(
     ) as client:
         response = await client.get(f"/api/v1/inventory/products/{product.id}/shipment-summary")
         assert response.status_code == 403
+
+
+# --- BUG FIX: Shopify date filtering -------------------------------------
+# Root cause: the Shopify row's `current_stock` always read the LIVE
+# `ProductVariant.available_quantity` regardless of `stock_date`, and
+# `opening_stock` was hardcoded `None` even when the ledger could
+# reconstruct it. These tests lock in the fix: for a past date, Shopify's
+# balance is reconstructed from `InventoryMovement.quantity_after` (the
+# same technique already used for the manual platform ledger); "today"
+# still uses the true live column.
+
+
+async def test_shopify_today_returns_the_live_current_stock(db_session: AsyncSession) -> None:
+    """TEST A."""
+    product, variant = await _make_variant(db_session, sku="SHOP-TODAY-1", available_quantity=1200)
+    # A stale old movement exists -- "today" must use the live column,
+    # never this ledger row's balance.
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-50, quantity_after=500, on_date=ist_today() - timedelta(days=5),
+    )
+
+    service = PlatformInventoryService(db_session)
+    summary = await service.get_product_platform_stock(product.id, stock_date=ist_today())
+    shopify = _shopify_row(summary)
+
+    assert shopify.current_stock == 1200
+
+
+async def test_shopify_previous_date_returns_historical_stock_not_zero(
+    db_session: AsyncSession,
+) -> None:
+    """TEST B -- the reported bug: a previous date must show the real
+    historical balance, never 0/blank.
+    """
+    product, variant = await _make_variant(db_session, sku="SHOP-HIST-1", available_quantity=1200)
+    target_date = ist_today() - timedelta(days=2)
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-35, quantity_after=955, on_date=target_date, hour=10,
+    )
+    # A LATER movement (after target_date, before today) exists too --
+    # must never leak into target_date's own balance.
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-45, quantity_after=910, on_date=ist_today() - timedelta(days=1), hour=9,
+    )
+
+    service = PlatformInventoryService(db_session)
+    summary = await service.get_product_platform_stock(product.id, stock_date=target_date)
+    shopify = _shopify_row(summary)
+
+    assert shopify.current_stock == 955  # not 0, not the live 1200, not the later 910
+
+
+async def test_shopify_stock_added_counts_only_positive_movements_on_the_selected_date(
+    db_session: AsyncSession,
+) -> None:
+    """TEST C."""
+    product, variant = await _make_variant(db_session, sku="SHOP-ADD-1", available_quantity=1200)
+    target_date = ist_today() - timedelta(days=3)
+    other_date = ist_today() - timedelta(days=1)
+
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.RTO_RESTOCK,
+        quantity_delta=20, quantity_after=920, on_date=target_date, hour=11,
+    )
+    # A positive movement on a DIFFERENT date must not be counted.
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.RTO_RESTOCK,
+        quantity_delta=15, quantity_after=935, on_date=other_date, hour=11,
+    )
+
+    service = PlatformInventoryService(db_session)
+    summary = await service.get_product_platform_stock(product.id, stock_date=target_date)
+    shopify = _shopify_row(summary)
+
+    assert shopify.stock_added == 20
+    assert shopify.stock_deducted == 0
+
+
+async def test_shopify_sold_deducted_counts_only_negative_movements_on_the_selected_date(
+    db_session: AsyncSession,
+) -> None:
+    """TEST D."""
+    product, variant = await _make_variant(db_session, sku="SHOP-DED-1", available_quantity=1200)
+    target_date = ist_today() - timedelta(days=3)
+    other_date = ist_today() - timedelta(days=1)
+
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-35, quantity_after=865, on_date=target_date, hour=15,
+    )
+    # A negative movement on a DIFFERENT date must not be counted.
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-12, quantity_after=853, on_date=other_date, hour=15,
+    )
+
+    service = PlatformInventoryService(db_session)
+    summary = await service.get_product_platform_stock(product.id, stock_date=target_date)
+    shopify = _shopify_row(summary)
+
+    assert shopify.stock_deducted == 35
+    assert shopify.stock_added == 0
+
+
+async def test_shopify_manual_adjustment_counts_toward_added_and_deducted_too(
+    db_session: AsyncSession,
+) -> None:
+    """`stock_added`/`stock_deducted` must include EVERY movement type
+    with the right sign, not just DISPATCH/RTO_RESTOCK -- a staff manual
+    adjustment through the existing (non-platform) Add Stock action on
+    the selected date must be reflected too.
+    """
+    product, variant = await _make_variant(db_session, sku="SHOP-MANUAL-1", available_quantity=1200)
+    target_date = ist_today() - timedelta(days=2)
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.MANUAL_ADJUSTMENT,
+        quantity_delta=100, quantity_after=1100, on_date=target_date, hour=17,
+    )
+
+    service = PlatformInventoryService(db_session)
+    summary = await service.get_product_platform_stock(product.id, stock_date=target_date)
+    shopify = _shopify_row(summary)
+
+    assert shopify.stock_added == 100
+    assert shopify.current_stock == 1100
+
+
+async def test_shopify_current_stock_is_the_balance_at_the_end_of_the_selected_date(
+    db_session: AsyncSession,
+) -> None:
+    """TEST E -- with two movements on the SAME day, `current_stock` must
+    reflect the LAST one (end-of-day balance), not the first.
+    """
+    product, variant = await _make_variant(db_session, sku="SHOP-EOD-1", available_quantity=1200)
+    target_date = ist_today() - timedelta(days=2)
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-10, quantity_after=990, on_date=target_date, hour=9,
+    )
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-35, quantity_after=955, on_date=target_date, hour=15,
+    )
+
+    service = PlatformInventoryService(db_session)
+    summary = await service.get_product_platform_stock(product.id, stock_date=target_date)
+    shopify = _shopify_row(summary)
+
+    assert shopify.current_stock == 955  # the 15:00 movement's balance, not the 09:00 one
+    assert shopify.stock_deducted == 45  # both movements' magnitude combined
+
+
+async def test_date_with_no_shopify_movement_still_reconstructs_the_correct_balance(
+    db_session: AsyncSession,
+) -> None:
+    """TEST F -- a day with zero movements of its own must still carry
+    forward the balance from the most recent PRIOR movement, never 0.
+    """
+    product, variant = await _make_variant(db_session, sku="SHOP-CARRY-1", available_quantity=1200)
+    earlier_date = ist_today() - timedelta(days=5)
+    quiet_date = ist_today() - timedelta(days=3)  # no movement happens on this date
+
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-300, quantity_after=900, on_date=earlier_date, hour=10,
+    )
+
+    service = PlatformInventoryService(db_session)
+    summary = await service.get_product_platform_stock(product.id, stock_date=quiet_date)
+    shopify = _shopify_row(summary)
+
+    assert shopify.current_stock == 900  # carried forward from the earlier movement
+    assert shopify.stock_added == 0
+    assert shopify.stock_deducted == 0
+
+
+async def test_date_before_the_first_ever_movement_is_reported_as_unavailable_not_zero(
+    db_session: AsyncSession,
+) -> None:
+    """TEST F (continued) / Requirement 11 -- when the ledger genuinely
+    cannot reconstruct a date (it predates the variant's first-ever
+    movement), the balance must be reported as unavailable (`None`),
+    never silently guessed as 0.
+    """
+    product, variant = await _make_variant(db_session, sku="SHOP-NODATA-1", available_quantity=1200)
+    first_movement_date = ist_today() - timedelta(days=2)
+    before_history_date = ist_today() - timedelta(days=10)
+
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-300, quantity_after=900, on_date=first_movement_date, hour=10,
+    )
+
+    service = PlatformInventoryService(db_session)
+    summary = await service.get_product_platform_stock(product.id, stock_date=before_history_date)
+    shopify = _shopify_row(summary)
+
+    assert shopify.current_stock is None
+    assert shopify.opening_stock is None
+
+
+async def test_ist_midnight_boundary_buckets_shopify_movements_to_the_correct_day(
+    db_session: AsyncSession,
+) -> None:
+    """TEST G -- a movement 5 minutes before IST midnight belongs to the
+    earlier day; 5 minutes after belongs to the next day. Never bucketed
+    by the raw UTC calendar date.
+    """
+    product, variant = await _make_variant(db_session, sku="SHOP-IST-1", available_quantity=1200)
+    day = ist_today() - timedelta(days=3)
+    next_day = day + timedelta(days=1)
+    _, day_end = ist_day_bounds_for_date(day)
+
+    await InventoryMovementRepository(db_session).create(
+        product_variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-5, quantity_after=995, created_at=day_end - timedelta(minutes=5),
+    )
+    await InventoryMovementRepository(db_session).create(
+        product_variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-3, quantity_after=992, created_at=day_end + timedelta(minutes=5),
+    )
+    await db_session.commit()
+
+    service = PlatformInventoryService(db_session)
+    day_summary = await service.get_product_platform_stock(product.id, stock_date=day)
+    next_day_summary = await service.get_product_platform_stock(product.id, stock_date=next_day)
+
+    assert _shopify_row(day_summary).stock_deducted == 5  # only the pre-midnight movement
+    assert _shopify_row(day_summary).current_stock == 995
+    assert _shopify_row(next_day_summary).stock_deducted == 3  # only the post-midnight movement
+    assert _shopify_row(next_day_summary).current_stock == 992
+
+
+async def test_amazon_platform_data_is_unaffected_by_the_shopify_fix(
+    db_session: AsyncSession,
+) -> None:
+    """TEST H -- the manual marketplace ledger's own calculation path was
+    never touched by this fix; verify it end-to-end alongside a Shopify
+    historical read on the same product/date.
+    """
+    product, variant = await _make_variant(
+        db_session, sku="SHOP-AMZ-ISO-1", available_quantity=1200
+    )
+    target_date = ist_today() - timedelta(days=2)
+    await _add_shopify_movement(
+        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-35, quantity_after=955, on_date=target_date, hour=10,
+    )
+
+    service = PlatformInventoryService(db_session)
+    await service.record_movement(
+        variant.id, platform=InventoryPlatform.AMAZON,
+        movement_type=PlatformStockMovementType.STOCK_ADDED,
+        quantity=500, reason=None, stock_date=target_date, actor=None,
+    )
+
+    summary = await service.get_product_platform_stock(product.id, stock_date=target_date)
+    rows = {row.platform: row for row in summary.variants[0].platforms}
+
+    assert rows["shopify"].current_stock == 955
+    assert rows[InventoryPlatform.AMAZON].current_stock == 500
+    assert rows[InventoryPlatform.AMAZON].opening_stock == 0
+    assert rows[InventoryPlatform.FLIPKART].current_stock == 0  # untouched, still a real 0 not None

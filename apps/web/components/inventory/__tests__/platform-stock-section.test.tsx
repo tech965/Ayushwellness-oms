@@ -93,6 +93,37 @@ describe("PlatformStockSection", () => {
     expect(screen.getByText("532")).toBeInTheDocument() // Amazon current stock
   })
 
+  it("BUG FIX: renders 'Not available' (never a blank cell or a fabricated 0) when Shopify's historical balance can't be reconstructed", () => {
+    mockedUseRecordPlatformStockMovement.mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRecordPlatformStockMovement>)
+
+    const dataWithUnavailableShopifyHistory: ProductPlatformStock = {
+      ...DATA,
+      variants: [
+        {
+          ...DATA.variants[0],
+          platforms: DATA.variants[0].platforms.map((row) =>
+            row.platform === "shopify" ? { ...row, current_stock: null, opening_stock: null } : row
+          ),
+        },
+      ],
+    }
+
+    renderWithProviders(
+      <PlatformStockSection {...baseProps({ data: dataWithUnavailableShopifyHistory })} />
+    )
+
+    expect(screen.getAllByText("Not available")).toHaveLength(1) // Shopify's current stock cell only
+    const shopifyRow = screen.getByText("Shopify").closest("tr")
+    expect(shopifyRow).not.toBeNull()
+    // The Shopify row's own cells never fall back to a fabricated "0" —
+    // Flipkart legitimately showing literal 0s elsewhere on the page is
+    // fine and must not make this assertion falsely pass or fail.
+    expect(within(shopifyRow as HTMLElement).queryByText("0")).not.toBeInTheDocument()
+  })
+
   it("never shows an Add Stock action for the automatic Shopify row", () => {
     mockedUseRecordPlatformStockMovement.mockReturnValue({
       mutateAsync: vi.fn(),

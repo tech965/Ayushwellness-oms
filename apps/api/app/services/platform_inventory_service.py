@@ -150,13 +150,29 @@ class PlatformInventoryService:
         product, variants = await self.inventory.list_variants_for_product(product_id)
         variant_ids = [v.id for v in variants]
         opening_date = stock_date - timedelta(days=1)
+        is_today = stock_date == ist_today()
 
         day_start, day_end = ist_day_bounds_for_date(stock_date)
-        shopify_totals = await self.inventory_movements.dispatch_and_restock_totals_bulk(
+        shopify_totals = await self.inventory_movements.movement_totals_by_sign_bulk(
             product_variant_ids=variant_ids, created_from=day_start, created_to=day_end
         )
         shopify_last_updated = await self.inventory_movements.last_movement_at_bulk(
             product_variant_ids=variant_ids, created_to=day_end
+        )
+        # Historical Shopify balance reconstruction (Requirement: never
+        # `ProductVariant.available_quantity` for a past date -- that
+        # column is only ever today's LIVE value). `quantity_after` on
+        # the latest movement at/before a cutoff IS the balance at that
+        # instant -- skipped entirely for `is_today` below, where the
+        # true live column is used instead (always exact, even if some
+        # non-ledger process ever touched it).
+        shopify_closing_as_of: dict[uuid.UUID, InventoryMovement] = {}
+        if not is_today:
+            shopify_closing_as_of = await self.inventory_movements.get_latest_as_of_bulk(
+                product_variant_ids=variant_ids, created_to=day_end
+            )
+        shopify_opening_as_of = await self.inventory_movements.get_latest_as_of_bulk(
+            product_variant_ids=variant_ids, created_to=day_start
         )
 
         platform_closing: dict[str, dict[uuid.UUID, PlatformStockMovement]] = {}
@@ -177,16 +193,28 @@ class PlatformInventoryService:
         for variant in variants:
             rows: list[PlatformStockSummaryRow] = []
 
-            dispatched, restocked = shopify_totals.get(variant.id, (0, 0))
+            added, deducted = shopify_totals.get(variant.id, (0, 0))
+            if is_today:
+                shopify_current: int | None = variant.available_quantity
+            else:
+                closing_movement = shopify_closing_as_of.get(variant.id)
+                # `None` (never 0) when no movement exists before this
+                # cutoff -- the ledger genuinely cannot reconstruct this
+                # date's balance (it may predate the variant's first-ever
+                # movement); never guessed.
+                shopify_current = closing_movement.quantity_after if closing_movement else None
+            opening_movement = shopify_opening_as_of.get(variant.id)
+            shopify_opening = opening_movement.quantity_after if opening_movement else None
+
             rows.append(
                 PlatformStockSummaryRow(
                     platform="shopify",
                     platform_label="Shopify",
                     is_automatic=True,
-                    opening_stock=None,
-                    stock_added=restocked,
-                    stock_deducted=dispatched,
-                    current_stock=variant.available_quantity,
+                    opening_stock=shopify_opening,
+                    stock_added=added,
+                    stock_deducted=deducted,
+                    current_stock=shopify_current,
                     last_updated=shopify_last_updated.get(variant.id),
                 )
             )

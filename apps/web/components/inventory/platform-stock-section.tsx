@@ -116,7 +116,11 @@ export function PlatformStockSection({
                                 variantLabel: variant.variant_title || variant.sku,
                                 platform: row.platform as ManualPlatform,
                                 platformLabel: row.platform_label,
-                                currentStock: row.current_stock,
+                                // Add/Deduct only ever render for a manual
+                                // platform row, whose current_stock is
+                                // always a real number (never null) --
+                                // the `?? 0` is a defensive fallback only.
+                                currentStock: row.current_stock ?? 0,
                                 direction: "stock_added",
                                 stockDate,
                               })
@@ -127,7 +131,7 @@ export function PlatformStockSection({
                                 variantLabel: variant.variant_title || variant.sku,
                                 platform: row.platform as ManualPlatform,
                                 platformLabel: row.platform_label,
-                                currentStock: row.current_stock,
+                                currentStock: row.current_stock ?? 0,
                                 direction: "stock_deducted",
                                 stockDate,
                               })
@@ -186,7 +190,15 @@ function PlatformStockTableRow({
       <td className="py-2 pr-3 text-right tabular-nums text-red-600">
         {row.stock_deducted > 0 ? `-${row.stock_deducted}` : row.stock_deducted}
       </td>
-      <td className="py-2 pr-3 text-right font-semibold tabular-nums">{row.current_stock}</td>
+      <td className="py-2 pr-3 text-right font-semibold tabular-nums">
+        {row.current_stock === null ? (
+          <span className="text-muted-foreground text-xs font-normal" title="No movement recorded before this date — historical balance can't be reconstructed.">
+            Not available
+          </span>
+        ) : (
+          row.current_stock
+        )}
+      </td>
       <td className="text-muted-foreground py-2 pr-3 text-xs">
         {row.last_updated ? formatDateTime(row.last_updated) : "—"}
       </td>
