@@ -753,4 +753,87 @@ describe("TelecallerOrderDetailPage", () => {
     await waitFor(() => expect(toast.info).toHaveBeenCalled())
     expect(mockPush).not.toHaveBeenCalled()
   })
+
+  it("shows a WhatsApp button beside the phone number for a customer with a phone on file", () => {
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    // ORDER.customer_phone is "9990000001" -- still rendered as plain text.
+    expect(screen.getByText("9990000001")).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", { name: "Open WhatsApp chat with customer" })
+    ).toBeInTheDocument()
+  })
+
+  it("does not render a WhatsApp button (and does not crash) when the customer has no phone on file", () => {
+    mockedUseMyOrder.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: { ...ORDER, customer_phone: null },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useMyOrder>)
+    mockedUseCallHistory.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: CALL_HISTORY,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useCallHistory>)
+    mockedUsePreviousOrders.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: [],
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof usePreviousOrders>)
+    mockedUseScheduleFollowUp.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useScheduleFollowUp>)
+    mockedUseConfirmOrder.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useConfirmOrder>)
+    mockedUseUnconfirmOrder.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUnconfirmOrder>)
+    mockedUseUpdateOrderAddress.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateOrderAddress>)
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("Alice")).toBeInTheDocument() // page rendered fine, no crash
+    expect(
+      screen.queryByRole("button", { name: "Open WhatsApp chat with customer" })
+    ).not.toBeInTheDocument()
+  })
 })

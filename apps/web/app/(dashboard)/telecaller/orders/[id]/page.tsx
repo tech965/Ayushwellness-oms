@@ -18,6 +18,7 @@ import { AddressValidationBadge } from "@/components/shared/address-validation-b
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
+import { WhatsAppButton } from "@/components/shared/whatsapp-button"
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -321,7 +322,15 @@ export default function TelecallerOrderDetailPage() {
                 </CardHeader>
                 <CardContent className="grid grid-cols-2 gap-4">
                   <SummaryStat label="Customer" value={order.customer_name ?? "—"} />
-                  <SummaryStat label="Phone" value={order.customer_phone ?? "—"} />
+                  <SummaryStat
+                    label="Phone"
+                    value={
+                      <span className="inline-flex items-center gap-1.5">
+                        {order.customer_phone ?? "—"}
+                        <WhatsAppButton phone={order.customer_phone} />
+                      </span>
+                    }
+                  />
                   <div className="col-span-2">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
