@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthorizationError, ConflictError, NotFoundError, ValidationError
+from app.core.logging import get_logger
 from app.core.timezone import ist_day_bounds, to_ist
 from app.models.auth import User
 from app.models.enums import AssignmentStatus, LeadCategory, TelecallingStatus
@@ -35,6 +36,8 @@ from app.repositories.telecalling import (
 from app.schemas.common import PageParams, SortParams
 from app.services.audit_service import AuditService
 from app.services.order_service import OrderService
+
+logger = get_logger(__name__)
 
 
 class ScopeFilter:
@@ -803,6 +806,18 @@ class TelecallingService:
         next_follow_up_at: datetime | None,
         actor: User,
     ) -> CallAttempt:
+        """Logs a call attempt. When `outcome == TelecallingStatus.
+        CONFIRMED`, this ALSO confirms the OMS order itself (review-meeting
+        Requirement 1) -- selecting "Confirmed" as the call outcome in the
+        Log Call modal is the primary, expected way a Telecaller confirms
+        an order; the dedicated `POST /telecaller/orders/{id}/confirm`
+        endpoint (`confirm_assigned_order`, below) is an alternate/explicit
+        entry point to the exact same canonical `OrderService.confirm_order`
+        -- never a second, competing implementation. See
+        `_confirm_order_from_call_log`'s docstring for why this is
+        deliberately best-effort/idempotent rather than failing the call
+        log itself.
+        """
         assignment = await self.assignments.get_active_for_order(order_id)
         if assignment is None:
             raise NotFoundError("Order is not currently assigned.")
@@ -842,8 +857,48 @@ class TelecallingService:
             entity_id=str(order_id),
             new_value={"outcome": outcome.value, "attempt_number": attempt_number},
         )
+        # The call log is committed on its own here, BEFORE the order-
+        # confirmation attempt below — logging a call must never fail (or
+        # be left half-saved) merely because the order happens to already
+        # be confirmed/cancelled/otherwise unable to transition; see
+        # `_confirm_order_from_call_log`.
         await self.session.commit()
+
+        if outcome == TelecallingStatus.CONFIRMED:
+            await self._confirm_order_from_call_log(order_id, actor=actor)
+
         return attempt
+
+    async def _confirm_order_from_call_log(self, order_id: uuid.UUID, *, actor: User) -> None:
+        """Delegates to the exact same canonical `OrderService.
+        confirm_order` the direct confirm endpoint uses (same PENDING ->
+        CONFIRMED transition, same `confirmed_by_telecaller_id`/
+        `confirmed_at` attribution from this call's own authenticated
+        `actor` — never a client-supplied id, same best-effort Shopify
+        "OMS Confirmed" + per-telecaller tag push) -- never a second,
+        divergent confirmation implementation.
+
+        Best-effort and idempotent from the call-log's point of view: the
+        call log above has ALREADY been saved and committed regardless of
+        what happens here. If the order isn't currently in a state that
+        can transition to CONFIRMED -- already CONFIRMED (a telecaller
+        logging a second "Confirmed" outcome on an already-confirmed
+        order, the exact scenario Requirement 11 calls out), or CANCELLED,
+        or already further along (PROCESSING/PACKED/...) -- `transition_
+        status` raises `ConflictError` before writing anything, which is
+        swallowed here rather than failing the whole Log Call request:
+        logging a call outcome must never itself return an error merely
+        because of the order's current lifecycle state. Any OTHER
+        exception (a genuine bug, not an expected state conflict) is
+        deliberately NOT swallowed — it still surfaces normally.
+        """
+        try:
+            await self.order_service.confirm_order(order_id, actor=actor)
+        except ConflictError:
+            logger.info(
+                "call_log_confirmed_outcome_order_already_settled",
+                order_id=str(order_id),
+            )
 
     async def edit_call_attempt(
         self,

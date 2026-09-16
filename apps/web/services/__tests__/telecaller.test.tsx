@@ -4,7 +4,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import type { ReactNode } from "react"
 
 import { apiClient } from "@/lib/api-client"
-import { useLogCall, useLogCheckoutCall, useMyCheckouts, useMyOrders } from "@/services/telecaller"
+import {
+  useLogCall,
+  useLogCheckoutCall,
+  useMyCheckouts,
+  useMyOrder,
+  useMyOrders,
+} from "@/services/telecaller"
 
 vi.mock("@/lib/api-client", () => ({
   apiClient: { get: vi.fn(), post: vi.fn() },
@@ -159,6 +165,69 @@ describe("telecaller call-log cache invalidation", () => {
       const cached = queryClient.getQueryData<ListCache>(listQueryKey)
       expect(cached?.data[0].call_status).toBe("connected")
       expect(cached?.data[0].attempt_count).toBe(1)
+    })
+  })
+
+  /**
+   * CRITICAL REVIEW FIX regression: selecting "Confirmed" as the call
+   * outcome and saving must, via the backend's own
+   * `TelecallingService.log_call` -> `OrderService.confirm_order` change,
+   * result in the order detail page showing `status: "confirmed"` without
+   * a manual refresh. This proves the FRONTEND half of that contract —
+   * the same broad `["telecaller","orders"]` invalidation `useLogCall`
+   * already performs also reaches the single-order detail query
+   * (`useMyOrder`, key `["telecaller","orders",orderId]`) — using the
+   * real hooks against a real `QueryClient`, not a mocked stand-in.
+   */
+  it("refetches the order's own detail (showing status: confirmed) after logging a Confirmed call", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    })
+    const detailQueryKey = ["telecaller", "orders", "order-1"]
+
+    function orderDetail(status: string) {
+      return {
+        data: {
+          success: true,
+          message: "Success",
+          data: { order_id: "order-1", order_number: "OMS-1", status, call_status: "not_called" },
+        },
+      }
+    }
+
+    mockedGet.mockImplementation((url: string) => {
+      if (url === "/telecaller/orders/order-1") return Promise.resolve(orderDetail("pending"))
+      throw new Error(`unexpected GET ${url}`)
+    })
+    mockedPost.mockResolvedValue({
+      data: { success: true, message: "Call logged.", data: { id: "attempt-3" } },
+    })
+
+    const { result: detailResult } = renderHook(() => useMyOrder("order-1"), {
+      wrapper: wrapper(queryClient),
+    })
+    const { result: mutationResult } = renderHook(() => useLogCall("order-1"), {
+      wrapper: wrapper(queryClient),
+    })
+
+    await waitFor(() => expect(detailResult.current.isSuccess).toBe(true))
+    expect(queryClient.getQueryData<{ status: string }>(detailQueryKey)?.status).toBe("pending")
+
+    // The backend has now confirmed the order as a side effect of the
+    // call log — the next GET reflects that.
+    mockedGet.mockImplementation((url: string) => {
+      if (url === "/telecaller/orders/order-1") return Promise.resolve(orderDetail("confirmed"))
+      throw new Error(`unexpected GET ${url}`)
+    })
+
+    await act(async () => {
+      await mutationResult.current.mutateAsync({ outcome: "confirmed" })
+    })
+
+    await waitFor(() => {
+      expect(queryClient.getQueryData<{ status: string }>(detailQueryKey)?.status).toBe(
+        "confirmed"
+      )
     })
   })
 

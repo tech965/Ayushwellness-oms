@@ -196,6 +196,48 @@ describe("TelecallerOrderDetailPage", () => {
     )
   }, 15000)
 
+  it("CRITICAL REVIEW FIX: selecting Confirmed in the Log Call dialog and saving calls the same existing log-call API (no second 'Confirm Order' action)", async () => {
+    const user = userEvent.setup()
+    const logCallMutate = vi.fn()
+    const confirmOrderMutate = vi.fn()
+
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: logCallMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+    mockedUseConfirmOrder.mockReturnValue({
+      mutate: confirmOrderMutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useConfirmOrder>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Log Call$/i }))
+    // The dropdown still shows Confirmed as a normal Call Status option —
+    // no second "Confirm Order" button/UI was added for this.
+    await user.click(screen.getByRole("combobox"))
+    await user.click(screen.getByRole("option", { name: "Confirmed" }))
+    await user.click(screen.getByRole("button", { name: /^Save$/i }))
+
+    // Same endpoint/hook as every other outcome — the order-confirmation
+    // side effect happens server-side in TelecallingService.log_call, not
+    // via a second frontend API call.
+    expect(logCallMutate).toHaveBeenCalledWith(
+      { outcome: "confirmed", notes: undefined, next_follow_up_at: undefined },
+      expect.anything()
+    )
+    expect(confirmOrderMutate).not.toHaveBeenCalled()
+  }, 15000)
+
   it("logs a quick-status call with no dialog for Mark Confirmed", async () => {
     const user = userEvent.setup()
     const mutate = vi.fn()
