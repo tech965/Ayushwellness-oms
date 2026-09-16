@@ -328,6 +328,27 @@ export interface TelecallerDailyPerformancePoint {
   follow_ups: number
 }
 
+/** Mirrors `PreviousOrderItemResponse`/`PreviousOrderResponse`
+ * (apps/api/app/schemas/telecalling.py) — a deliberately narrower shape
+ * than `AssignedOrder`/`OrderDetail`, used only by the order-detail
+ * page's "Customer's previous orders" panel.
+ */
+export interface PreviousOrderItem {
+  sku: string
+  product_name: string
+  quantity: number
+}
+
+export interface PreviousOrder {
+  id: string
+  order_number: string
+  order_datetime: string
+  status: OrderStatus
+  payment_status: string
+  total_amount: string
+  items: PreviousOrderItem[]
+}
+
 export interface BulkConfirmOrderResult {
   order_id: string
   success: boolean

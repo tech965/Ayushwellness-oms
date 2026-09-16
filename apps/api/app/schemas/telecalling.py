@@ -110,6 +110,39 @@ class BulkConfirmOrdersResponse(BaseModel):
     results: list[BulkConfirmOrderResult]
 
 
+class PreviousOrderItemResponse(BaseModel):
+    """Deliberately narrower than `OrderItemResponse` (no
+    `available_quantity`/discount/tax breakdown) -- this panel is a quick
+    "what did they order before" glance, not a full order-detail view.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    sku: str
+    product_name: str
+    quantity: int
+
+
+class PreviousOrderResponse(BaseModel):
+    """One row of the order-detail page's "Customer's previous orders"
+    panel (`TelecallingService.get_previous_orders_for_assigned_order`).
+    Deliberately narrower than `OrderDetailResponse` -- no `customer`/
+    `confirmed_by_telecaller_name`/address fields -- since every row here
+    already belongs to the one customer the telecaller is already looking
+    at, and this is a summary panel, not a second full order-detail view.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    order_number: str
+    order_datetime: datetime
+    status: OrderStatus
+    payment_status: PaymentStatus
+    total_amount: Decimal
+    items: list[PreviousOrderItemResponse] = []
+
+
 class CallAttemptResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

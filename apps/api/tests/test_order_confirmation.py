@@ -812,8 +812,10 @@ async def test_confirm_pushes_the_tag_and_never_creates_a_fulfillment(
     db_session: AsyncSession,
 ) -> None:
     """Requirements 1/2/3: confirming a Shopify-sourced order sets it
-    CONFIRMED in the OMS and tags it `CONFIRMATION_TAG` in Shopify --
-    NOTHING else on the Shopify side. No `fulfillmentCreate`, no
+    CONFIRMED in the OMS and tags it `CONFIRMATION_TAG` plus a
+    per-telecaller companion tag (e.g. "Test User confirmed by OMS", from
+    the confirming telecaller's real `User.name` -- never hardcoded) in
+    Shopify -- NOTHING else on the Shopify side. No `fulfillmentCreate`, no
     fulfillment-status change: `Order.fulfillment_status` stays whatever
     it was locally (Shopify's own order remains Unfulfilled until real
     shipping happens).
@@ -851,7 +853,10 @@ async def test_confirm_pushes_the_tag_and_never_creates_a_fulfillment(
         assert len(client.calls) == 1
         tag_query, tag_variables = client.calls[0]
         assert "tagsAdd" in tag_query
-        assert tag_variables == {"id": "gid://shopify/Order/900001", "tags": [CONFIRMATION_TAG]}
+        assert tag_variables == {
+            "id": "gid://shopify/Order/900001",
+            "tags": [CONFIRMATION_TAG, "Test User confirmed by OMS"],
+        }
         _assert_no_fulfillment_calls(client)
 
         await db_session.refresh(order)
@@ -867,6 +872,90 @@ async def test_confirm_pushes_the_tag_and_never_creates_a_fulfillment(
             await db_session.execute(select(Shipment).where(Shipment.order_id == order.id))
         ).scalars().all()
         assert shipments == []
+    finally:
+        clear_adapters()
+
+
+async def test_confirmation_tags_use_the_real_telecallers_name_not_hardcoded(
+    db_session: AsyncSession,
+) -> None:
+    """The companion tag must come from the authenticated telecaller's
+    real `User.name` -- proven here with a name other than the "Test
+    User" default every other test in this file uses, so a hardcoded
+    string could never accidentally pass. Also proves the tag survives a
+    retry by a DIFFERENT user (an OPERATIONS admin) unchanged -- the name
+    always reflects who actually confirmed the order
+    (`Order.confirmed_by_telecaller_id`), never whoever is currently
+    calling the Shopify push -- and that unconfirm removes the exact same
+    two tags that were added, even though unconfirm is also performed by
+    the telecaller (not the retrying admin).
+    """
+    from app.integrations.registry import clear_adapters, register_adapter
+    from app.integrations.shopify.adapter import ShopifyAdapter
+    from app.services.shopify_fulfillment_service import CONFIRMATION_TAG
+
+    client = _StubShopifyClient(
+        [
+            _tags_add_success("gid://shopify/Order/900020"),
+            _tags_add_success("gid://shopify/Order/900020"),
+            _tags_remove_success("gid://shopify/Order/900020"),
+        ]
+    )
+    register_adapter(ShopifyAdapter(client=client))
+    try:
+        team_leader_role = await make_role(
+            db_session, name="TEAM_LEADER", permission_codes=["telecalling.manage"]
+        )
+        telecaller_role = await make_role(
+            db_session, name="TELECALLER", permission_codes=["calls.manage", "orders.confirm"]
+        )
+        ops_role = await make_role(
+            db_session, name="OPERATIONS", permission_codes=["orders.update"]
+        )
+        leader = await make_user(
+            db_session, email="leader-name@confirm.example.com", role=team_leader_role
+        )
+        telecaller = await make_user(
+            db_session,
+            email="priya@confirm.example.com",
+            role=telecaller_role,
+            team_leader_id=leader.id,
+            name="Priya Sharma",
+        )
+        ops_user = await make_user(
+            db_session, email="ops-name@confirm.example.com", role=ops_role, name="Amit Verma"
+        )
+        customer = await make_customer(db_session)
+        order = await make_order(
+            db_session,
+            order_number="UNCONF-SHOPIFY-NAME",
+            customer=customer,
+            status=OrderStatus.PENDING,
+            shopify_order_id="900020",
+        )
+        async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+            await _assign(leader_client, str(order.id), str(telecaller.id))
+
+        expected_tags = [CONFIRMATION_TAG, "Priya Sharma confirmed by OMS"]
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            confirm = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/confirm")
+            assert confirm.status_code == 200
+        assert client.calls[0][1] == {"id": "gid://shopify/Order/900020", "tags": expected_tags}
+
+        # A DIFFERENT user (an admin, not the telecaller) retries the
+        # push -- the tag must still name Priya, never "Amit Verma".
+        async with bearer_client(app, get_db, db_session, ops_user.id) as ops_client:
+            retry = await ops_client.post(
+                f"/api/v1/orders/{order.id}/shopify/retry-confirmation-sync"
+            )
+            assert retry.status_code == 200
+        assert client.calls[1][1] == {"id": "gid://shopify/Order/900020", "tags": expected_tags}
+
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            unconfirm = await tc_client.post(f"/api/v1/telecaller/orders/{order.id}/unconfirm")
+            assert unconfirm.status_code == 200
+        assert client.calls[2][1] == {"id": "gid://shopify/Order/900020", "tags": expected_tags}
     finally:
         clear_adapters()
 
@@ -956,7 +1045,7 @@ async def test_confirm_succeeds_even_when_the_shopify_tag_push_fails(
         assert "tagsAdd" in client.calls[1][0]
         assert client.calls[1][1] == {
             "id": "gid://shopify/Order/900004",
-            "tags": [CONFIRMATION_TAG],
+            "tags": [CONFIRMATION_TAG, "Test User confirmed by OMS"],
         }
         _assert_no_fulfillment_calls(client)
     finally:
@@ -1007,7 +1096,10 @@ async def test_confirm_unconfirm_cycle_is_idempotent_tag_only(db_session: AsyncS
         assert len(client.calls) == 3
         for query, variables in client.calls:
             assert "tagsAdd" in query or "tagsRemove" in query
-            assert variables == {"id": "gid://shopify/Order/900005", "tags": [CONFIRMATION_TAG]}
+            assert variables == {
+                "id": "gid://shopify/Order/900005",
+                "tags": [CONFIRMATION_TAG, "Test User confirmed by OMS"],
+            }
         _assert_no_fulfillment_calls(client)
 
         # A third confirm attempt WITHOUT an intervening unconfirm never
@@ -1063,7 +1155,10 @@ async def test_unconfirm_removes_the_tag_and_never_cancels_a_fulfillment(
         assert len(client.calls) == 2
         remove_query, remove_variables = client.calls[1]
         assert "tagsRemove" in remove_query
-        assert remove_variables == {"id": "gid://shopify/Order/900006", "tags": ["OMS Confirmed"]}
+        assert remove_variables == {
+            "id": "gid://shopify/Order/900006",
+            "tags": ["OMS Confirmed", "Test User confirmed by OMS"],
+        }
         _assert_no_fulfillment_calls(client)
     finally:
         clear_adapters()

@@ -55,6 +55,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDate, formatDateTime, formatMoney } from "@/lib/format"
+import { saveOrderSequence } from "@/lib/telecaller-order-sequence"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import {
   useBulkConfirmOrders,
@@ -71,12 +72,26 @@ import {
   type TelecallingStatus,
 } from "@/types/telecalling"
 
-const FILTER_DEFAULTS = { call_status: "", page: 1, page_size: 20 }
+const FILTER_DEFAULTS = { call_status: "", q: "", page: 1, page_size: 20 }
 
 const CALL_STATUS_OPTIONS = [
   { value: "not_called", label: "Not Called" },
   ...CALL_OUTCOME_OPTIONS,
 ]
+
+/** Debounces the search box so every keystroke doesn't trigger a server
+ * round trip — same pattern as the Orders/Payments pages' own
+ * `useDebouncedValue` (kept as a per-page local copy there too; no
+ * shared hook exists yet in this codebase).
+ */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = React.useState(value)
+  React.useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs)
+    return () => clearTimeout(timer)
+  }, [value, delayMs])
+  return debounced
+}
 
 export default function TelecallerOrdersPage() {
   return (
@@ -89,11 +104,45 @@ export default function TelecallerOrdersPage() {
 function TelecallerOrdersContent() {
   const router = useRouter()
   const { filters, setFilters } = useUrlFilters(FILTER_DEFAULTS)
+
+  // Requirement 7: search box (order number / phone / customer name),
+  // debounced before it ever reaches the URL/API — same convention as
+  // the Orders/Payments pages.
+  const [searchInput, setSearchInput] = React.useState(filters.q)
+  const debouncedSearch = useDebouncedValue(searchInput, 400)
+  React.useEffect(() => {
+    setFilters({ q: debouncedSearch })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch])
+
   const query = useMyOrders({
     page: filters.page,
     pageSize: filters.page_size,
     call_status: filters.call_status || undefined,
+    q: filters.q || undefined,
   })
+
+  // Requirement 2: record the sequence of order ids this page just
+  // showed (already scoped/sorted/filtered exactly as the telecaller sees
+  // it) so the order-detail page's J/K navigation can follow it — see
+  // `lib/telecaller-order-sequence.ts`. A `sessionStorage` write is a
+  // side effect, so it belongs in `useEffect`, never directly in the
+  // render body.
+  const orderIds = query.data?.data.map((o) => o.order_id)
+  React.useEffect(() => {
+    if (!orderIds || !query.data) return
+    saveOrderSequence({
+      ids: orderIds,
+      page: filters.page,
+      totalPages: query.data.meta.total_pages,
+      filters: {
+        call_status: filters.call_status || undefined,
+        q: filters.q || undefined,
+        pageSize: filters.page_size,
+      },
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderIds?.join(","), filters.page, filters.call_status, filters.q, filters.page_size])
 
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
   const [bulkConfirmOpen, setBulkConfirmOpen] = React.useState(false)
@@ -343,6 +392,9 @@ function TelecallerOrdersContent() {
       />
       <div className="flex flex-col gap-4">
         <FilterBar
+          searchValue={searchInput}
+          onSearchChange={setSearchInput}
+          searchPlaceholder="Search order ID, phone or customer name..."
           extra={
             <Select
               value={filters.call_status || "__all__"}
@@ -379,8 +431,12 @@ function TelecallerOrdersContent() {
           data={query.data}
           onRetry={() => void query.refetch()}
           isEmpty={(data) => data.data.length === 0}
-          emptyTitle="No orders assigned"
-          emptyDescription="Your team leader hasn't assigned you any orders yet."
+          emptyTitle={filters.q || filters.call_status ? "No matching orders" : "No orders assigned"}
+          emptyDescription={
+            filters.q || filters.call_status
+              ? "Try a different order ID, phone number, or customer name."
+              : "Your team leader hasn't assigned you any orders yet."
+          }
         >
           {(data) => (
             <>

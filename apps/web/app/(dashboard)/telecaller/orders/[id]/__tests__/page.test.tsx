@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from "vitest"
-import { screen } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { fireEvent, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import TelecallerOrderDetailPage from "@/app/(dashboard)/telecaller/orders/[id]/page"
+import { saveOrderSequence } from "@/lib/telecaller-order-sequence"
 import {
   useCallHistory,
   useConfirmOrder,
@@ -11,22 +12,28 @@ import {
   useEditCallAttempt,
   useLogCall,
   useMyOrder,
+  usePreviousOrders,
   useScheduleFollowUp,
   useUnconfirmOrder,
   useUpdateOrderAddress,
 } from "@/services/telecaller"
+import { toast } from "sonner"
+
+const mockPush = vi.fn()
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ id: "order-1" }),
+  useRouter: () => ({ push: mockPush }),
 }))
 
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 
 vi.mock("@/services/telecaller", () => ({
   useMyOrder: vi.fn(),
   useCallHistory: vi.fn(),
+  usePreviousOrders: vi.fn(),
   useLogCall: vi.fn(),
   useScheduleFollowUp: vi.fn(),
   useEditCallAttempt: vi.fn(),
@@ -34,10 +41,12 @@ vi.mock("@/services/telecaller", () => ({
   useConfirmOrder: vi.fn(),
   useUnconfirmOrder: vi.fn(),
   useUpdateOrderAddress: vi.fn(),
+  fetchMyOrders: vi.fn(),
 }))
 
 const mockedUseMyOrder = vi.mocked(useMyOrder)
 const mockedUseCallHistory = vi.mocked(useCallHistory)
+const mockedUsePreviousOrders = vi.mocked(usePreviousOrders)
 const mockedUseLogCall = vi.mocked(useLogCall)
 const mockedUseScheduleFollowUp = vi.mocked(useScheduleFollowUp)
 const mockedUseEditCallAttempt = vi.mocked(useEditCallAttempt)
@@ -123,6 +132,13 @@ function mockCommonHooks() {
     data: CALL_HISTORY,
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useCallHistory>)
+  mockedUsePreviousOrders.mockReturnValue({
+    isLoading: false,
+    isError: false,
+    error: null,
+    data: [],
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof usePreviousOrders>)
   mockedUseScheduleFollowUp.mockReturnValue({
     mutate: vi.fn(),
     isPending: false,
@@ -140,6 +156,11 @@ function mockCommonHooks() {
     isPending: false,
   } as unknown as ReturnType<typeof useUpdateOrderAddress>)
 }
+
+afterEach(() => {
+  window.sessionStorage.clear()
+  mockPush.mockClear()
+})
 
 describe("TelecallerOrderDetailPage", () => {
   it("renders order + call management info and submits a logged call", async () => {
@@ -454,6 +475,13 @@ describe("TelecallerOrderDetailPage", () => {
       data: CALL_HISTORY,
       refetch: vi.fn(),
     } as unknown as ReturnType<typeof useCallHistory>)
+    mockedUsePreviousOrders.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: [],
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof usePreviousOrders>)
     mockedUseScheduleFollowUp.mockReturnValue({
       mutate: vi.fn(),
       isPending: false,
@@ -479,5 +507,208 @@ describe("TelecallerOrderDetailPage", () => {
 
     expect(screen.getByText("24%")).toBeInTheDocument()
     expect(screen.getByText("Junk Address")).toBeInTheDocument()
+  })
+
+  it("Requirement 4: shows a clean empty state when the customer has no previous orders", () => {
+    mockCommonHooks() // usePreviousOrders defaults to data: []
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("No previous orders")).toBeInTheDocument()
+  })
+
+  it("Requirement 4: renders the customer's previous orders with product/quantity/date/status", () => {
+    mockCommonHooks()
+    mockedUsePreviousOrders.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: [
+        {
+          id: "prev-1",
+          order_number: "OMS-0000",
+          order_datetime: "2026-07-01T00:00:00Z",
+          status: "delivered",
+          payment_status: "paid",
+          total_amount: "299.00",
+          items: [{ sku: "AW-HM-PN-60", product_name: "Herbal Masala 60", quantity: 1 }],
+        },
+      ],
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof usePreviousOrders>)
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("OMS-0000")).toBeInTheDocument()
+    expect(screen.getByText(/Herbal Masala 60 × 1/)).toBeInTheDocument()
+  })
+
+  it("Requirement 2: pressing J opens the next order from the stored sequence", () => {
+    saveOrderSequence({
+      ids: ["order-0", "order-1", "order-2"],
+      page: 1,
+      totalPages: 1,
+      filters: { pageSize: 20 },
+    })
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    fireEvent.keyDown(window, { key: "j" })
+    expect(mockPush).toHaveBeenCalledWith("/telecaller/orders/order-2")
+  })
+
+  it("Requirement 2: pressing K opens the previous order from the stored sequence", () => {
+    saveOrderSequence({
+      ids: ["order-0", "order-1", "order-2"],
+      page: 1,
+      totalPages: 1,
+      filters: { pageSize: 20 },
+    })
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    fireEvent.keyDown(window, { key: "k" })
+    expect(mockPush).toHaveBeenCalledWith("/telecaller/orders/order-0")
+  })
+
+  it("Requirement 2: J/K do nothing while typing in a text field", async () => {
+    const user = userEvent.setup()
+    saveOrderSequence({
+      ids: ["order-0", "order-1", "order-2"],
+      page: 1,
+      totalPages: 1,
+      filters: { pageSize: 20 },
+    })
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Log Call$/i }))
+    await user.type(screen.getByPlaceholderText("Notes (optional)"), "jk jk jk")
+
+    expect(mockPush).not.toHaveBeenCalled()
+  })
+
+  it("Requirement 2: J/K do nothing while a dialog is open", async () => {
+    const user = userEvent.setup()
+    saveOrderSequence({
+      ids: ["order-0", "order-1", "order-2"],
+      page: 1,
+      totalPages: 1,
+      filters: { pageSize: 20 },
+    })
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Log Call$/i }))
+    // Focus is inside the dialog but not a text field -- the dialog-open
+    // flag itself must still suppress J/K, not just the typing guard.
+    fireEvent.keyDown(window, { key: "j" })
+
+    expect(mockPush).not.toHaveBeenCalled()
+  })
+
+  it("Requirement 2: J shows a message instead of navigating when there is no next order", async () => {
+    saveOrderSequence({
+      ids: ["order-1"],
+      page: 1,
+      totalPages: 1,
+      filters: { pageSize: 20 },
+    })
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseEditCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useEditCallAttempt>)
+    mockedUseDeleteCallAttempt.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteCallAttempt>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    fireEvent.keyDown(window, { key: "j" })
+
+    await waitFor(() => expect(toast.info).toHaveBeenCalled())
+    expect(mockPush).not.toHaveBeenCalled()
   })
 })

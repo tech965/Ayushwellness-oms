@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest"
-import { screen, within } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
@@ -15,11 +15,13 @@ import {
 } from "@/services/telecaller"
 
 const mockPush = vi.fn()
+const mockReplace = vi.fn()
+let mockSearchParams = new URLSearchParams()
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush, replace: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: mockPush, replace: mockReplace, back: vi.fn() }),
   usePathname: () => "/telecaller/orders",
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mockSearchParams,
 }))
 
 vi.mock("sonner", () => ({
@@ -97,6 +99,12 @@ function mockCommonHooks() {
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useCallHistory>)
 }
+
+afterEach(() => {
+  mockSearchParams = new URLSearchParams()
+  mockReplace.mockClear()
+  mockPush.mockClear()
+})
 
 describe("TelecallerOrdersPage", () => {
   it("renders assigned orders with a quick-edit action menu per row", async () => {
@@ -343,5 +351,96 @@ describe("TelecallerOrdersPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Order actions/i }))
     expect(screen.queryByText("Revert to Pending")).not.toBeInTheDocument()
+  })
+
+  it("Requirement 7: pre-fills the search box from the URL and passes q to useMyOrders", () => {
+    mockSearchParams = new URLSearchParams("q=9001")
+    mockedUseMyOrders.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: {
+        data: ORDERS,
+        meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+      },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useMyOrders>)
+    mockCommonHooks()
+    mockedUseBulkConfirmOrders.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useBulkConfirmOrders>)
+
+    renderWithProviders(<TelecallerOrdersPage />)
+
+    expect(screen.getByPlaceholderText(/Search order ID, phone or customer name/i)).toHaveValue(
+      "9001"
+    )
+    const lastCall = mockedUseMyOrders.mock.calls.at(-1)
+    expect(lastCall?.[0]).toMatchObject({ q: "9001" })
+  })
+
+  it("Requirement 7: typing in the search box updates the URL after debouncing", async () => {
+    const user = userEvent.setup()
+    mockedUseMyOrders.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: {
+        data: ORDERS,
+        meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+      },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useMyOrders>)
+    mockCommonHooks()
+    mockedUseBulkConfirmOrders.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useBulkConfirmOrders>)
+
+    renderWithProviders(<TelecallerOrdersPage />)
+
+    const search = screen.getByPlaceholderText(/Search order ID, phone or customer name/i)
+    await user.type(search, "9990000001")
+    // Immediate UI feedback — the input reflects every keystroke even
+    // before the debounced URL/API sync fires.
+    expect(search).toHaveValue("9990000001")
+
+    // The debounced sync to the URL (400ms) only fires once, well after
+    // the last keystroke — never once per keystroke.
+    await waitFor(
+      () => {
+        expect(mockReplace).toHaveBeenCalledWith(
+          expect.stringContaining("q=9990000001"),
+          expect.anything()
+        )
+      },
+      { timeout: 2000 }
+    )
+  })
+
+  it("Requirement 7: clicking a search result opens the full order detail page", async () => {
+    const user = userEvent.setup()
+    mockSearchParams = new URLSearchParams("q=OMS-0001")
+    mockedUseMyOrders.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: {
+        data: ORDERS,
+        meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+      },
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useMyOrders>)
+    mockCommonHooks()
+    mockedUseBulkConfirmOrders.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useBulkConfirmOrders>)
+
+    renderWithProviders(<TelecallerOrdersPage />)
+
+    await user.click(screen.getByText("Alice"))
+    expect(mockPush).toHaveBeenCalledWith("/telecaller/orders/order-1")
   })
 })

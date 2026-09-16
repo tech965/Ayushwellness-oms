@@ -36,6 +36,7 @@ from app.schemas.telecalling import (
     LogCallRequest,
     OrderAddressUpdateRequest,
     OrderAssignmentResponse,
+    PreviousOrderResponse,
     ScheduleFollowUpRequest,
     TelecallingSummaryResponse,
 )
@@ -53,6 +54,12 @@ async def list_my_orders(
     call_status: str | None = Query(default=None),
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
+    q: str | None = Query(
+        default=None,
+        max_length=200,
+        description="Requirement 7: search within the caller's own assigned orders by "
+        "order number, customer name, or phone number.",
+    ),
     page_params: PageParams = Depends(pagination_params),
     sort_params: SortParams = Depends(sort_params_dep),
     session: AsyncSession = Depends(get_db),
@@ -65,6 +72,7 @@ async def list_my_orders(
         call_status=call_status,
         date_from=date_from,
         date_to=date_to,
+        q=q,
     )
     return PaginatedResponse(
         data=[to_assigned_order_response(a.order, a) for a in items],
@@ -251,6 +259,30 @@ async def update_order_address(
         data=to_assigned_order_response(assignment.order, assignment, include_items=True),
         message="Address updated.",
     )
+
+
+@router.get(
+    "/orders/{order_id}/previous-orders", response_model=ApiResponse[list[PreviousOrderResponse]]
+)
+async def get_previous_orders(
+    order_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("calls.manage")),
+) -> ApiResponse[list[PreviousOrderResponse]]:
+    """The order-detail page's "Customer's previous orders" panel. Same
+    ownership scoping as every other `/telecaller/orders/{id}/*` route
+    (`assigned_to == current_user.id` unless superuser,
+    `TelecallingService.get_previous_orders_for_assigned_order`) — a
+    Telecaller can only see order history reached via an order actually
+    assigned to them, never another telecaller's customer. One query
+    (eager-loaded items, no N+1), latest order first, always excluding
+    the order currently being viewed. An empty list is a normal
+    "no previous orders" result, not an error.
+    """
+    orders = await TelecallingService(session).get_previous_orders_for_assigned_order(
+        order_id, actor=current_user
+    )
+    return ApiResponse(data=[PreviousOrderResponse.model_validate(o) for o in orders])
 
 
 @router.post("/orders/confirm", response_model=ApiResponse[BulkConfirmOrdersResponse])

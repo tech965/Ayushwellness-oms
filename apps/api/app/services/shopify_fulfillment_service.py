@@ -65,6 +65,7 @@ from app.models.enums import ShopifySyncStatus
 from app.models.integration import IntegrationCode
 from app.models.order import Order
 from app.models.shipment import Shipment
+from app.repositories.auth import UserRepository
 from app.repositories.courier import CourierRepository
 from app.repositories.order import OrderRepository
 from app.repositories.shipment import ShipmentRepository
@@ -86,6 +87,29 @@ _MAX_ERROR_MESSAGE_LENGTH = 2000
 # business-state source (Order.status/confirmation columns stay
 # authoritative -- see module docstring).
 CONFIRMATION_TAG = "OMS Confirmed"
+
+# Max length Shopify accepts for a single order tag.
+_MAX_TAG_LENGTH = 255
+
+
+def _telecaller_confirmation_tag(telecaller_name: str) -> str:
+    """Builds the optional, per-telecaller companion tag (e.g. "Vishal
+    confirmed by OMS") added/removed alongside the fixed `CONFIRMATION_TAG`
+    -- never replacing it, so anything (a Shopify Flow automation, a saved
+    search) already keying off the exact `CONFIRMATION_TAG` string keeps
+    working unchanged. Newlines/commas are stripped since Shopify treats
+    a comma as a tag separator on some surfaces; the result is truncated
+    to Shopify's per-tag length limit.
+    """
+    cleaned = " ".join(telecaller_name.replace(",", " ").split())
+    return f"{cleaned} confirmed by OMS"[:_MAX_TAG_LENGTH]
+
+
+def _confirmation_tags(telecaller_name: str | None) -> list[str]:
+    tags = [CONFIRMATION_TAG]
+    if telecaller_name and telecaller_name.strip():
+        tags.append(_telecaller_confirmation_tag(telecaller_name))
+    return tags
 
 
 def _to_shopify_address_input(address: dict) -> dict[str, str | None]:
@@ -287,12 +311,33 @@ class ShopifyFulfillmentService:
         )
         return shipment
 
+    async def _confirming_telecaller_name(self, order: Order) -> str | None:
+        """Resolves the name for the per-telecaller companion tag from
+        `Order.confirmed_by_telecaller_id` -- NOT from whoever happens to
+        be calling `sync_confirmation_tag`/`reverse_confirmation_tag` (the
+        confirming Telecaller for a fresh confirm, but an OPERATIONS/ADMIN
+        user for a manual retry) -- so the tag always names the telecaller
+        who actually confirmed the order, consistently across a fresh
+        confirm, a manual retry, and the later unconfirm that removes it.
+        """
+        if not order.confirmed_by_telecaller_id:
+            return None
+        confirming_user = await UserRepository(self.session).get_by_id(
+            order.confirmed_by_telecaller_id
+        )
+        return confirming_user.name if confirming_user else None
+
     async def sync_confirmation_tag(self, order_id: uuid.UUID, *, actor: User | None) -> None:
-        """Best-effort outbound push of `CONFIRMATION_TAG` to the Shopify
-        order once a Telecaller confirms it in the OMS -- the ONLY
+        """Best-effort outbound push of `CONFIRMATION_TAG` (plus a
+        companion per-telecaller tag, e.g. "Vishal confirmed by OMS" --
+        see `_confirmation_tags`/`_confirming_telecaller_name`) to the
+        Shopify order once a Telecaller confirms it in the OMS -- the ONLY
         Shopify-side effect of a confirmation. No Fulfillment is created
         and the order's fulfillment status is left untouched (Shopify
         stays Unfulfilled until real shipping).
+
+        Both tags are pushed in a single `tagsAdd` call -- never two
+        separate Shopify API calls for one confirmation.
 
         Skipped entirely for a non-Shopify order (`shopify_order_id` is
         `None`, e.g. a manually-created OMS order) -- nothing to tag.
@@ -312,10 +357,11 @@ class ShopifyFulfillmentService:
         if order is None or not order.shopify_order_id:
             return
 
+        tags = _confirmation_tags(await self._confirming_telecaller_name(order))
         adapter = self._get_adapter()
         order_gid = f"gid://shopify/Order/{order.shopify_order_id}"
         try:
-            await adapter.add_order_tags(order_gid, [CONFIRMATION_TAG])
+            await adapter.add_order_tags(order_gid, tags)
         except IntegrationError as exc:
             logger.warning(
                 "shopify_confirmation_tag_sync_failed", order_id=str(order_id), error=exc.message
@@ -332,17 +378,26 @@ class ShopifyFulfillmentService:
             action="order.shopify_confirmation_tag_synced",
             entity_type="order",
             entity_id=str(order_id),
-            new_value={"tag": CONFIRMATION_TAG},
+            new_value={"tags": tags},
         )
         await self.session.commit()
-        logger.info("shopify_confirmation_tag_synced", order_id=str(order_id))
+        logger.info("shopify_confirmation_tag_synced", order_id=str(order_id), tags=tags)
 
     async def reverse_confirmation_tag(self, order_id: uuid.UUID, *, actor: User | None) -> None:
-        """Removes `CONFIRMATION_TAG` from the Shopify order when a
-        Telecaller unconfirms it -- the exact inverse of
-        `sync_confirmation_tag`, and the ONLY Shopify-side effect of an
+        """Removes `CONFIRMATION_TAG` (plus the per-telecaller companion
+        tag, if one was added -- see `_confirmation_tags`) from the
+        Shopify order when a Telecaller unconfirms it -- the exact inverse
+        of `sync_confirmation_tag`, and the ONLY Shopify-side effect of an
         unconfirm. Never calls `fulfillmentCancel`, never changes the
         order's fulfillment status.
+
+        The companion tag name is read from `Order.confirmed_by_
+        telecaller_id` (still set at this point -- `unconfirm_order` only
+        clears it *after* this call returns), NOT from `actor`: an admin
+        can unconfirm on a different telecaller's behalf, and it's the
+        ORIGINAL confirming telecaller's name tag that must be removed,
+        exactly mirroring whatever `sync_confirmation_tag` actually added.
+        Both tags are removed in a single `tagsRemove` call.
 
         Skipped entirely for a non-Shopify order. Idempotent on Shopify's
         side (`tagsRemove` is a no-op for a tag that's already gone), so a
@@ -358,10 +413,11 @@ class ShopifyFulfillmentService:
         if order is None or not order.shopify_order_id:
             return
 
+        tags = _confirmation_tags(await self._confirming_telecaller_name(order))
         adapter = self._get_adapter()
         order_gid = f"gid://shopify/Order/{order.shopify_order_id}"
         try:
-            await adapter.remove_order_tags(order_gid, [CONFIRMATION_TAG])
+            await adapter.remove_order_tags(order_gid, tags)
         except IntegrationError as exc:
             logger.warning(
                 "shopify_confirmation_tag_removal_failed",
@@ -380,10 +436,10 @@ class ShopifyFulfillmentService:
             action="order.shopify_confirmation_tag_removed",
             entity_type="order",
             entity_id=str(order_id),
-            new_value={"tag": CONFIRMATION_TAG},
+            new_value={"tags": tags},
         )
         await self.session.commit()
-        logger.info("shopify_confirmation_tag_removed", order_id=str(order_id))
+        logger.info("shopify_confirmation_tag_removed", order_id=str(order_id), tags=tags)
 
     async def sync_confirmation_fulfillment(
         self, order_id: uuid.UUID, *, actor: User | None

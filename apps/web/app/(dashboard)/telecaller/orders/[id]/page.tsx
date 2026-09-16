@@ -48,7 +48,8 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { getApiErrorMessage } from "@/lib/api-client"
-import { formatDateTime, formatMoney } from "@/lib/format"
+import { formatDate, formatDateTime, formatMoney } from "@/lib/format"
+import { useOrderNavigation, useOrderNavigationHotkeys } from "@/lib/use-order-navigation"
 import {
   useCallHistory,
   useConfirmOrder,
@@ -56,6 +57,7 @@ import {
   useEditCallAttempt,
   useLogCall,
   useMyOrder,
+  usePreviousOrders,
   useScheduleFollowUp,
   useUnconfirmOrder,
   useUpdateOrderAddress,
@@ -96,6 +98,7 @@ export default function TelecallerOrderDetailPage() {
 
   const orderQuery = useMyOrder(orderId)
   const historyQuery = useCallHistory(orderId)
+  const previousOrdersQuery = usePreviousOrders(orderId)
   const logCall = useLogCall(orderId)
   const scheduleFollowUp = useScheduleFollowUp(orderId)
   const editCallAttempt = useEditCallAttempt(orderId)
@@ -190,6 +193,21 @@ export default function TelecallerOrderDetailPage() {
   const [editFollowUp, setEditFollowUp] = React.useState("")
   const [deleteTarget, setDeleteTarget] = React.useState<CallAttempt | null>(null)
 
+  // Requirement 2: J/K next/previous order, following the same sequence
+  // "My Assigned Orders" most recently showed this telecaller. Disabled
+  // whenever any Dialog/AlertDialog on this page is open, so J/K never
+  // fires while e.g. typing call notes or editing the address.
+  const anyDialogOpen =
+    logCallOpen ||
+    followUpOpen ||
+    addressDialogOpen ||
+    editTarget !== null ||
+    deleteTarget !== null ||
+    confirmOrderOpen ||
+    unconfirmOrderOpen
+  const { goToNext, goToPrevious } = useOrderNavigation(orderId)
+  useOrderNavigationHotkeys(goToNext, goToPrevious, anyDialogOpen)
+
   function openEdit(attempt: CallAttempt) {
     setEditTarget(attempt)
     setEditOutcome(attempt.outcome)
@@ -283,6 +301,7 @@ export default function TelecallerOrderDetailPage() {
     <>
       <PageHeader
         title={orderQuery.data ? `Order ${orderQuery.data.order_number}` : "Order"}
+        description="Press J for the next order, K for the previous — same order as My Assigned Orders."
         backHref="/telecaller/orders"
         backLabel="Back to My Orders"
       />
@@ -521,6 +540,55 @@ export default function TelecallerOrderDetailPage() {
                     ))}
                   </div>
                 )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Customer&apos;s Previous Orders</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <QueryStates
+                  isLoading={previousOrdersQuery.isLoading}
+                  isError={previousOrdersQuery.isError}
+                  error={previousOrdersQuery.error}
+                  data={previousOrdersQuery.data}
+                  onRetry={() => void previousOrdersQuery.refetch()}
+                  isEmpty={(rows) => rows.length === 0}
+                  emptyTitle="No previous orders"
+                  emptyDescription="This is the customer's only order so far."
+                >
+                  {(rows) => (
+                    <ol className="flex flex-col gap-3">
+                      {rows.map((row) => (
+                        <li
+                          key={row.id}
+                          className="border-border border-b pb-3 last:border-0 last:pb-0"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-semibold">{row.order_number}</span>
+                            <div className="flex items-center gap-2">
+                              <StatusBadge domain="order" status={row.status} />
+                              <span className="text-muted-foreground text-xs">
+                                {formatDate(row.order_datetime)}
+                              </span>
+                            </div>
+                          </div>
+                          <p className="text-muted-foreground mt-1 text-xs">
+                            {row.items.length === 0
+                              ? "No line items."
+                              : row.items
+                                  .map((item) => `${item.product_name} × ${item.quantity}`)
+                                  .join(", ")}
+                          </p>
+                          <p className="text-muted-foreground mt-0.5 text-xs">
+                            {formatMoney(row.total_amount)}
+                          </p>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </QueryStates>
               </CardContent>
             </Card>
 

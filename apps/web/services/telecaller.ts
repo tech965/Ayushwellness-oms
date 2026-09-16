@@ -13,19 +13,28 @@ import type {
   EditCallAttemptInput,
   LogCallInput,
   OrderAssignment,
+  PreviousOrder,
   TelecallingSummary,
 } from "@/types/telecalling"
 import type { OrderDetail } from "@/types/order"
 
-interface MyOrdersParams {
+export interface MyOrdersParams {
   page: number
   pageSize: number
   call_status?: string
   date_from?: string
   date_to?: string
+  q?: string
 }
 
-async function fetchMyOrders(
+/** Exported (not just the `useMyOrders` hook below) so the J/K
+ * next/previous-order navigation (`lib/use-order-navigation.ts`) can
+ * fetch one adjacent page directly, on demand, at a page boundary —
+ * without a React Query hook (there's no component mounted for "the
+ * next page" to attach a `useQuery` to) and without duplicating this
+ * request-building logic.
+ */
+export async function fetchMyOrders(
   params: MyOrdersParams
 ): Promise<PaginatedResponse<AssignedOrder>> {
   const response = await apiClient.get<PaginatedResponse<AssignedOrder>>(
@@ -37,6 +46,7 @@ async function fetchMyOrders(
         call_status: params.call_status || undefined,
         date_from: params.date_from || undefined,
         date_to: params.date_to || undefined,
+        q: params.q || undefined,
       },
     }
   )
@@ -66,6 +76,26 @@ export function useMyOrder(orderId: string) {
   return useQuery({
     queryKey: ["telecaller", "orders", orderId],
     queryFn: () => fetchMyOrder(orderId),
+    enabled: Boolean(orderId),
+  })
+}
+
+async function fetchPreviousOrders(orderId: string): Promise<PreviousOrder[]> {
+  const response = await apiClient.get<ApiResponse<PreviousOrder[]>>(
+    `/telecaller/orders/${orderId}/previous-orders`
+  )
+  return response.data.data ?? []
+}
+
+/** The order-detail page's "Customer's previous orders" panel — one
+ * request, already scoped server-side to an order actually assigned to
+ * the caller (`TelecallingService.get_previous_orders_for_assigned_order`).
+ * An empty array is the normal "no previous orders" state, not an error.
+ */
+export function usePreviousOrders(orderId: string) {
+  return useQuery({
+    queryKey: ["telecaller", "orders", orderId, "previous-orders"],
+    queryFn: () => fetchPreviousOrders(orderId),
     enabled: Boolean(orderId),
   })
 }

@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Select, and_, case, func, or_, select
+from sqlalchemy import Select, and_, case, exists, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
 from app.models.abandoned_checkout import AbandonedCheckout
+from app.models.customer import Customer
 from app.models.enums import AssignmentStatus, FulfillmentStatus, LeadCategory, PaymentType
 from app.models.order import Order, OrderItem
 from app.models.telecalling import (
@@ -277,6 +278,7 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
         follow_up_to: datetime | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        q: str | None = None,
     ) -> Select:
         """The one place row-scoping is applied. `assigned_to`/
         `team_leader_id` must always be derived from the *authenticated*
@@ -285,12 +287,37 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
         RBAC spec: a Telecaller's `/telecaller/orders` request always
         passes `assigned_to=current_user.id`, never a value read off the
         request.
+
+        `q` (Requirement 7's telecaller search box) is applied AFTER the
+        `assigned_to`/`team_leader_id` scope above, never instead of it —
+        a telecaller's search can only ever narrow their own already-
+        scoped result set, exactly the same ordering `unfulfilled_only`/
+        `call_status`/the date filters already use, so there is no way
+        for a broad-enough search term to surface another telecaller's
+        order.
         """
         stmt = self._base_scope_query()
         if assigned_to is not None:
             stmt = stmt.where(OrderAssignment.assigned_to == assigned_to)
         if team_leader_id is not None:
             stmt = stmt.where(OrderAssignment.team_leader_id == team_leader_id)
+        if q:
+            like = f"%{q}%"
+            # Mirrors `OrderRepository.search_query`'s own `customer_match`
+            # EXISTS pattern exactly (order number, customer name, customer
+            # phone) — never a second, divergent matching implementation.
+            customer_match = exists(
+                select(1).where(
+                    and_(
+                        Customer.id == Order.customer_id,
+                        or_(
+                            Customer.full_name.ilike(like),
+                            Customer.phone.ilike(like),
+                        ),
+                    )
+                )
+            )
+            stmt = stmt.where(or_(Order.order_number.ilike(like), customer_match))
         if unfulfilled_only:
             from app.models.enums import FulfillmentStatus
 
@@ -305,6 +332,18 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
             stmt = stmt.where(Order.order_datetime >= date_from)
         if date_to is not None:
             stmt = stmt.where(Order.order_datetime <= date_to)
+        # Latest-first by the real order date -- never `OrderAssignment.
+        # created_at` (when the row was assigned, not when the order was
+        # placed) and never a lexicographic sort on `order_number`. This is
+        # the query's own intrinsic default order, applied before
+        # `BaseRepository.list()`'s generic `sort_params`/
+        # `default_sort_column` machinery (`TelecallingService.
+        # list_assignments`) appends its own `OrderAssignment.created_at`
+        # ordering as a tiebreaker for same-instant orders -- `ORDER BY
+        # order_datetime DESC` always wins as the primary key either way,
+        # so a future caller passing an explicit `sort_by` still gets a
+        # deterministic, order-date-first result.
+        stmt = stmt.order_by(Order.order_datetime.desc())
         return stmt
 
     async def get_scoped(

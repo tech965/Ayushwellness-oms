@@ -144,3 +144,66 @@ async def test_telecaller_orders_pagination(db_session: AsyncSession) -> None:
 
         page3 = await tc_client.get("/api/v1/telecaller/orders", params={"page": 3, "page_size": 5})
         assert len(page3.json()["data"]) == 2
+
+
+async def test_telecaller_orders_sorted_latest_order_first_by_order_date(
+    db_session: AsyncSession,
+) -> None:
+    """Requirement 5 (review meeting): the telecaller's order list must
+    show the newest ORDER first, by the real order date -- never by
+    assignment/row-creation order and never lexicographically by
+    `order_number`. Orders are assigned here in a deliberately scrambled
+    order (oldest order assigned first) so a passing result can only mean
+    the sort genuinely keys off `Order.order_datetime`.
+    """
+    team_leader_role = await make_role(
+        db_session, name="TEAM_LEADER", permission_codes=["telecalling.manage"]
+    )
+    telecaller_role = await make_role(
+        db_session, name="TELECALLER", permission_codes=["calls.manage"]
+    )
+    leader = await make_user(db_session, email="leader4@example.com", role=team_leader_role)
+    telecaller = await make_user(
+        db_session, email="tc-sort@example.com", role=telecaller_role, team_leader_id=leader.id
+    )
+    customer = await make_customer(db_session)
+    now = datetime.now(UTC)
+
+    # Order numbers deliberately DON'T sort the same way the dates do
+    # (Z is lexicographically last but chronologically newest), and each
+    # is assigned in oldest-first order -- neither name nor assignment
+    # sequence can accidentally produce the right answer.
+    oldest = await make_order(
+        db_session,
+        order_number="TCSORT-A",
+        customer=customer,
+        order_datetime=now - timedelta(days=10),
+    )
+    middle = await make_order(
+        db_session,
+        order_number="TCSORT-M",
+        customer=customer,
+        order_datetime=now - timedelta(days=5),
+    )
+    newest = await make_order(
+        db_session, order_number="TCSORT-Z", customer=customer, order_datetime=now
+    )
+
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        for order in (oldest, middle, newest):
+            response = await leader_client.post(
+                "/api/v1/team/orders/assign",
+                json={
+                    "order_ids": [str(order.id)],
+                    "mode": "manual",
+                    "telecaller_id": str(telecaller.id),
+                },
+            )
+            assert response.status_code == 201
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        response = await tc_client.get("/api/v1/telecaller/orders", params={"page_size": 50})
+
+    assert response.status_code == 200
+    order_numbers = [row["order_number"] for row in response.json()["data"]]
+    assert order_numbers == ["TCSORT-Z", "TCSORT-M", "TCSORT-A"]

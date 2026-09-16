@@ -108,6 +108,7 @@ class TelecallingService:
         when: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        q: str | None = None,
     ) -> tuple[list[OrderAssignment], int]:
         follow_up_from, follow_up_to = _follow_up_window(when)
         query = self.assignments.search_query(
@@ -119,6 +120,7 @@ class TelecallingService:
             follow_up_to=follow_up_to,
             date_from=date_from,
             date_to=date_to,
+            q=q,
         )
         items, total = await self.assignments.list(
             page_params=page_params,
@@ -1078,6 +1080,34 @@ class TelecallingService:
             raise AuthorizationError("This order is not assigned to you.")
         return await self.order_service.update_shipping_address(
             order_id, actor=actor, address=address
+        )
+
+    async def get_previous_orders_for_assigned_order(
+        self, order_id: uuid.UUID, *, actor: User, limit: int = 20
+    ) -> list[Order]:
+        """The order-detail page's "Customer's previous orders" panel.
+        Same ownership check as every other `/telecaller/orders/{id}/*`
+        method (`assigned_to == actor.id` unless superuser) — a Telecaller
+        can only see order history for a customer via an order actually
+        assigned to them, never by guessing a customer id directly (there
+        is no customer-id-keyed route here at all).
+
+        Returns `[]` (never 404/403) for an order with no linked
+        `Customer` (a guest/manual order) — "no previous orders" is a
+        normal, expected state, not an error. The current order itself is
+        always excluded from its own history.
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+
+        order = await self.orders.get_by_id(order_id)
+        if order is None or order.customer_id is None:
+            return []
+        return await self.orders.previous_orders_for_customer(
+            order.customer_id, exclude_order_id=order_id, limit=limit
         )
 
     # ------------------------------------------------------------------

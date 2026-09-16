@@ -209,6 +209,31 @@ class OrderRepository(BaseRepository[Order]):
     def for_customer_query(self, customer_id: uuid.UUID):
         return self._base_query().where(Order.customer_id == customer_id)
 
+    async def previous_orders_for_customer(
+        self, customer_id: uuid.UUID, *, exclude_order_id: uuid.UUID, limit: int = 20
+    ) -> list[Order]:
+        """The Telecaller order-detail page's "Customer's previous
+        orders" panel. Eager-loads `items` in this same query (one extra
+        `IN`-based `SELECT` for the whole page of orders, via
+        `selectinload` -- never a per-row query), so the response schema
+        never triggers a lazy load / `MissingGreenlet` under
+        `AsyncSession`. Ordered by the real order date (`order_datetime`,
+        never `created_at` — sync-insert time, which can differ for a
+        backfilled/historical order) latest-first, excluding the order
+        currently being viewed, and capped so a customer with a long
+        history can't turn this into an unbounded query.
+        """
+        stmt = (
+            self.for_customer_query(customer_id)
+            .where(Order.id != exclude_order_id)
+            .options(selectinload(Order.items))
+            .order_by(Order.order_datetime.desc())
+            .limit(limit)
+            .execution_options(populate_existing=True)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def orders_for_customers(
         self, customer_ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, list[Order]]:
