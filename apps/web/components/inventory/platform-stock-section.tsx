@@ -18,6 +18,13 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDateTime } from "@/lib/format"
 import { useRecordPlatformStockMovement } from "@/services/platform-inventory"
@@ -28,14 +35,74 @@ import type {
   VariantPlatformStock,
 } from "@/types/platform-inventory"
 
+/** One entry the Add Stock / Record Sale dialog can attribute a write
+ * to -- `currentStock` is THIS SKU's own real balance for the platform
+ * being edited (never the product-wide aggregate shown on the card),
+ * since the write always lands on one real `ProductVariant` ledger.
+ */
+interface VariantOption {
+  id: string
+  label: string
+  currentStock: number
+}
+
 interface MovementDialogState {
-  variantId: string
-  variantLabel: string
   platform: ManualPlatform
   platformLabel: string
-  currentStock: number
   direction: PlatformStockMovementType
   stockDate: string
+  variantOptions: VariantOption[]
+}
+
+function platformCurrentStock(variant: VariantPlatformStock, platform: string): number {
+  // Add/Record only ever render for a manual platform row, whose
+  // current_stock is always a real number (never null) -- `?? 0` is a
+  // defensive fallback only.
+  return variant.platforms.find((p) => p.platform === platform)?.current_stock ?? 0
+}
+
+/** Sums every underlying SKU's platform row into ONE row per platform --
+ * the "Marketplace Stock" table is now one table per PRODUCT, not one
+ * per SKU. `opening_stock`/`current_stock` propagate `null` (never
+ * silently drop it to sum only the known SKUs) if ANY contributing SKU's
+ * value is `null` for that platform: a partial sum that looks complete
+ * would misrepresent Shopify's historical balance as known when it
+ * genuinely isn't for at least one SKU (see `PlatformStockSummaryRow`'s
+ * own null-handling contract in types/platform-inventory.ts).
+ * `stock_added`/`stock_deducted` are always real numbers, so those sum
+ * plainly. `last_updated` is the most recent non-null timestamp seen.
+ * Platform order is preserved from first encounter (the backend always
+ * returns the same fixed platform set per SKU, so this is stable).
+ */
+function aggregatePlatformRows(variants: VariantPlatformStock[]): PlatformStockSummaryRow[] {
+  const order: string[] = []
+  const byPlatform = new Map<string, PlatformStockSummaryRow>()
+
+  for (const variant of variants) {
+    for (const row of variant.platforms) {
+      const existing = byPlatform.get(row.platform)
+      if (!existing) {
+        order.push(row.platform)
+        byPlatform.set(row.platform, { ...row })
+        continue
+      }
+      existing.opening_stock =
+        existing.opening_stock === null || row.opening_stock === null
+          ? null
+          : existing.opening_stock + row.opening_stock
+      existing.stock_added += row.stock_added
+      existing.stock_deducted += row.stock_deducted
+      existing.current_stock =
+        existing.current_stock === null || row.current_stock === null
+          ? null
+          : existing.current_stock + row.current_stock
+      if (row.last_updated && (!existing.last_updated || row.last_updated > existing.last_updated)) {
+        existing.last_updated = row.last_updated
+      }
+    }
+  }
+
+  return order.map((platform) => byPlatform.get(platform)!)
 }
 
 interface PlatformStockSectionProps {
@@ -49,11 +116,12 @@ interface PlatformStockSectionProps {
   stockDate: string
 }
 
-/** "Marketplace Stock" — one card per real Shopify SKU under this
- * product (never combined across SKUs, Requirement 11), each showing
- * Shopify (automatic, read-only) plus every manual platform for the
- * selected `stockDate`. Reuses the existing OMS card/table visual
- * language rather than a new design.
+/** "Marketplace Stock" — ONE table per PRODUCT: Shopify (automatic,
+ * read-only) plus every manual platform, summed across every real
+ * underlying SKU, for the selected `stockDate`. The numbers shown are
+ * an aggregate (`aggregatePlatformRows`); a write always still targets
+ * one specific SKU's own real ledger -- the Add Stock / Record Sale
+ * dialog asks which SKU when the product has more than one.
  */
 export function PlatformStockSection({
   productTitle,
@@ -82,75 +150,75 @@ export function PlatformStockSection({
           isEmpty={(d) => d.variants.length === 0}
           emptyTitle="No SKUs found for this product"
         >
-          {(loaded) => (
-            <>
-              {loaded.variants.map((variant) => (
-                <div key={variant.product_variant_id} className="flex flex-col gap-2">
-                  {loaded.variants.length > 1 && (
-                    <p className="text-muted-foreground text-xs font-medium">
-                      {variant.variant_title || variant.sku} · SKU {variant.sku}
-                    </p>
-                  )}
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-muted-foreground border-border border-b text-left text-xs font-medium tracking-wide uppercase">
-                          <th className="py-2 pr-3">Platform</th>
-                          <th className="py-2 pr-3 text-right">Opening Stock</th>
-                          <th className="py-2 pr-3 text-right">Stock Added</th>
-                          <th className="py-2 pr-3 text-right">Sold / Deducted</th>
-                          <th className="py-2 pr-3 text-right">Current Stock</th>
-                          <th className="py-2 pr-3">Last Updated</th>
-                          <th className="py-2 pr-3 text-right">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {variant.platforms.map((row) => (
-                          <PlatformStockTableRow
-                            key={row.platform}
-                            row={row}
-                            canManage={canManage}
-                            onAdd={() =>
-                              setDialogState({
-                                variantId: variant.product_variant_id,
-                                variantLabel: variant.variant_title || variant.sku,
-                                platform: row.platform as ManualPlatform,
-                                platformLabel: row.platform_label,
-                                // Add/Deduct only ever render for a manual
-                                // platform row, whose current_stock is
-                                // always a real number (never null) --
-                                // the `?? 0` is a defensive fallback only.
-                                currentStock: row.current_stock ?? 0,
-                                direction: "stock_added",
-                                stockDate,
-                              })
-                            }
-                            onDeduct={() =>
-                              setDialogState({
-                                variantId: variant.product_variant_id,
-                                variantLabel: variant.variant_title || variant.sku,
-                                platform: row.platform as ManualPlatform,
-                                platformLabel: row.platform_label,
-                                currentStock: row.current_stock ?? 0,
-                                direction: "stock_deducted",
-                                stockDate,
-                              })
-                            }
-                          />
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+          {(loaded) => {
+            const aggregated = aggregatePlatformRows(loaded.variants)
+            return (
+              <div className="flex flex-col gap-2">
+                {loaded.variants.length > 1 && (
+                  <p className="text-muted-foreground text-xs font-medium">
+                    Combined across {loaded.variants.length} SKUs:{" "}
+                    {loaded.variants.map((v) => v.sku).join(", ")}
+                  </p>
+                )}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-muted-foreground border-border border-b text-left text-xs font-medium tracking-wide uppercase">
+                        <th className="py-2 pr-3">Platform</th>
+                        <th className="py-2 pr-3 text-right">Opening Stock</th>
+                        <th className="py-2 pr-3 text-right">Stock Added</th>
+                        <th className="py-2 pr-3 text-right">Sold / Deducted</th>
+                        <th className="py-2 pr-3 text-right">Current Stock</th>
+                        <th className="py-2 pr-3">Last Updated</th>
+                        <th className="py-2 pr-3 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {aggregated.map((row) => (
+                        <PlatformStockTableRow
+                          key={row.platform}
+                          row={row}
+                          canManage={canManage}
+                          onAdd={() =>
+                            setDialogState({
+                              platform: row.platform as ManualPlatform,
+                              platformLabel: row.platform_label,
+                              direction: "stock_added",
+                              stockDate,
+                              variantOptions: loaded.variants.map((v) => ({
+                                id: v.product_variant_id,
+                                label: v.variant_title || v.sku,
+                                currentStock: platformCurrentStock(v, row.platform),
+                              })),
+                            })
+                          }
+                          onDeduct={() =>
+                            setDialogState({
+                              platform: row.platform as ManualPlatform,
+                              platformLabel: row.platform_label,
+                              direction: "stock_deducted",
+                              stockDate,
+                              variantOptions: loaded.variants.map((v) => ({
+                                id: v.product_variant_id,
+                                label: v.variant_title || v.sku,
+                                currentStock: platformCurrentStock(v, row.platform),
+                              })),
+                            })
+                          }
+                        />
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              ))}
-            </>
-          )}
+              </div>
+            )
+          }}
         </QueryStates>
       </CardContent>
 
       {dialogState && (
         <PlatformStockMovementDialog
-          key={`${dialogState.variantId}-${dialogState.platform}-${dialogState.direction}`}
+          key={`${dialogState.platform}-${dialogState.direction}`}
           state={dialogState}
           productTitle={productTitle}
           onClose={() => setDialogState(null)}
@@ -224,6 +292,14 @@ function PlatformStockTableRow({
   )
 }
 
+/** Add Stock / Record Sale always writes to ONE real SKU's own ledger --
+ * the quantities on the card are an aggregate, but the write is not.
+ * With exactly one SKU there is nothing to choose (auto-selected, no
+ * picker shown, matching the previous single-SKU behavior exactly).
+ * With more than one, staff must explicitly pick which SKU the movement
+ * belongs to before Save enables -- never guessed, never defaulted to
+ * "the first one".
+ */
 function PlatformStockMovementDialog({
   state,
   productTitle,
@@ -233,16 +309,26 @@ function PlatformStockMovementDialog({
   productTitle: string
   onClose: () => void
 }) {
-  const record = useRecordPlatformStockMovement(state.variantId)
+  const onlyOption = state.variantOptions.length === 1 ? state.variantOptions[0] : null
+  const [selectedVariantId, setSelectedVariantId] = React.useState(onlyOption?.id ?? "")
+  const record = useRecordPlatformStockMovement(selectedVariantId)
   const [quantity, setQuantity] = React.useState("")
   const [reason, setReason] = React.useState("")
 
+  const selected = state.variantOptions.find((v) => v.id === selectedVariantId) ?? null
+  const currentStock = selected?.currentStock ?? 0
+
   const parsed = Number(quantity)
-  const valid = quantity !== "" && Number.isInteger(parsed) && parsed > 0
+  const validQuantity = quantity !== "" && Number.isInteger(parsed) && parsed > 0
   const isAdd = state.direction === "stock_added"
-  const preview = isAdd ? state.currentStock + (valid ? parsed : 0) : state.currentStock - (valid ? parsed : 0)
+  const preview = isAdd
+    ? currentStock + (validQuantity ? parsed : 0)
+    : currentStock - (validQuantity ? parsed : 0)
+  const canSave =
+    Boolean(selected) && validQuantity && record.isPending === false && !(!isAdd && preview < 0)
 
   async function save() {
+    if (!selected) return
     try {
       const result = await record.mutateAsync({
         platform: state.platform,
@@ -270,14 +356,32 @@ function PlatformStockMovementDialog({
             {isAdd ? "Add Stock" : "Record Sale"} — {state.platformLabel}
           </DialogTitle>
           <DialogDescription>
-            {productTitle}
-            {state.variantLabel ? ` · ${state.variantLabel}` : ""} · Stock Date {state.stockDate}
+            {productTitle} · Stock Date {state.stockDate}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
+          {state.variantOptions.length > 1 && (
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="platform-sku">SKU</Label>
+              <Select value={selectedVariantId} onValueChange={setSelectedVariantId}>
+                <SelectTrigger id="platform-sku" className="w-full">
+                  <SelectValue placeholder="Select a SKU…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {state.variantOptions.map((v) => (
+                    <SelectItem key={v.id} value={v.id}>
+                      {v.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="text-sm">
             Current Stock:{" "}
-            <span className="font-semibold">{state.currentStock} boxes</span>
+            <span className="font-semibold">
+              {selected ? `${currentStock} boxes` : "Select a SKU first"}
+            </span>
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="platform-quantity">
@@ -294,7 +398,7 @@ function PlatformStockMovementDialog({
               autoFocus
             />
           </div>
-          {valid && (
+          {selected && validQuantity && (
             <span
               className={
                 isAdd
@@ -321,10 +425,7 @@ function PlatformStockMovementDialog({
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            disabled={!valid || record.isPending || (!isAdd && preview < 0)}
-            onClick={save}
-          >
+          <Button disabled={!canSave} onClick={save}>
             {record.isPending ? "Saving..." : isAdd ? "Add Stock" : "Record Sale"}
           </Button>
         </DialogFooter>

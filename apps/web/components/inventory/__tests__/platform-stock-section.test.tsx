@@ -219,6 +219,191 @@ describe("PlatformStockSection", () => {
     expect(screen.queryByText("Amazon")).not.toBeInTheDocument()
   })
 
+})
+
+describe("PlatformStockSection — multi-SKU aggregation (ONE table per product)", () => {
+  const MULTI: ProductPlatformStock = {
+    product_id: "prod-1",
+    product_title: "Vajrashakti",
+    stock_date: "2026-09-11",
+    variants: [
+      {
+        product_variant_id: "var-30",
+        sku: "VJR-SKT-30",
+        variant_title: "Pack of 1",
+        stock_date: "2026-09-11",
+        platforms: [
+          {
+            platform: "shopify",
+            platform_label: "Shopify",
+            is_automatic: true,
+            opening_stock: 100,
+            stock_added: 5,
+            stock_deducted: 10,
+            current_stock: 396,
+            last_updated: "2026-09-11T08:00:00Z",
+          },
+          {
+            platform: "amazon",
+            platform_label: "Amazon",
+            is_automatic: false,
+            opening_stock: 10,
+            stock_added: 2,
+            stock_deducted: 1,
+            current_stock: 11,
+            last_updated: "2026-09-11T07:00:00Z",
+          },
+        ],
+      },
+      {
+        product_variant_id: "var-60",
+        sku: "VJR-SKT-60",
+        variant_title: "Pack of 2",
+        stock_date: "2026-09-11",
+        platforms: [
+          {
+            platform: "shopify",
+            platform_label: "Shopify",
+            is_automatic: true,
+            opening_stock: 200,
+            stock_added: 0,
+            stock_deducted: 0,
+            current_stock: 300,
+            last_updated: "2026-09-11T09:00:00Z",
+          },
+          {
+            platform: "amazon",
+            platform_label: "Amazon",
+            is_automatic: false,
+            opening_stock: 20,
+            stock_added: 3,
+            stock_deducted: 2,
+            current_stock: 21,
+            last_updated: "2026-09-11T10:00:00Z",
+          },
+        ],
+      },
+    ],
+  }
+
+  function multiProps(overrides: Partial<React.ComponentProps<typeof PlatformStockSection>> = {}) {
+    return {
+      productTitle: "Vajrashakti",
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: MULTI,
+      onRetry: vi.fn(),
+      canManage: true,
+      stockDate: "2026-09-11",
+      ...overrides,
+    }
+  }
+
+  it("renders ONE table for the product, not one per SKU", () => {
+    mockedUseRecordPlatformStockMovement.mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRecordPlatformStockMovement>)
+
+    const { container } = renderWithProviders(<PlatformStockSection {...multiProps()} />)
+
+    expect(container.querySelectorAll("table")).toHaveLength(1)
+    // exactly one Shopify row and one Amazon row, not one pair per SKU
+    expect(screen.getAllByText("Shopify")).toHaveLength(1)
+    expect(screen.getAllByText("Amazon")).toHaveLength(1)
+  })
+
+  it("sums Opening/Added/Deducted/Current across every SKU for each platform", () => {
+    mockedUseRecordPlatformStockMovement.mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRecordPlatformStockMovement>)
+
+    renderWithProviders(<PlatformStockSection {...multiProps()} />)
+
+    const amazonRow = screen.getByText("Amazon").closest("tr") as HTMLElement
+    expect(within(amazonRow).getByText("30")).toBeInTheDocument() // opening 10+20
+    expect(within(amazonRow).getByText("+5")).toBeInTheDocument() // added 2+3
+    expect(within(amazonRow).getByText("-3")).toBeInTheDocument() // deducted 1+2
+    expect(within(amazonRow).getByText("32")).toBeInTheDocument() // current 11+21
+
+    const shopifyRow = screen.getByText("Shopify").closest("tr") as HTMLElement
+    expect(within(shopifyRow).getByText("696")).toBeInTheDocument() // current 396+300
+  })
+
+  it("propagates null (never silently sums only the known SKUs) when any SKU's Shopify balance is unavailable", () => {
+    mockedUseRecordPlatformStockMovement.mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRecordPlatformStockMovement>)
+
+    const withOneUnavailable: ProductPlatformStock = {
+      ...MULTI,
+      variants: [
+        {
+          ...MULTI.variants[0],
+          platforms: MULTI.variants[0].platforms.map((row) =>
+            row.platform === "shopify" ? { ...row, current_stock: null, opening_stock: null } : row
+          ),
+        },
+        MULTI.variants[1],
+      ],
+    }
+
+    renderWithProviders(<PlatformStockSection {...multiProps({ data: withOneUnavailable })} />)
+
+    const shopifyRow = screen.getByText("Shopify").closest("tr") as HTMLElement
+    expect(within(shopifyRow).getAllByText("Not available")).toHaveLength(1)
+    expect(within(shopifyRow).queryByText("696")).not.toBeInTheDocument() // never a partial sum
+  })
+
+  it("Add Stock on the combined row requires picking a SKU before Save enables", async () => {
+    const user = userEvent.setup()
+    const mutateAsync = vi.fn().mockResolvedValue({ quantity_after: 13 })
+    mockedUseRecordPlatformStockMovement.mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useRecordPlatformStockMovement>)
+
+    renderWithProviders(<PlatformStockSection {...multiProps()} />)
+
+    await user.click(screen.getAllByRole("button", { name: /^Add Stock$/i })[0]) // Amazon (combined)
+    const dialog = screen.getByRole("dialog")
+    await user.type(within(dialog).getByLabelText(/New stock to add/i), "2")
+
+    expect(within(dialog).getByText("Select a SKU first")).toBeInTheDocument()
+    expect(within(dialog).getByRole("button", { name: /^Add Stock$/i })).toBeDisabled()
+
+    await user.click(within(dialog).getByRole("combobox"))
+    await user.click(await screen.findByText("Pack of 1"))
+
+    expect(within(dialog).getByText("11 boxes")).toBeInTheDocument() // var-30's OWN current stock, not the 32 aggregate
+    expect(within(dialog).getByText("New Stock: 13 boxes")).toBeInTheDocument() // 11 + 2
+
+    await user.click(within(dialog).getByRole("button", { name: /^Add Stock$/i }))
+    expect(mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: "amazon", movement_type: "stock_added", quantity: 2 })
+    )
+  })
+
+  it("a single-SKU product still auto-selects with no picker shown", async () => {
+    const user = userEvent.setup()
+    mockedUseRecordPlatformStockMovement.mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useRecordPlatformStockMovement>)
+
+    renderWithProviders(<PlatformStockSection {...baseProps()} />)
+
+    await user.click(screen.getAllByRole("button", { name: /^Add Stock$/i })[0])
+    const dialog = screen.getByRole("dialog")
+    expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument()
+    expect(within(dialog).getByText("532 boxes")).toBeInTheDocument()
+  })
+})
+
+describe("PlatformStockSection — error state", () => {
   it("shows an error state and calls onRetry", async () => {
     const user = userEvent.setup()
     const onRetry = vi.fn()
