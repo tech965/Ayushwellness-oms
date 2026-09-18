@@ -5,6 +5,8 @@ import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
   PlatformStockMovement,
   PlatformStockMovementCreateInput,
+  ProductMarketplaceMovement,
+  ProductMarketplaceMovementCreateInput,
   ProductPlatformStock,
   ProductShipmentSummary,
   UnifiedStockMovement,
@@ -136,5 +138,72 @@ export function useRecordPlatformStockMovement(variantId: string) {
         predicate: (query) => query.queryKey.includes("platform-stock"),
       })
     },
+  })
+}
+
+/** Add Stock / Record Sale / RTO -- for the whole PRODUCT on one
+ * platform, no SKU. The caller sends only the packet quantity being
+ * added/sold/returned, never the resulting total; the backend converts
+ * to outers and computes the new balance itself (see
+ * `PlatformInventoryService.record_product_movement`).
+ */
+export function useRecordProductMarketplaceMovement(productId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: ProductMarketplaceMovementCreateInput) => {
+      const response = await apiClient.post<ApiResponse<ProductMarketplaceMovement>>(
+        `/inventory/products/${productId}/marketplace-movements`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey.includes("platform-stock") || query.queryKey.includes("marketplace-movements"),
+      })
+    },
+  })
+}
+
+interface ProductMarketplaceHistoryParams {
+  page: number
+  pageSize: number
+  platform?: string
+  date_from?: string
+  date_to?: string
+}
+
+async function fetchProductMarketplaceHistory(
+  productId: string,
+  params: ProductMarketplaceHistoryParams
+): Promise<PaginatedResponse<ProductMarketplaceMovement>> {
+  const response = await apiClient.get<PaginatedResponse<ProductMarketplaceMovement>>(
+    `/inventory/products/${productId}/marketplace-movements`,
+    {
+      params: {
+        page: params.page,
+        page_size: params.pageSize,
+        platform: params.platform || undefined,
+        date_from: params.date_from || undefined,
+        date_to: params.date_to || undefined,
+      },
+    }
+  )
+  return response.data
+}
+
+/** Product-level Marketplace Adjustment history: Add Stock / Sale / RTO,
+ * each its own event -- never merged or netted. Distinct from
+ * `usePlatformMovementHistory` above (per-SKU, unaffected by this).
+ */
+export function useProductMarketplaceHistory(
+  productId: string,
+  params: ProductMarketplaceHistoryParams
+) {
+  return useQuery({
+    queryKey: ["inventory", "products", productId, "marketplace-movements", params],
+    queryFn: () => fetchProductMarketplaceHistory(productId, params),
+    enabled: Boolean(productId),
+    placeholderData: (previous) => previous,
   })
 }

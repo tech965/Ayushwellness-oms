@@ -179,6 +179,22 @@ class PlatformStockMovementType(StrEnum):
     STOCK_DEDUCTED = "stock_deducted"
 
 
+class ProductMarketplaceMovementType(StrEnum):
+    """What changed a `ProductMarketplaceMovement`'s balance -- see
+    `app.models.platform_inventory.ProductMarketplaceMovement`. A THIRD,
+    product-level marketplace ledger (distinct from both
+    `InventoryMovementType` and `PlatformStockMovementType` above):
+    "Sale" and "RTO/Returned" are both business-meaningful and must
+    render as separate, differently-labeled history events (never
+    merged into one generic "added"/"deducted" pair) even though RTO
+    and Add Stock are both positive deltas.
+    """
+
+    STOCK_ADDED = "stock_added"
+    SALE = "sale"
+    RTO = "rto"
+
+
 class StockStatus(StrEnum):
     """Computed from `available_quantity` (boxes) vs. the configured
     `AppSettings.values.inventory.low_stock_threshold` -- never persisted,

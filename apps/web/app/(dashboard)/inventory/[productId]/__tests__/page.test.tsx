@@ -21,7 +21,8 @@ import {
 import {
   useProductPlatformStock,
   useProductShipmentSummary,
-  usePlatformMovementHistory,
+  useProductMarketplaceHistory,
+  useRecordProductMarketplaceMovement,
 } from "@/services/platform-inventory"
 import { useAuth } from "@/lib/auth-context"
 import type {
@@ -61,8 +62,8 @@ vi.mock("@/services/inventory", () => ({
 vi.mock("@/services/platform-inventory", () => ({
   useProductPlatformStock: vi.fn(),
   useProductShipmentSummary: vi.fn(),
-  usePlatformMovementHistory: vi.fn(),
-  useRecordPlatformStockMovement: vi.fn(),
+  useProductMarketplaceHistory: vi.fn(),
+  useRecordProductMarketplaceMovement: vi.fn(),
 }))
 
 vi.mock("@/lib/auth-context", () => ({ useAuth: vi.fn() }))
@@ -79,7 +80,8 @@ const mockedUseAddCatalogVariantStock = vi.mocked(useAddCatalogVariantStock)
 const mockedUseCatalogVariantAdjustments = vi.mocked(useCatalogVariantAdjustments)
 const mockedUseProductPlatformStock = vi.mocked(useProductPlatformStock)
 const mockedUseProductShipmentSummary = vi.mocked(useProductShipmentSummary)
-const mockedUsePlatformMovementHistory = vi.mocked(usePlatformMovementHistory)
+const mockedUseProductMarketplaceHistory = vi.mocked(useProductMarketplaceHistory)
+const mockedUseRecordProductMarketplaceMovement = vi.mocked(useRecordProductMarketplaceMovement)
 const mockedUseAuth = vi.mocked(useAuth)
 
 function mutationStub(behaviour: "success" | "error" = "success") {
@@ -337,13 +339,17 @@ beforeEach(() => {
     error: null,
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useProductShipmentSummary>)
-  mockedUsePlatformMovementHistory.mockReturnValue({
+  mockedUseProductMarketplaceHistory.mockReturnValue({
     data: { data: [], meta: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } },
     isLoading: false,
     isError: false,
     error: null,
     refetch: vi.fn(),
-  } as unknown as ReturnType<typeof usePlatformMovementHistory>)
+  } as unknown as ReturnType<typeof useProductMarketplaceHistory>)
+  mockedUseRecordProductMarketplaceMovement.mockReturnValue({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useRecordProductMarketplaceMovement>)
   setProduct(HERBAL_MASALA)
 })
 
@@ -957,74 +963,66 @@ const PLATFORM_STOCK_FIXTURE: ProductPlatformStock = {
   product_id: "prod-1",
   product_title: "Vajrashakti",
   stock_date: "2026-09-11",
-  variants: [
+  platforms: [
     {
-      product_variant_id: "v-1",
-      sku: "VJR-30",
-      variant_title: "Pack of 1",
-      stock_date: "2026-09-11",
-      platforms: [
-        {
-          platform: "shopify",
-          platform_label: "Shopify",
-          is_automatic: true,
-          opening_stock: null,
-          stock_added: 0,
-          stock_deducted: 35,
-          current_stock: 1200,
-          last_updated: "2026-09-11T09:00:00Z",
-        },
-        {
-          platform: "amazon",
-          platform_label: "Amazon",
-          is_automatic: false,
-          opening_stock: 500,
-          stock_added: 30,
-          stock_deducted: 0,
-          current_stock: 530,
-          last_updated: null,
-        },
-        {
-          platform: "flipkart",
-          platform_label: "Flipkart",
-          is_automatic: false,
-          opening_stock: 0,
-          stock_added: 0,
-          stock_deducted: 0,
-          current_stock: 0,
-          last_updated: null,
-        },
-        {
-          platform: "blinkit",
-          platform_label: "Blinkit",
-          is_automatic: false,
-          opening_stock: 0,
-          stock_added: 0,
-          stock_deducted: 0,
-          current_stock: 0,
-          last_updated: null,
-        },
-        {
-          platform: "meesho",
-          platform_label: "Meesho",
-          is_automatic: false,
-          opening_stock: 0,
-          stock_added: 0,
-          stock_deducted: 0,
-          current_stock: 0,
-          last_updated: null,
-        },
-        {
-          platform: "manual_other",
-          platform_label: "Manual / Other",
-          is_automatic: false,
-          opening_stock: 0,
-          stock_added: 0,
-          stock_deducted: 0,
-          current_stock: 0,
-          last_updated: null,
-        },
-      ],
+      platform: "shopify",
+      platform_label: "Shopify",
+      is_automatic: true,
+      opening_stock: null,
+      stock_added: 0,
+      stock_deducted: 35,
+      current_stock: 1200,
+      last_updated: "2026-09-11T09:00:00Z",
+    },
+    {
+      platform: "amazon",
+      platform_label: "Amazon",
+      is_automatic: false,
+      opening_stock: 500,
+      stock_added: 30,
+      stock_deducted: 0,
+      current_stock: 530,
+      last_updated: null,
+    },
+    {
+      platform: "flipkart",
+      platform_label: "Flipkart",
+      is_automatic: false,
+      opening_stock: 0,
+      stock_added: 0,
+      stock_deducted: 0,
+      current_stock: 0,
+      last_updated: null,
+    },
+    {
+      platform: "blinkit",
+      platform_label: "Blinkit",
+      is_automatic: false,
+      opening_stock: 0,
+      stock_added: 0,
+      stock_deducted: 0,
+      current_stock: 0,
+      last_updated: null,
+    },
+    {
+      platform: "meesho",
+      platform_label: "Meesho",
+      is_automatic: false,
+      opening_stock: 0,
+      stock_added: 0,
+      stock_deducted: 0,
+      current_stock: 0,
+      last_updated: null,
+    },
+    {
+      platform: "manual_other",
+      platform_label: "Manual / Other",
+      is_automatic: false,
+      opening_stock: 0,
+      stock_added: 0,
+      stock_deducted: 0,
+      current_stock: 0,
+      last_updated: null,
     },
   ],
 }
@@ -1062,7 +1060,7 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     renderWithProviders(<InventoryProductPage />)
 
     expect(screen.getByText("Stock Date")).toBeInTheDocument()
-    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+    expect(screen.getByText(/Marketplace Stock/)).toBeInTheDocument()
     expect(screen.getByText("Shipments")).toBeInTheDocument()
     expect(screen.getByText("Amazon")).toBeInTheDocument()
     expect(screen.getByText("530")).toBeInTheDocument() // Amazon current stock
@@ -1102,7 +1100,7 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     // an ambiguous singular match).
     expect(screen.getAllByText("Vajrashakti").length).toBeGreaterThan(0)
     // The new section renders its own clean empty state, not a crash.
-    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+    expect(screen.getByText(/Marketplace Stock/)).toBeInTheDocument()
   })
 
   it("shows a loading state for the Marketplace Stock section without crashing", () => {
@@ -1116,7 +1114,7 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     } as unknown as ReturnType<typeof useProductPlatformStock>)
 
     renderWithProviders(<InventoryProductPage />)
-    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+    expect(screen.getByText(/Marketplace Stock/)).toBeInTheDocument()
   })
 
   it("shows an API error state for the Shipments section without crashing", () => {
@@ -1134,7 +1132,7 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     expect(screen.getByText("Something went wrong")).toBeInTheDocument()
   })
 
-  it("toggles the Platform Stock Movement History section", async () => {
+  it("toggles the Marketplace Adjustment History section", async () => {
     const user = userEvent.setup()
     setProduct(VAJRASHAKTI)
     mockedUseProductPlatformStock.mockReturnValue({
@@ -1147,9 +1145,9 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
 
     renderWithProviders(<InventoryProductPage />)
 
-    expect(screen.queryByText(/Platform Stock Movement History/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Marketplace Adjustment History/i)).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Show Movement History" }))
-    expect(screen.getByText(/Platform Stock Movement History/i)).toBeInTheDocument()
+    expect(screen.getByText(/Marketplace Adjustment History/i)).toBeInTheDocument()
   })
 
   it("existing Shopify product-detail rendering is unaffected by the new section", () => {

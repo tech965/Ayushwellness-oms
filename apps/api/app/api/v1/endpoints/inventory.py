@@ -22,7 +22,11 @@ from app.dependencies.auth import require_permission
 from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
-from app.models.enums import InventoryMovementType, PlatformStockMovementType
+from app.models.enums import (
+    InventoryMovementType,
+    PlatformStockMovementType,
+    ProductMarketplaceMovementType,
+)
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.inventory import (
     CatalogNameResponse,
@@ -45,13 +49,19 @@ from app.schemas.inventory import (
 from app.schemas.platform_inventory import (
     PlatformStockMovementCreateRequest,
     PlatformStockMovementResponse,
+    ProductMarketplaceMovementCreateRequest,
+    ProductMarketplaceMovementResponse,
     ProductPlatformStockResponse,
     ProductShipmentSummaryResponse,
     UnifiedStockMovementResponse,
 )
 from app.schemas.response import ApiResponse, PaginatedResponse
 from app.services.inventory_service import InventoryService, OmsVariantGroup
-from app.services.platform_inventory_service import PlatformInventoryService, to_movement_response
+from app.services.platform_inventory_service import (
+    PlatformInventoryService,
+    to_movement_response,
+    to_product_movement_response,
+)
 
 router = APIRouter()
 
@@ -737,6 +747,73 @@ async def list_platform_stock_movements(
     service = PlatformInventoryService(session)
     rows, total = await service.get_movement_history(
         variant_id,
+        platform=platform,
+        date_from=date_from,
+        date_to=date_to,
+        page_params=page_params,
+    )
+    return PaginatedResponse(
+        data=rows, meta=build_pagination_meta(total_items=total, page_params=page_params)
+    )
+
+
+@router.post(
+    "/products/{product_id}/marketplace-movements",
+    response_model=ApiResponse[ProductMarketplaceMovementResponse],
+    status_code=201,
+)
+async def record_product_marketplace_movement(
+    product_id: uuid.UUID,
+    payload: ProductMarketplaceMovementCreateRequest,
+    session: Any = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory.manage")),
+) -> ApiResponse[ProductMarketplaceMovementResponse]:
+    """Add Stock / Record Sale / RTO for the whole PRODUCT on one
+    platform -- NO SKU is selected. Staff enters a packet quantity;
+    `PlatformInventoryService.record_product_movement` converts it to
+    outers using this product's own pack_size/packets_per_box (422 if
+    the product's SKUs don't agree on those, since there would be no
+    deterministic conversion). No `ProductVariant` row is ever read for
+    a decision or written to by this endpoint.
+    """
+    service = PlatformInventoryService(session)
+    movement = await service.record_product_movement(
+        product_id,
+        platform=payload.platform,
+        movement_type=ProductMarketplaceMovementType(payload.movement_type),
+        quantity_packets=payload.quantity_packets,
+        reason=payload.reason,
+        stock_date=payload.stock_date,
+        actor=current_user,
+    )
+    resolved = await service.product_movements.get_by_id_with_relations(movement.id)
+    return ApiResponse(
+        data=to_product_movement_response(resolved or movement),
+        message="Stock movement recorded.",
+    )
+
+
+@router.get(
+    "/products/{product_id}/marketplace-movements",
+    response_model=PaginatedResponse[ProductMarketplaceMovementResponse],
+)
+async def list_product_marketplace_movements(
+    product_id: uuid.UUID,
+    platform: str | None = Query(default=None, description="Filter to one manual platform."),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    page_params: PageParams = Depends(pagination_params),
+    session: Any = Depends(get_db),
+    _: User = Depends(require_permission("inventory.read")),
+) -> PaginatedResponse[ProductMarketplaceMovementResponse]:
+    """Product-level marketplace adjustment history -- Add Stock / Sale /
+    RTO, each its own event (a sale and a later RTO are never merged or
+    netted). Distinct from the existing per-SKU
+    `GET /stock/{variant_id}/platform-stock/movements` above.
+    """
+    service = PlatformInventoryService(session)
+    rows, total = await service.get_product_marketplace_history(
+        product_id,
         platform=platform,
         date_from=date_from,
         date_to=date_to,

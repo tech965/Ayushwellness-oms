@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.enums import PlatformStockMovementType
+from app.models.enums import PlatformStockMovementType, ProductMarketplaceMovementType
 from app.models.platform_inventory import InventoryPlatform
 
 
@@ -123,19 +123,65 @@ class PlatformStockSummaryRow(BaseModel):
     last_updated: datetime | None
 
 
-class VariantPlatformStockResponse(BaseModel):
-    product_variant_id: uuid.UUID
-    sku: str
-    variant_title: str | None
+class ProductPlatformStockResponse(BaseModel):
+    """Marketplace Stock table: ONE row per platform for the whole
+    PRODUCT (never one per SKU) -- Shopify's row is summed across every
+    real underlying `ProductVariant` (server-side, same null-propagation
+    rule `PlatformStockSummaryRow` already documents); every manual
+    platform's row comes directly from `ProductMarketplaceMovement`,
+    which is already product-scoped and needs no SKU-level summation at
+    all.
+    """
+
+    product_id: uuid.UUID
+    product_title: str
     stock_date: date
     platforms: list[PlatformStockSummaryRow]
 
 
-class ProductPlatformStockResponse(BaseModel):
+class ProductMarketplaceMovementCreateRequest(BaseModel):
+    """Record ONE product-level manual marketplace movement (Add Stock /
+    Record Sale / RTO) -- NO SKU is selected or implied. The business
+    user enters a bare packet quantity for the whole product on this
+    platform; see `PlatformInventoryService.record_product_movement` for
+    the packet->outer conversion and the uniform-pack-size safety check
+    that can reject this request (422) rather than guess an allocation.
+    """
+
+    platform: str = Field(max_length=50)
+    movement_type: Literal["stock_added", "sale", "rto"]
+    quantity_packets: int = Field(gt=0, description="Quantity in packets, as entered by staff.")
+    reason: str | None = Field(default=None, max_length=255)
+    stock_date: date | None = Field(
+        default=None,
+        description="IST business date this movement belongs to. Defaults to today (IST).",
+    )
+
+    @field_validator("platform")
+    @classmethod
+    def _validate_platform(cls, value: str) -> str:
+        if value not in InventoryPlatform.ALL:
+            allowed = ", ".join(InventoryPlatform.ALL)
+            raise ValueError(f"Unknown platform {value!r}. Must be one of: {allowed}.")
+        return value
+
+
+class ProductMarketplaceMovementResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
     product_id: uuid.UUID
-    product_title: str
+    platform: str
+    platform_label: str
+    movement_type: ProductMarketplaceMovementType
+    quantity_packets: int
+    quantity_delta: int
+    quantity_after: int
     stock_date: date
-    variants: list[VariantPlatformStockResponse]
+    reason: str | None
+    actor_user_id: uuid.UUID | None
+    actor_label: str
+    created_at: datetime
 
 
 class ShipmentTransitSummaryRow(BaseModel):

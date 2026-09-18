@@ -13,7 +13,7 @@ from datetime import date as date_type
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.models.platform_inventory import PlatformStockMovement
+from app.models.platform_inventory import PlatformStockMovement, ProductMarketplaceMovement
 from app.models.product import ProductVariant
 from app.repositories.base import AppendOnlyRepository
 
@@ -195,5 +195,111 @@ class PlatformStockMovementRepository(AppendOnlyRepository[PlatformStockMovement
             date_from=date_from,
             date_to=date_to,
         ).order_by(PlatformStockMovement.created_at.desc())
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+
+class ProductMarketplaceMovementRepository(AppendOnlyRepository[ProductMarketplaceMovement]):
+    """Repository for `ProductMarketplaceMovement` -- the product-level
+    (no SKU) manual marketplace ledger. Mirrors
+    `PlatformStockMovementRepository`'s shape exactly, scoped by
+    `product_id` instead of `product_variant_id`.
+    """
+
+    model = ProductMarketplaceMovement
+
+    async def get_by_id_with_relations(self, id_: uuid.UUID) -> ProductMarketplaceMovement | None:
+        stmt = (
+            select(ProductMarketplaceMovement)
+            .where(ProductMarketplaceMovement.id == id_)
+            .options(selectinload(ProductMarketplaceMovement.actor))
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_latest_as_of(
+        self, *, product_id: uuid.UUID, platform: str, as_of: date_type
+    ) -> ProductMarketplaceMovement | None:
+        """The running balance for one (product, platform) as of the end
+        of `as_of` -- same "latest row at/before cutoff" technique as
+        `PlatformStockMovementRepository.get_latest_as_of`.
+        """
+        stmt = (
+            select(ProductMarketplaceMovement)
+            .where(
+                ProductMarketplaceMovement.product_id == product_id,
+                ProductMarketplaceMovement.platform == platform,
+                ProductMarketplaceMovement.stock_date <= as_of,
+            )
+            .order_by(
+                ProductMarketplaceMovement.stock_date.desc(),
+                ProductMarketplaceMovement.created_at.desc(),
+                ProductMarketplaceMovement.id.desc(),
+            )
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().first()
+
+    async def sum_for_date(
+        self, *, product_id: uuid.UUID, platform: str, stock_date: date_type
+    ) -> tuple[int, int]:
+        """`(stock_added, stock_deducted)` in OUTERS, both positive
+        integers, for movements attributed to exactly `stock_date`.
+        `stock_added` covers both STOCK_ADDED and RTO (both positive
+        deltas); `stock_deducted` covers SALE. The movement_type itself
+        is preserved on each row for history -- this is only the
+        summary table's two-column bucketing, same convention as
+        `PlatformStockMovementRepository.sum_for_date`.
+        """
+        stmt = select(
+            ProductMarketplaceMovement.movement_type, ProductMarketplaceMovement.quantity_delta
+        ).where(
+            ProductMarketplaceMovement.product_id == product_id,
+            ProductMarketplaceMovement.platform == platform,
+            ProductMarketplaceMovement.stock_date == stock_date,
+        )
+        result = await self.session.execute(stmt)
+        added = 0
+        deducted = 0
+        for _movement_type, delta in result.all():
+            if delta >= 0:
+                added += delta
+            else:
+                deducted += -delta
+        return added, deducted
+
+    def search_query(
+        self,
+        *,
+        product_id: uuid.UUID,
+        platform: str | None = None,
+        date_from: date_type | None = None,
+        date_to: date_type | None = None,
+    ):
+        stmt = (
+            self._base_query()
+            .where(ProductMarketplaceMovement.product_id == product_id)
+            .options(selectinload(ProductMarketplaceMovement.actor))
+        )
+        if platform:
+            stmt = stmt.where(ProductMarketplaceMovement.platform == platform)
+        if date_from:
+            stmt = stmt.where(ProductMarketplaceMovement.stock_date >= date_from)
+        if date_to:
+            stmt = stmt.where(ProductMarketplaceMovement.stock_date <= date_to)
+        return stmt
+
+    async def list_for_date_range(
+        self,
+        *,
+        product_id: uuid.UUID,
+        platform: str | None = None,
+        date_from: date_type | None = None,
+        date_to: date_type | None = None,
+    ) -> list[ProductMarketplaceMovement]:
+        stmt = self.search_query(
+            product_id=product_id, platform=platform, date_from=date_from, date_to=date_to
+        ).order_by(ProductMarketplaceMovement.created_at.desc())
         result = await self.session.execute(stmt)
         return list(result.scalars().all())

@@ -11,8 +11,8 @@ import { PaginationBar } from "@/components/shared/pagination-bar"
 import { ProductThumbnail } from "@/components/shared/product-thumbnail"
 import { QueryStates } from "@/components/shared/query-states"
 import { StockDatePicker } from "@/components/shared/stock-date-picker"
-import { PlatformMovementHistory } from "@/components/inventory/platform-movement-history"
 import { PlatformStockSection } from "@/components/inventory/platform-stock-section"
+import { ProductMarketplaceHistory } from "@/components/inventory/product-marketplace-history"
 import { ShipmentSummarySection } from "@/components/inventory/shipment-summary-section"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -1040,6 +1040,7 @@ function MultiPlatformInventorySection({ productId }: { productId: string }) {
       </div>
 
       <PlatformStockSection
+        productId={productId}
         productTitle={platformStockQuery.data?.product_title ?? ""}
         isLoading={platformStockQuery.isLoading}
         isError={platformStockQuery.isError}
@@ -1063,14 +1064,7 @@ function MultiPlatformInventorySection({ productId }: { productId: string }) {
           {showHistory ? "Hide Movement History" : "Show Movement History"}
         </Button>
       </div>
-      {showHistory &&
-        platformStockQuery.data?.variants.map((variant) => (
-          <PlatformMovementHistory
-            key={variant.product_variant_id}
-            variantId={variant.product_variant_id}
-            variantLabel={variant.variant_title || variant.sku}
-          />
-        ))}
+      {showHistory && <ProductMarketplaceHistory productId={productId} />}
     </div>
   )
 }

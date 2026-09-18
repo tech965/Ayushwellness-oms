@@ -100,19 +100,55 @@ export interface PlatformStockSummaryRow {
   last_updated: string | null
 }
 
-export interface VariantPlatformStock {
-  product_variant_id: string
-  sku: string
-  variant_title: string | null
-  stock_date: string
-  platforms: PlatformStockSummaryRow[]
-}
-
+/** Marketplace Stock: ONE table per PRODUCT, never one per SKU. Shopify's
+ * row is already summed across every real underlying `ProductVariant`
+ * server-side; every manual platform's row is already product-scoped (no
+ * SKU dimension exists for it at all) -- there is nothing left to
+ * aggregate client-side.
+ */
 export interface ProductPlatformStock {
   product_id: string
   product_title: string
   stock_date: string
-  variants: VariantPlatformStock[]
+  platforms: PlatformStockSummaryRow[]
+}
+
+/** Add Stock / Record Sale / RTO -- for the whole PRODUCT on one
+ * platform, no SKU. `quantity_packets` is what the business user
+ * actually typed; the backend converts it to outers using this
+ * product's own pack_size/packets_per_box (422 if those aren't uniform
+ * across the product's real SKUs -- see
+ * `PlatformInventoryService.record_product_movement`).
+ */
+export type ProductMarketplaceMovementType = "stock_added" | "sale" | "rto"
+
+export interface ProductMarketplaceMovementCreateInput {
+  platform: ManualPlatform
+  movement_type: ProductMarketplaceMovementType
+  quantity_packets: number
+  reason?: string
+  /** `YYYY-MM-DD` (IST). Omit to default to today (IST) on the backend. */
+  stock_date?: string
+}
+
+/** One row of the product-level Marketplace Adjustment history -- Add
+ * Stock / Sale / RTO, each its own event (a sale and a later RTO are
+ * NEVER merged or netted before being stored).
+ */
+export interface ProductMarketplaceMovement {
+  id: string
+  product_id: string
+  platform: string
+  platform_label: string
+  movement_type: ProductMarketplaceMovementType
+  quantity_packets: number
+  quantity_delta: number
+  quantity_after: number
+  stock_date: string
+  reason: string | null
+  actor_user_id: string | null
+  actor_label: string
+  created_at: string
 }
 
 /** One variant's shipment-status breakdown — `in_transit`/
