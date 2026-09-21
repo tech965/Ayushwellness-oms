@@ -10,9 +10,10 @@ from __future__ import annotations
 import uuid
 from datetime import date as date_type
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
+from app.models.enums import ProductMarketplaceMovementType
 from app.models.platform_inventory import PlatformStockMovement, ProductMarketplaceMovement
 from app.models.product import ProductVariant
 from app.repositories.base import AppendOnlyRepository
@@ -268,6 +269,25 @@ class ProductMarketplaceMovementRepository(AppendOnlyRepository[ProductMarketpla
             else:
                 deducted += -delta
         return added, deducted
+
+    async def sum_sold_packets(
+        self, *, product_id: uuid.UUID, date_from: date_type, date_to_exclusive: date_type
+    ) -> int:
+        """Packets sold across EVERY manual platform for one product with
+        `date_from <= stock_date < date_to_exclusive` -- SALE rows only
+        (an RTO/stock-added row is never counted as sold), summed from the
+        exact packet quantity the user entered (`quantity_packets`), never
+        reverse-derived from outers.
+        """
+        total = await self.session.scalar(
+            select(func.coalesce(func.sum(ProductMarketplaceMovement.quantity_packets), 0)).where(
+                ProductMarketplaceMovement.product_id == product_id,
+                ProductMarketplaceMovement.movement_type == ProductMarketplaceMovementType.SALE,
+                ProductMarketplaceMovement.stock_date >= date_from,
+                ProductMarketplaceMovement.stock_date < date_to_exclusive,
+            )
+        )
+        return int(total or 0)
 
     def search_query(
         self,

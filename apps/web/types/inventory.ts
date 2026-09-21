@@ -111,6 +111,12 @@ export interface OmsCatalogVariant {
  */
 export interface InventoryProductStock {
   product_id: string
+  /** Marketplace Sale/RTO effects that could not be attributed to one
+   * OMS variant (a product with several, or none). ALREADY included in
+   * `available_boxes`; shown as its own line so the product total
+   * reconciles with the sum of the variant cards below it.
+   */
+  product_level_adjustment_boxes: number
   /** Shopify's own, immutable product id -- the only safe key to scope
    * any product-specific display behaviour by (never `product_id`, the
    * per-environment OMS UUID, and never `title`/`product_name`, which

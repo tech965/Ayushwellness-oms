@@ -141,10 +141,11 @@ export function useRecordPlatformStockMovement(variantId: string) {
   })
 }
 
-/** Add Stock / Record Sale / RTO -- for the whole PRODUCT on one
- * platform, no SKU. The caller sends only the packet quantity being
- * added/sold/returned, never the resulting total; the backend converts
- * to outers and computes the new balance itself (see
+/** Record Sale / RTO -- for the whole PRODUCT on one platform, no SKU.
+ * The caller sends only the packet quantity sold/returned, never the
+ * resulting total; the backend converts to outers, computes the new
+ * balances itself, and applies the same effect to the product's OMS
+ * total stock in one transaction (see
  * `PlatformInventoryService.record_product_movement`).
  */
 export function useRecordProductMarketplaceMovement(productId: string) {
@@ -158,9 +159,12 @@ export function useRecordProductMarketplaceMovement(productId: string) {
       return response.data.data
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({
-        predicate: (query) => query.queryKey.includes("platform-stock") || query.queryKey.includes("marketplace-movements"),
-      })
+      // A Sale/RTO now also changes the product's OMS TOTAL stock (the
+      // backend writes both in one transaction), so the product detail
+      // header, its variant cards and the Inventory overview must refetch
+      // too -- the displayed total always comes from the API, never from
+      // a local subtraction.
+      void queryClient.invalidateQueries({ queryKey: ["inventory"] })
     },
   })
 }

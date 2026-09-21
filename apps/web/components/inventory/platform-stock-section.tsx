@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Minus, Plus, RotateCcw } from "lucide-react"
+import { Minus, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 
 import { QueryStates } from "@/components/shared/query-states"
@@ -23,14 +23,14 @@ import { formatDateTime } from "@/lib/format"
 import { useRecordProductMarketplaceMovement } from "@/services/platform-inventory"
 import type {
   ManualPlatform,
+  MarketplaceOperation,
   PlatformStockSummaryRow,
-  ProductMarketplaceMovementType,
 } from "@/types/platform-inventory"
 
 interface MovementDialogState {
   platform: ManualPlatform
   platformLabel: string
-  direction: ProductMarketplaceMovementType
+  direction: MarketplaceOperation
   currentStock: number
   stockDate: string
 }
@@ -49,13 +49,15 @@ interface PlatformStockSectionProps {
 
 /** "Marketplace Stock" — ONE table per PRODUCT, never one per SKU:
  * Shopify (automatic, read-only) plus every manual platform, already
- * aggregated server-side for the selected `stockDate`. Add Stock /
- * Record Sale / RTO are PRODUCT-level actions -- no SKU is selected or
- * shown anywhere in this section; the backend converts the packet
- * quantity entered here to outers using the product's own pack_size
- * (see `PlatformInventoryService.record_product_movement`), and
- * rejects the write (422) if that conversion isn't deterministic
- * rather than guessing.
+ * aggregated server-side for the selected `stockDate`. Record Sale and
+ * RTO are the only actions (there is no marketplace "Add Stock") and
+ * both are PRODUCT-level -- no SKU is selected or shown anywhere in this
+ * section. The backend converts the packet quantity entered here to
+ * outers using the product's own pack_size, applies the same effect to
+ * the product's OMS total stock in one transaction (see
+ * `PlatformInventoryService.record_product_movement`), and rejects the
+ * write (422) if that conversion isn't deterministic rather than
+ * guessing. Shopify's row is automatic and never gets manual controls.
  */
 export function PlatformStockSection({
   productId,
@@ -105,15 +107,6 @@ export function PlatformStockSection({
                       key={row.platform}
                       row={row}
                       canManage={canManage}
-                      onAdd={() =>
-                        setDialogState({
-                          platform: row.platform as ManualPlatform,
-                          platformLabel: row.platform_label,
-                          direction: "stock_added",
-                          currentStock: row.current_stock ?? 0,
-                          stockDate,
-                        })
-                      }
                       onSale={() =>
                         setDialogState({
                           platform: row.platform as ManualPlatform,
@@ -157,13 +150,11 @@ export function PlatformStockSection({
 function PlatformStockTableRow({
   row,
   canManage,
-  onAdd,
   onSale,
   onRto,
 }: {
   row: PlatformStockSummaryRow
   canManage: boolean
-  onAdd: () => void
   onSale: () => void
   onRto: () => void
 }) {
@@ -206,11 +197,7 @@ function PlatformStockTableRow({
           <span className="text-muted-foreground text-xs">Synced from Shopify</span>
         ) : canManage ? (
           <div className="flex flex-wrap justify-end gap-1.5">
-            <Button variant="outline" size="sm" onClick={onAdd}>
-              <Plus className="size-3.5" />
-              Add Stock
-            </Button>
-            <Button variant="ghost" size="sm" onClick={onSale}>
+            <Button variant="outline" size="sm" onClick={onSale}>
               <Minus className="size-3.5" />
               Record Sale
             </Button>
@@ -227,33 +214,29 @@ function PlatformStockTableRow({
   )
 }
 
-const DIALOG_TITLES: Record<ProductMarketplaceMovementType, string> = {
-  stock_added: "Add Stock",
+const DIALOG_TITLES: Record<MarketplaceOperation, string> = {
   sale: "Record Sale",
   rto: "Record RTO",
 }
 
-const QUANTITY_LABELS: Record<ProductMarketplaceMovementType, string> = {
-  stock_added: "Quantity to add",
+const QUANTITY_LABELS: Record<MarketplaceOperation, string> = {
   sale: "Quantity Sold",
   rto: "Quantity Returned",
 }
 
-const QUANTITY_PLACEHOLDERS: Record<ProductMarketplaceMovementType, string> = {
-  stock_added: "e.g. Warehouse stock received",
+const QUANTITY_PLACEHOLDERS: Record<MarketplaceOperation, string> = {
   sale: "e.g. Marketplace sale",
   rto: "e.g. Customer return",
 }
 
-/** Add Stock / Record Sale / RTO for the whole PRODUCT on one platform
- * -- NO SKU field anywhere in this dialog. Staff enters only a packet
- * quantity and an optional reason; the resulting outer delta and new
- * balance are always computed server-side, never trusted from the
- * client (same additive-only contract as every other stock-adjustment
- * dialog in this app). A Sale can legitimately take the balance
- * negative (e.g. a sale recorded before that day's stock was ever
- * added) -- this is never blocked, matching the approved business
- * example.
+/** Record Sale / RTO for the whole PRODUCT on one platform -- NO SKU
+ * field anywhere in this dialog. Staff enters only a packet quantity
+ * and an optional reason; the resulting outer delta and both new
+ * balances (this platform's, and the product's OMS total) are always
+ * computed server-side, never trusted from the client. A Sale can
+ * legitimately take the platform balance negative (e.g. a sale recorded
+ * before that day's stock was ever added) -- never blocked, matching
+ * the approved business example.
  */
 function ProductMarketplaceMovementDialog({
   productId,
@@ -287,12 +270,7 @@ function ProductMarketplaceMovementDialog({
         reason: reason.trim() || undefined,
         stock_date: state.stockDate,
       })
-      const verb =
-        state.direction === "stock_added"
-          ? "Stock Added"
-          : state.direction === "sale"
-            ? "Sale Recorded"
-            : "RTO Recorded"
+      const verb = isSale ? "Sale Recorded" : "RTO Recorded"
       const sign = isSale ? "-" : "+"
       toast.success(
         `${verb}: ${sign}${parsed} packets. New Stock: ${result?.quantity_after ?? "—"} outers.`

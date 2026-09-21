@@ -11,6 +11,7 @@ import { PaginationBar } from "@/components/shared/pagination-bar"
 import { ProductThumbnail } from "@/components/shared/product-thumbnail"
 import { QueryStates } from "@/components/shared/query-states"
 import { StockDatePicker } from "@/components/shared/stock-date-picker"
+import { MonthlySalesSummary } from "@/components/inventory/monthly-sales-summary"
 import { PlatformStockSection } from "@/components/inventory/platform-stock-section"
 import { ProductMarketplaceHistory } from "@/components/inventory/product-marketplace-history"
 import { ShipmentSummarySection } from "@/components/inventory/shipment-summary-section"
@@ -991,6 +992,16 @@ function ProductInventory({ product }: { product: InventoryProductStock }) {
             {product.oms_variant_count === 1 ? "" : "s"} ·{" "}
             {product.underlying_variant_count} Shopify SKUs
           </span>
+          {product.product_level_adjustment_boxes !== 0 && (
+            <p className="text-muted-foreground mt-1 text-xs" data-testid="product-level-adjustment">
+              Includes marketplace Sale/RTO adjustments that belong to the product as a whole
+              (not to any one variant below):{" "}
+              <span className="text-foreground font-medium">
+                {product.product_level_adjustment_boxes > 0 ? "+" : ""}
+                {product.product_level_adjustment_boxes.toLocaleString()} boxes
+              </span>
+            </p>
+          )}
         </div>
         {canManage && (
           <ProductNameEditor
@@ -1038,6 +1049,8 @@ function MultiPlatformInventorySection({ productId }: { productId: string }) {
           are movements DURING that date.
         </p>
       </div>
+
+      <MonthlySalesSummary soldPackets={platformStockQuery.data?.sold_this_month_packets} />
 
       <PlatformStockSection
         productId={productId}

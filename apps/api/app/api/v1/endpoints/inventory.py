@@ -146,17 +146,21 @@ def _oms_variant_response(
     common unit) PLUS `adjustment_total` -- the cumulative total the
     group's own `CatalogVariantStockAdjustment` ledger has recorded (see
     that model's docstring), 0 for an implicit (ungrouped) OMS variant,
-    which can never have one. `total_packets` is deliberately NOT
-    adjusted the same way: a reconciliation total has no pack size, so
-    there is no packets-per-box to convert it with -- it stays a plain
-    SUM of each real row's own `boxes * packets_per_box`.
-    `packets_per_box_uniform` is False when the grouped rows disagree --
-    NO single conversion ratio is invented.
+    which can never have one. `total_packets` = SUM of each real row's
+    own `boxes * packets_per_box`, PLUS `adjustment_total *
+    packets_per_box` ONLY when every grouped row agrees on
+    `packets_per_box` (the same uniform conversion the rest of this
+    module already uses) -- so a Sale/RTO/Edit Stock moves boxes and
+    packets together. When the rows DISAGREE there is no single ratio to
+    convert the ledger total with, so it is left out of packets rather
+    than guessed. `packets_per_box_uniform` is False in that case.
     """
     members = group.variants
     available_boxes = sum(v.available_quantity for v in members) + adjustment_total
     total_packets = sum(v.available_quantity * v.packets_per_box for v in members)
     pack_sizes = {v.packets_per_box for v in members}
+    if adjustment_total and len(pack_sizes) == 1:
+        total_packets += adjustment_total * next(iter(pack_sizes))
     return OmsCatalogVariantResponse(
         catalog_variant_id=group.catalog_variant_id,
         name=group.name,
@@ -173,27 +177,48 @@ def _oms_variant_response(
 
 
 def _product_stock_response(  # noqa: ANN001
-    product, oms_groups, *, threshold: int, adjustment_totals: dict | None = None
+    product,
+    oms_groups,
+    *,
+    threshold: int,
+    adjustment_totals: dict | None = None,
+    product_level_adjustment: int = 0,
 ) -> InventoryProductStockResponse:
     """Product detail payload. `oms_variants` is the only variant view the
     UI shows (3 for Aayush Herbal Masala, 1 for every other grouped
     product). Product totals sum across EVERY underlying `ProductVariant`
-    PLUS every CatalogVariant's own reconciliation total (`adjustment_totals`,
-    keyed by `catalog_variant_id` -- see `_oms_variant_response`), so the
-    product-level header always agrees with the sum of the OMS-variant
-    cards shown below it. `total_packets` is not adjusted the same way
-    -- see `_oms_variant_response`. Nothing is stored -- recomputed from
-    live rows on every read.
+    PLUS every CatalogVariant's own ledger total (`adjustment_totals`,
+    keyed by `catalog_variant_id` -- see `_oms_variant_response`) PLUS
+    `product_level_adjustment` (marketplace Sale/RTO rows that could not
+    be attributed to one CatalogVariant; they count toward THIS total
+    only, so the header = sum of the cards + that one reconciling line).
+    `total_packets` follows the same uniform-`packets_per_box` rule as
+    `_oms_variant_response`. Nothing is stored -- recomputed from live
+    rows on every read.
     """
     adjustment_totals = adjustment_totals or {}
     all_underlying = [v for g in oms_groups for v in g.variants]
-    available_boxes = sum(v.available_quantity for v in all_underlying) + sum(
-        adjustment_totals.values()
+    available_boxes = (
+        sum(v.available_quantity for v in all_underlying)
+        + sum(adjustment_totals.values())
+        + product_level_adjustment
     )
-    total_packets = sum(v.available_quantity * v.packets_per_box for v in all_underlying)
+    oms_variants = [
+        _oms_variant_response(
+            g,
+            threshold=threshold,
+            product_image_url=product.image_url,
+            adjustment_total=adjustment_totals.get(g.catalog_variant_id, 0),
+        )
+        for g in oms_groups
+    ]
+    total_packets = sum(g.total_packets for g in oms_variants)
     pack_sizes = {v.packets_per_box for v in all_underlying}
+    if product_level_adjustment and len(pack_sizes) == 1:
+        total_packets += product_level_adjustment * next(iter(pack_sizes))
     return InventoryProductStockResponse(
         product_id=product.id,
+        product_level_adjustment_boxes=product_level_adjustment,
         shopify_product_id=product.shopify_product_id,
         product_name=_product_display_title(product),
         title=product.title,
@@ -205,15 +230,7 @@ def _product_stock_response(  # noqa: ANN001
         packets_per_box_uniform=len(pack_sizes) <= 1,
         oms_variant_count=len(oms_groups),
         underlying_variant_count=len(all_underlying),
-        oms_variants=[
-            _oms_variant_response(
-                g,
-                threshold=threshold,
-                product_image_url=product.image_url,
-                adjustment_total=adjustment_totals.get(g.catalog_variant_id, 0),
-            )
-            for g in oms_groups
-        ],
+        oms_variants=oms_variants,
     )
 
 
@@ -297,11 +314,22 @@ async def list_product_stock(
         page_params=page_params, sort_params=sort_params, q=q
     )
 
+    # Same OMS total the product detail header shows: per-SKU sums PLUS
+    # every CatalogVariant-/product-scoped ledger row (Edit Stock and
+    # marketplace Sale/RTO) -- never a second, disagreeing number.
+    ledger_totals = await service.catalog_variant_adjustments.sum_all_for_products(
+        [p.id for p in products]
+    )
+
     data = []
     for product in products:
         variants = product.variants
-        total_boxes = sum(v.available_quantity for v in variants)
+        ledger_total = ledger_totals.get(product.id, 0)
+        total_boxes = sum(v.available_quantity for v in variants) + ledger_total
         total_packets = sum(v.available_quantity * v.packets_per_box for v in variants)
+        pack_sizes = {v.packets_per_box for v in variants}
+        if ledger_total and len(pack_sizes) == 1:
+            total_packets += ledger_total * next(iter(pack_sizes))
         worst_status = InventoryService.compute_stock_status(total_boxes, threshold)
         # OMS-visible variant count = declared CatalogVariants + every
         # ProductVariant not yet grouped (each of those is its own
@@ -370,9 +398,16 @@ async def get_product_stock(
     threshold = await service.get_low_stock_threshold()
     product, oms_groups = await service.get_oms_variants_for_product(product_id)
     adjustment_totals = await service.catalog_variant_adjustments.sum_by_product(product_id)
+    product_level_adjustment = await service.catalog_variant_adjustments.sum_product_level(
+        product_id
+    )
     return ApiResponse(
         data=_product_stock_response(
-            product, oms_groups, threshold=threshold, adjustment_totals=adjustment_totals
+            product,
+            oms_groups,
+            threshold=threshold,
+            adjustment_totals=adjustment_totals,
+            product_level_adjustment=product_level_adjustment,
         )
     )
 

@@ -139,12 +139,43 @@ class CatalogVariantStockAdjustment(Base, UUIDPrimaryKeyMixin):
     amount is a reconciliation total, not stock attached to a specific
     sellable SKU: dispatch/RTO/Shopify sync never read or write this
     table, and no `ProductVariant` row is ever touched by it.
+
+    SCOPE -- exactly one of `catalog_variant_id` / `product_id` is set
+    (`ck_cv_stock_adjustments_exactly_one_scope`):
+      * `catalog_variant_id` set: a manual Edit Stock, or a marketplace
+        Sale/RTO for a product whose OMS-visible variants are exactly ONE
+        real CatalogVariant (so the target is deterministic).
+      * `product_id` set: a marketplace Sale/RTO for a product with no
+        single deterministic CatalogVariant (e.g. Herbal Masala's three
+        flavours, or an ungrouped product). Counts toward the PRODUCT
+        total only -- never toward any one CatalogVariant card, because
+        attributing it to one flavour would be an arbitrary allocation.
+    `product_marketplace_movement_id` (unique, nullable) links a
+    marketplace-driven row to the `ProductMarketplaceMovement` that
+    caused it; both are written in one transaction.
     """
 
     __tablename__ = "catalog_variant_stock_adjustments"
+    __table_args__ = (
+        UniqueConstraint(
+            "product_marketplace_movement_id",
+            name="uq_cv_stock_adjustments_product_marketplace_movement_id",
+        ),
+        CheckConstraint(
+            "(catalog_variant_id IS NOT NULL AND product_id IS NULL) "
+            "OR (catalog_variant_id IS NULL AND product_id IS NOT NULL)",
+            name="ck_cv_stock_adjustments_exactly_one_scope",
+        ),
+    )
 
-    catalog_variant_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("catalog_variants.id", ondelete="CASCADE"), nullable=False, index=True
+    catalog_variant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("catalog_variants.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    product_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    product_marketplace_movement_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("product_marketplace_movements.id", ondelete="CASCADE"), nullable=True
     )
     quantity_delta: Mapped[int] = mapped_column(Integer, nullable=False)
     quantity_after: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -156,7 +187,7 @@ class CatalogVariantStockAdjustment(Base, UUIDPrimaryKeyMixin):
         AwareDateTime(), server_default=func.now(), nullable=False, index=True
     )
 
-    catalog_variant: Mapped[CatalogVariant] = relationship()
+    catalog_variant: Mapped[CatalogVariant | None] = relationship()
     actor: Mapped[User | None] = relationship()
 
 

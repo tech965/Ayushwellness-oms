@@ -146,6 +146,7 @@ function omsVariant(
 // Aayush Herbal Masala: 3 OMS flavour variants, each grouping a 60- and a 120-pack SKU.
 const HERBAL_MASALA: InventoryProductStock = {
   product_id: "prod-1",
+  product_level_adjustment_boxes: 0,
   shopify_product_id: "8009941287101", // the canonical product this feature is scoped to
   product_name: "Aayush Wellness Herbal Masala",
   title: "आयुष हर्बल मसाला",
@@ -226,6 +227,7 @@ const HERBAL_MASALA: InventoryProductStock = {
 // A non-Herbal-Masala product: ONE OMS variant grouping 3 pack SKUs.
 const VAJRASHAKTI: InventoryProductStock = {
   product_id: "prod-1",
+  product_level_adjustment_boxes: 0,
   shopify_product_id: "8471325999293", // not the canonical Herbal Masala product
   product_name: "Vajrashakti",
   title: "Vajrashakti",
@@ -268,6 +270,7 @@ const VAJRASHAKTI: InventoryProductStock = {
 // An implicit (ungrouped) OMS variant -- catalog_variant_id null, 1 underlying row.
 const IMPLICIT: InventoryProductStock = {
   product_id: "prod-1",
+  product_level_adjustment_boxes: 0,
   shopify_product_id: null,
   product_name: "Ungrouped Product",
   title: "Ungrouped Product",
@@ -963,6 +966,7 @@ const PLATFORM_STOCK_FIXTURE: ProductPlatformStock = {
   product_id: "prod-1",
   product_title: "Vajrashakti",
   stock_date: "2026-09-11",
+  sold_this_month_packets: 25,
   platforms: [
     {
       platform: "shopify",
@@ -1148,6 +1152,83 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     expect(screen.queryByText(/Marketplace Adjustment History/i)).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Show Movement History" }))
     expect(screen.getByText(/Marketplace Adjustment History/i)).toBeInTheDocument()
+  })
+
+  it("shows ONE product-level 'Sold This Month' summary above Marketplace Stock", () => {
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: PLATFORM_STOCK_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+
+    renderWithProviders(<InventoryProductPage />)
+
+    const summaries = screen.getAllByTestId("monthly-sales-summary")
+    expect(summaries).toHaveLength(1) // once per product -- never per SKU or per platform
+    expect(within(summaries[0]).getByText("Sold This Month:")).toBeInTheDocument()
+    expect(within(summaries[0]).getByText("25 packets")).toBeInTheDocument()
+    // and it sits above the Marketplace Stock table
+    const marketplace = screen.getByText(/Marketplace Stock/)
+    expect(
+      summaries[0].compareDocumentPosition(marketplace) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
+  it("the marketplace section has no SKU selector and no Add Stock action", async () => {
+    const user = userEvent.setup()
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: PLATFORM_STOCK_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+
+    renderWithProviders(<InventoryProductPage />)
+
+    // The OMS variant card's own stock action is unrelated and stays; only
+    // the MARKETPLACE table must have no "Add Stock".
+    for (const label of ["Amazon", "Flipkart", "Blinkit", "Meesho", "Manual / Other"]) {
+      const row = screen.getByText(label).closest("tr") as HTMLElement
+      expect(within(row).queryByRole("button", { name: /add stock/i })).not.toBeInTheDocument()
+      expect(within(row).getByRole("button", { name: /^Record Sale$/ })).toBeInTheDocument()
+      expect(within(row).getByRole("button", { name: /^RTO$/ })).toBeInTheDocument()
+    }
+    await user.click(screen.getAllByRole("button", { name: /^Record Sale$/i })[0])
+    const dialog = screen.getByRole("dialog")
+    expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument()
+    expect(within(dialog).queryByText(/select a sku/i)).not.toBeInTheDocument()
+  })
+
+  it("shows 0 packets when nothing has been sold this month", () => {
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: { ...PLATFORM_STOCK_FIXTURE, sold_this_month_packets: 0 },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.getByText("0 packets")).toBeInTheDocument()
+  })
+
+  it("shows the product-level marketplace adjustment line only when there is one", () => {
+    setProduct({ ...HERBAL_MASALA, product_level_adjustment_boxes: -18, available_boxes: 612 })
+    renderWithProviders(<InventoryProductPage />)
+    const line = screen.getByTestId("product-level-adjustment")
+    expect(line).toHaveTextContent("-18 boxes")
+  })
+
+  it("does not show the marketplace adjustment line when it is zero", () => {
+    setProduct(HERBAL_MASALA)
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.queryByTestId("product-level-adjustment")).not.toBeInTheDocument()
   })
 
   it("existing Shopify product-detail rendering is unaffected by the new section", () => {

@@ -141,6 +141,12 @@ class InventoryProductStockResponse(BaseModel):
     """
 
     product_id: uuid.UUID
+    # Marketplace Sale/RTO effects that could not be attributed to one
+    # CatalogVariant (product with several OMS-visible variants, or none)
+    # -- ALREADY included in this product's `available_boxes`, shown
+    # separately so the header reconciles with the cards below it (which
+    # only include their own CatalogVariant-scoped ledger rows).
+    product_level_adjustment_boxes: int = 0
     # Shopify's own, immutable product id -- the ONLY safe key for the
     # frontend to scope any product-specific display behaviour by (e.g.
     # the canonical Herbal Masala product's pack-size labels). Never the

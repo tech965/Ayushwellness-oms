@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event"
 import { PlatformStockSection } from "@/components/inventory/platform-stock-section"
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import { useRecordProductMarketplaceMovement } from "@/services/platform-inventory"
-import type { ProductPlatformStock } from "@/types/platform-inventory"
+import type { PlatformStockSummaryRow, ProductPlatformStock } from "@/types/platform-inventory"
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
@@ -15,12 +15,31 @@ vi.mock("@/services/platform-inventory", () => ({
   useRecordProductMarketplaceMovement: vi.fn(),
 }))
 
-const mockedUseRecordProductMarketplaceMovement = vi.mocked(useRecordProductMarketplaceMovement)
+const mockedUseRecord = vi.mocked(useRecordProductMarketplaceMovement)
+
+function manualRow(
+  platform: string,
+  platform_label: string,
+  over: Partial<PlatformStockSummaryRow> = {}
+): PlatformStockSummaryRow {
+  return {
+    platform,
+    platform_label,
+    is_automatic: false,
+    opening_stock: 0,
+    stock_added: 0,
+    stock_deducted: 0,
+    current_stock: 0,
+    last_updated: null,
+    ...over,
+  }
+}
 
 const DATA: ProductPlatformStock = {
   product_id: "prod-1",
-  product_title: "Vajrashakti",
-  stock_date: "2026-09-18",
+  product_title: "Aayush Wellness Herbal Masala",
+  stock_date: "2026-09-21",
+  sold_this_month_packets: 25,
   platforms: [
     {
       platform: "shopify",
@@ -30,213 +49,232 @@ const DATA: ProductPlatformStock = {
       stock_added: 12,
       stock_deducted: 35,
       current_stock: 1200,
-      last_updated: "2026-09-18T10:00:00Z",
+      last_updated: "2026-09-21T10:00:00Z",
     },
-    {
-      platform: "amazon",
-      platform_label: "Amazon",
-      is_automatic: false,
+    manualRow("amazon", "Amazon", {
       opening_stock: 500,
-      stock_added: 50,
-      stock_deducted: 18,
-      current_stock: 532,
-      last_updated: "2026-09-18T09:00:00Z",
-    },
-    {
-      platform: "flipkart",
-      platform_label: "Flipkart",
-      is_automatic: false,
-      opening_stock: 0,
-      stock_added: 0,
-      stock_deducted: 0,
-      current_stock: 0,
-      last_updated: null,
-    },
+      stock_added: 2,
+      stock_deducted: 20,
+      current_stock: 482,
+      last_updated: "2026-09-21T09:00:00Z",
+    }),
+    manualRow("flipkart", "Flipkart"),
+    manualRow("blinkit", "Blinkit"),
+    manualRow("meesho", "Meesho"),
+    manualRow("manual_other", "Manual / Other"),
   ],
 }
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof PlatformStockSection>> = {}) {
   return {
     productId: "prod-1",
-    productTitle: "Vajrashakti",
+    productTitle: "Aayush Wellness Herbal Masala",
     isLoading: false,
     isError: false,
     error: null,
     data: DATA,
     onRetry: vi.fn(),
     canManage: true,
-    stockDate: "2026-09-18",
+    stockDate: "2026-09-21",
     ...overrides,
   }
 }
 
-function mutationStub(behaviour: "success" | "error" = "success") {
+function stub(behaviour: "success" | "error" = "success", quantityAfter = -18) {
   const mutateAsync = vi.fn(async () => {
     if (behaviour === "error") throw new Error("Server said no")
-    return { quantity_after: -18 }
+    return { quantity_after: quantityAfter }
   })
-  return { mutateAsync, isPending: false } as unknown as ReturnType<
-    typeof useRecordProductMarketplaceMovement
-  >
+  mockedUseRecord.mockReturnValue({
+    mutateAsync,
+    isPending: false,
+  } as unknown as ReturnType<typeof useRecordProductMarketplaceMovement>)
+  return mutateAsync
 }
 
-describe("PlatformStockSection — ONE table per product, no SKU selection", () => {
-  it("renders a single combined table -- one Shopify row and every manual platform row, no per-SKU grouping", () => {
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub())
+const MANUAL_PLATFORM_LABELS = ["Amazon", "Flipkart", "Blinkit", "Meesho", "Manual / Other"]
+
+describe("PlatformStockSection — ONE table per product", () => {
+  it("renders a single combined table titled with the product name", () => {
+    stub()
     const { container } = renderWithProviders(<PlatformStockSection {...baseProps()} />)
 
     expect(container.querySelectorAll("table")).toHaveLength(1)
+    expect(screen.getByText("Marketplace Stock — Aayush Wellness Herbal Masala")).toBeInTheDocument()
     expect(screen.getByText("Shopify")).toBeInTheDocument()
     expect(screen.getByText("Automatic")).toBeInTheDocument()
-    expect(screen.getByText("Amazon")).toBeInTheDocument()
-    expect(screen.getByText("Flipkart")).toBeInTheDocument()
-    expect(screen.getByText("532")).toBeInTheDocument() // Amazon current stock
+    expect(screen.getByText("482")).toBeInTheDocument() // Amazon current stock
   })
 
   it("renders 'Not available' (never a blank cell or a fabricated 0) when Shopify's historical balance can't be reconstructed", () => {
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub())
-    const dataWithUnavailableShopify: ProductPlatformStock = {
+    stub()
+    const data: ProductPlatformStock = {
       ...DATA,
       platforms: DATA.platforms.map((row) =>
         row.platform === "shopify" ? { ...row, current_stock: null, opening_stock: null } : row
       ),
     }
-
-    renderWithProviders(<PlatformStockSection {...baseProps({ data: dataWithUnavailableShopify })} />)
+    renderWithProviders(<PlatformStockSection {...baseProps({ data })} />)
 
     expect(screen.getAllByText("Not available")).toHaveLength(1)
-    const shopifyRow = screen.getByText("Shopify").closest("tr")
-    expect(shopifyRow).not.toBeNull()
-    expect(within(shopifyRow as HTMLElement).queryByText("0")).not.toBeInTheDocument()
+    const shopifyRow = screen.getByText("Shopify").closest("tr") as HTMLElement
+    expect(within(shopifyRow).queryByText("0")).not.toBeInTheDocument()
+  })
+})
+
+describe("PlatformStockSection — only Record Sale and RTO", () => {
+  it("has no Add Stock action anywhere", () => {
+    stub()
+    renderWithProviders(<PlatformStockSection {...baseProps()} />)
+    expect(screen.queryByRole("button", { name: /add stock/i })).not.toBeInTheDocument()
   })
 
-  it("shows Add Stock, Record Sale, and RTO for every manual platform row -- never for Shopify", () => {
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub())
+  it.each(MANUAL_PLATFORM_LABELS)("%s shows exactly Record Sale and RTO", (label) => {
+    stub()
     renderWithProviders(<PlatformStockSection {...baseProps()} />)
 
-    expect(screen.getAllByRole("button", { name: /^Add Stock$/i })).toHaveLength(2) // Amazon, Flipkart
-    expect(screen.getAllByRole("button", { name: /^Record Sale$/i })).toHaveLength(2)
-    expect(screen.getAllByRole("button", { name: /^RTO$/i })).toHaveLength(2)
-    expect(screen.getByText("Synced from Shopify")).toBeInTheDocument()
+    const row = screen.getByText(label).closest("tr") as HTMLElement
+    const buttons = within(row)
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim())
+    expect(buttons).toEqual(["Record Sale", "RTO"])
   })
 
-  it("hides all three actions for a read-only user", () => {
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub())
+  it("Shopify stays 'Synced from Shopify' with no manual controls", () => {
+    stub()
+    renderWithProviders(<PlatformStockSection {...baseProps()} />)
+
+    const row = screen.getByText("Shopify").closest("tr") as HTMLElement
+    expect(within(row).getByText("Synced from Shopify")).toBeInTheDocument()
+    expect(within(row).queryAllByRole("button")).toHaveLength(0)
+  })
+
+  it("hides both actions for a read-only user", () => {
+    stub()
     renderWithProviders(<PlatformStockSection {...baseProps({ canManage: false })} />)
 
-    expect(screen.queryByRole("button", { name: /^Add Stock$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /record sale/i })).not.toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /^RTO$/i })).not.toBeInTheDocument()
-    expect(screen.getAllByText("Read-only")).toHaveLength(2)
+    expect(screen.getAllByText("Read-only")).toHaveLength(5)
   })
+})
 
-  it("never shows a SKU field anywhere in the Add Stock dialog", async () => {
+describe("PlatformStockSection — product-level dialogs, no SKU", () => {
+  it.each(["Record Sale", "RTO"])("the %s dialog never shows a SKU field", async (action) => {
     const user = userEvent.setup()
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub())
+    stub()
     renderWithProviders(<PlatformStockSection {...baseProps()} />)
 
-    await user.click(screen.getAllByRole("button", { name: /^Add Stock$/i })[0])
+    const amazon = screen.getByText("Amazon").closest("tr") as HTMLElement
+    await user.click(within(amazon).getByRole("button", { name: new RegExp(`^${action}$`) }))
     const dialog = screen.getByRole("dialog")
-    expect(within(dialog).queryByText(/sku/i)).not.toBeInTheDocument()
+
     expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument()
+    expect(within(dialog).queryByText(/sku/i)).not.toBeInTheDocument()
     expect(within(dialog).queryByText(/select a sku/i)).not.toBeInTheDocument()
+    expect(within(dialog).getByText(/Product: Aayush Wellness Herbal Masala/)).toBeInTheDocument()
   })
 
-  it("Add Stock asks for a packet quantity and sends it as quantity_packets", async () => {
+  it("Record Sale sends the packet quantity for the product and previews the platform balance", async () => {
     const user = userEvent.setup()
-    const mutateAsync = vi.fn().mockResolvedValue({ quantity_after: 582 })
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue({
-      mutateAsync,
-      isPending: false,
-    } as unknown as ReturnType<typeof useRecordProductMarketplaceMovement>)
+    const mutateAsync = stub("success", 462)
     renderWithProviders(<PlatformStockSection {...baseProps()} />)
 
-    await user.click(screen.getAllByRole("button", { name: /^Add Stock$/i })[0]) // Amazon
+    const amazon = screen.getByText("Amazon").closest("tr") as HTMLElement
+    await user.click(within(amazon).getByRole("button", { name: /^Record Sale$/ }))
     const dialog = screen.getByRole("dialog")
-    expect(within(dialog).getByText("Add Stock — Amazon")).toBeInTheDocument()
-    const quantityInput = within(dialog).getByLabelText(/Quantity to add/i)
-    expect(quantityInput).toHaveValue(null) // starts empty
+    expect(within(dialog).getByText("Record Sale — Amazon")).toBeInTheDocument()
 
-    await user.type(quantityInput, "50")
-    expect(within(dialog).getByText("New Stock: 582 outers")).toBeInTheDocument() // 532 + 50
+    const input = within(dialog).getByLabelText(/Quantity Sold/i)
+    expect(input).toHaveValue(null) // starts empty
+    await user.type(input, "20")
+    expect(within(dialog).getByText("New Stock: 462 outers")).toBeInTheDocument() // 482 - 20
+    await user.type(within(dialog).getByLabelText(/Reason/i), "Marketplace sale")
+    await user.click(within(dialog).getByRole("button", { name: /^Record Sale$/ }))
 
-    await user.click(within(dialog).getByRole("button", { name: /^Add Stock$/i }))
-    expect(mutateAsync).toHaveBeenCalledWith(
-      expect.objectContaining({
-        platform: "amazon",
-        movement_type: "stock_added",
-        quantity_packets: 50,
-      })
-    )
+    expect(mutateAsync).toHaveBeenCalledWith({
+      platform: "amazon",
+      movement_type: "sale",
+      quantity_packets: 20,
+      reason: "Marketplace sale",
+      stock_date: "2026-09-21",
+    })
   })
 
-  it("Record Sale sends movement_type sale and allows the preview to go negative (never blocked)", async () => {
+  it("a Sale may take the platform balance negative without being blocked", async () => {
     const user = userEvent.setup()
-    const mutateAsync = vi.fn().mockResolvedValue({ quantity_after: -468 })
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue({
-      mutateAsync,
-      isPending: false,
-    } as unknown as ReturnType<typeof useRecordProductMarketplaceMovement>)
+    stub()
     renderWithProviders(<PlatformStockSection {...baseProps()} />)
 
-    await user.click(screen.getAllByRole("button", { name: /^Record Sale$/i })[0]) // Amazon, 532
+    const flipkart = screen.getByText("Flipkart").closest("tr") as HTMLElement
+    await user.click(within(flipkart).getByRole("button", { name: /^Record Sale$/ }))
     const dialog = screen.getByRole("dialog")
-    const quantityInput = within(dialog).getByLabelText(/Quantity Sold/i)
-    await user.type(quantityInput, "1000") // more than current stock
+    await user.type(within(dialog).getByLabelText(/Quantity Sold/i), "20")
 
-    expect(within(dialog).getByText("New Stock: -468 outers")).toBeInTheDocument()
-    expect(within(dialog).getByRole("button", { name: /^Record Sale$/i })).toBeEnabled()
-
-    await user.click(within(dialog).getByRole("button", { name: /^Record Sale$/i }))
-    expect(mutateAsync).toHaveBeenCalledWith(
-      expect.objectContaining({ platform: "amazon", movement_type: "sale", quantity_packets: 1000 })
-    )
+    expect(within(dialog).getByText("New Stock: -20 outers")).toBeInTheDocument()
+    expect(within(dialog).getByRole("button", { name: /^Record Sale$/ })).toBeEnabled()
   })
 
-  it("RTO sends movement_type rto and increases the balance", async () => {
+  it("RTO sends movement_type rto and previews an increase", async () => {
     const user = userEvent.setup()
-    const mutateAsync = vi.fn().mockResolvedValue({ quantity_after: 534 })
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue({
-      mutateAsync,
-      isPending: false,
-    } as unknown as ReturnType<typeof useRecordProductMarketplaceMovement>)
+    const mutateAsync = stub("success", 484)
     renderWithProviders(<PlatformStockSection {...baseProps()} />)
 
-    await user.click(screen.getAllByRole("button", { name: /^RTO$/i })[0]) // Amazon
+    const amazon = screen.getByText("Amazon").closest("tr") as HTMLElement
+    await user.click(within(amazon).getByRole("button", { name: /^RTO$/ }))
     const dialog = screen.getByRole("dialog")
     expect(within(dialog).getByText("Record RTO — Amazon")).toBeInTheDocument()
-    const quantityInput = within(dialog).getByLabelText(/Quantity Returned/i)
-    await user.type(quantityInput, "2")
-    expect(within(dialog).getByText("New Stock: 534 outers")).toBeInTheDocument() // 532 + 2
 
-    await user.click(within(dialog).getByRole("button", { name: /^Record RTO$/i }))
+    await user.type(within(dialog).getByLabelText(/Quantity Returned/i), "2")
+    expect(within(dialog).getByText("New Stock: 484 outers")).toBeInTheDocument() // 482 + 2
+    await user.click(within(dialog).getByRole("button", { name: /^Record RTO$/ }))
+
     expect(mutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({ platform: "amazon", movement_type: "rto", quantity_packets: 2 })
     )
   })
 
-  it("keeps the dialog open and shows the API error on a failed save", async () => {
+  it("rejects an empty / zero / negative quantity (Save stays disabled)", async () => {
     const user = userEvent.setup()
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub("error"))
+    stub()
     renderWithProviders(<PlatformStockSection {...baseProps()} />)
 
-    await user.click(screen.getAllByRole("button", { name: /^Add Stock$/i })[0])
+    const amazon = screen.getByText("Amazon").closest("tr") as HTMLElement
+    await user.click(within(amazon).getByRole("button", { name: /^Record Sale$/ }))
     const dialog = screen.getByRole("dialog")
-    await user.type(within(dialog).getByLabelText(/Quantity to add/i), "50")
-    await user.click(within(dialog).getByRole("button", { name: /^Add Stock$/i }))
+    const save = within(dialog).getByRole("button", { name: /^Record Sale$/ })
+    expect(save).toBeDisabled()
+    for (const bad of ["0", "-3"]) {
+      await user.clear(within(dialog).getByLabelText(/Quantity Sold/i))
+      await user.type(within(dialog).getByLabelText(/Quantity Sold/i), bad)
+      expect(save).toBeDisabled()
+    }
+  })
+
+  it("keeps the dialog open when the server rejects the save", async () => {
+    const user = userEvent.setup()
+    stub("error")
+    renderWithProviders(<PlatformStockSection {...baseProps()} />)
+
+    const amazon = screen.getByText("Amazon").closest("tr") as HTMLElement
+    await user.click(within(amazon).getByRole("button", { name: /^Record Sale$/ }))
+    const dialog = screen.getByRole("dialog")
+    await user.type(within(dialog).getByLabelText(/Quantity Sold/i), "5")
+    await user.click(within(dialog).getByRole("button", { name: /^Record Sale$/ }))
 
     expect(screen.getByRole("dialog")).toBeInTheDocument()
   })
+})
 
+describe("PlatformStockSection — states", () => {
   it("shows a clean empty state when there is no marketplace stock data", () => {
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub())
-    renderWithProviders(
-      <PlatformStockSection {...baseProps({ data: { ...DATA, platforms: [] } })} />
-    )
+    stub()
+    renderWithProviders(<PlatformStockSection {...baseProps({ data: { ...DATA, platforms: [] } })} />)
     expect(screen.getByText("No marketplace stock data for this product")).toBeInTheDocument()
   })
 
-  it("shows a loading state without crashing or leaking data", () => {
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub())
+  it("shows a loading state without leaking data", () => {
+    stub()
     renderWithProviders(<PlatformStockSection {...baseProps({ isLoading: true, data: undefined })} />)
     expect(screen.queryByText("Amazon")).not.toBeInTheDocument()
   })
@@ -244,16 +282,15 @@ describe("PlatformStockSection — ONE table per product, no SKU selection", () 
   it("shows an error state and calls onRetry", async () => {
     const user = userEvent.setup()
     const onRetry = vi.fn()
-    mockedUseRecordProductMarketplaceMovement.mockReturnValue(mutationStub())
-
+    stub()
     renderWithProviders(
       <PlatformStockSection
         {...baseProps({ isError: true, error: new Error("boom"), data: undefined, onRetry })}
       />
     )
-    const retryButton = screen.queryByRole("button", { name: /retry/i })
-    if (retryButton) {
-      await user.click(retryButton)
+    const retry = screen.queryByRole("button", { name: /retry/i })
+    if (retry) {
+      await user.click(retry)
       expect(onRetry).toHaveBeenCalled()
     }
   })

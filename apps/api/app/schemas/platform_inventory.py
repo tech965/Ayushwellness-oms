@@ -137,19 +137,26 @@ class ProductPlatformStockResponse(BaseModel):
     product_title: str
     stock_date: date
     platforms: list[PlatformStockSummaryRow]
+    # Packets sold across every manual platform during the CURRENT IST
+    # calendar month (independent of `stock_date`) -- SALE movements only,
+    # summed from `ProductMarketplaceMovement.quantity_packets`. Never
+    # counts RTO, and never Shopify's own automatic movements.
+    sold_this_month_packets: int = 0
 
 
 class ProductMarketplaceMovementCreateRequest(BaseModel):
-    """Record ONE product-level manual marketplace movement (Add Stock /
-    Record Sale / RTO) -- NO SKU is selected or implied. The business
-    user enters a bare packet quantity for the whole product on this
-    platform; see `PlatformInventoryService.record_product_movement` for
-    the packet->outer conversion and the uniform-pack-size safety check
+    """Record ONE product-level manual marketplace movement (Record Sale /
+    RTO) -- NO SKU is selected or implied. The business user enters a
+    bare packet quantity for the whole product on this platform; see
+    `PlatformInventoryService.record_product_movement` for the
+    packet->outer conversion and the uniform-pack-size safety check
     that can reject this request (422) rather than guess an allocation.
+    A Sale is a negative and an RTO a positive effect on BOTH the
+    platform balance and the product's OMS total stock.
     """
 
     platform: str = Field(max_length=50)
-    movement_type: Literal["stock_added", "sale", "rto"]
+    movement_type: Literal["sale", "rto"]
     quantity_packets: int = Field(gt=0, description="Quantity in packets, as entered by staff.")
     reason: str | None = Field(default=None, max_length=255)
     stock_date: date | None = Field(

@@ -529,7 +529,7 @@ async def test_product_platform_stock_summary_shows_opening_added_deducted_curre
     await service.record_product_movement(
         product.id,
         platform=InventoryPlatform.AMAZON,
-        movement_type=ProductMarketplaceMovementType.STOCK_ADDED,
+        movement_type=ProductMarketplaceMovementType.RTO,
         quantity_packets=500,
         reason=None,
         stock_date=yesterday,
@@ -538,7 +538,7 @@ async def test_product_platform_stock_summary_shows_opening_added_deducted_curre
     await service.record_product_movement(
         product.id,
         platform=InventoryPlatform.AMAZON,
-        movement_type=ProductMarketplaceMovementType.STOCK_ADDED,
+        movement_type=ProductMarketplaceMovementType.RTO,
         quantity_packets=50,
         reason=None,
         stock_date=today,
@@ -1131,7 +1131,7 @@ async def test_amazon_platform_data_is_unaffected_by_the_shopify_fix(
     await service.record_product_movement(
         product.id,
         platform=InventoryPlatform.AMAZON,
-        movement_type=ProductMarketplaceMovementType.STOCK_ADDED,
+        movement_type=ProductMarketplaceMovementType.RTO,
         quantity_packets=500,
         reason=None,
         stock_date=target_date,
@@ -1365,7 +1365,7 @@ async def test_product_level_movement_never_modifies_shopify_inventory_quantity(
     await service.record_product_movement(
         product.id,
         platform=InventoryPlatform.MEESHO,
-        movement_type=ProductMarketplaceMovementType.STOCK_ADDED,
+        movement_type=ProductMarketplaceMovementType.RTO,
         quantity_packets=5,
         reason=None,
         stock_date=ist_today(),
@@ -1435,7 +1435,7 @@ async def test_marketplace_platform_is_preserved_across_multiple_platforms(
         await service.record_product_movement(
             product.id,
             platform=platform,
-            movement_type=ProductMarketplaceMovementType.STOCK_ADDED,
+            movement_type=ProductMarketplaceMovementType.RTO,
             quantity_packets=qty,
             reason=None,
             stock_date=today,
@@ -1458,7 +1458,7 @@ async def test_reason_is_optional_and_trimmed(db_session: AsyncSession) -> None:
     no_reason = await service.record_product_movement(
         product.id,
         platform=InventoryPlatform.AMAZON,
-        movement_type=ProductMarketplaceMovementType.STOCK_ADDED,
+        movement_type=ProductMarketplaceMovementType.RTO,
         quantity_packets=1,
         reason="   ",
         stock_date=ist_today(),
@@ -1469,7 +1469,7 @@ async def test_reason_is_optional_and_trimmed(db_session: AsyncSession) -> None:
     with_reason = await service.record_product_movement(
         product.id,
         platform=InventoryPlatform.AMAZON,
-        movement_type=ProductMarketplaceMovementType.STOCK_ADDED,
+        movement_type=ProductMarketplaceMovementType.RTO,
         quantity_packets=1,
         reason="  Warehouse received  ",
         stock_date=ist_today(),
@@ -1548,7 +1548,7 @@ async def test_uniform_pack_size_greater_than_one_converts_packets_to_outers(
     movement = await service.record_product_movement(
         product.id,
         platform=InventoryPlatform.AMAZON,
-        movement_type=ProductMarketplaceMovementType.STOCK_ADDED,
+        movement_type=ProductMarketplaceMovementType.RTO,
         quantity_packets=10,
         reason=None,
         stock_date=ist_today(),

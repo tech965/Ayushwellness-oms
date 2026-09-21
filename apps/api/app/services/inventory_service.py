@@ -315,9 +315,7 @@ class InventoryService:
             )
             if variant is None:
                 continue
-            required_boxes = _ceil_div(
-                item.quantity * variant.pack_size, variant.packets_per_box
-            )
+            required_boxes = _ceil_div(item.quantity * variant.pack_size, variant.packets_per_box)
             if variant.available_quantity < required_boxes:
                 shortages.append(
                     {
@@ -637,6 +635,80 @@ class InventoryService:
             metadata={"reason": reason.strip()},
         )
         await self.session.commit()
+        return adjustment
+
+    async def get_product_total(self, product_id: uuid.UUID) -> int:
+        """The product's OMS total stock, in boxes/outers: every real
+        `ProductVariant.available_quantity` + every CatalogVariant-scoped
+        ledger row + every product-scoped ledger row -- exactly what the
+        product detail header shows. Recomputed live; nothing cached.
+        """
+        variants = await self.variants.list_for_product(product_id)
+        cv_totals = await self.catalog_variant_adjustments.sum_by_product(product_id)
+        product_level = await self.catalog_variant_adjustments.sum_product_level(product_id)
+        return sum(v.available_quantity for v in variants) + sum(cv_totals.values()) + product_level
+
+    async def apply_marketplace_stock_effect(
+        self,
+        *,
+        product_id: uuid.UUID,
+        quantity_delta: int,
+        reason: str,
+        actor: User | None,
+        product_marketplace_movement_id: uuid.UUID,
+    ) -> CatalogVariantStockAdjustment:
+        """The OMS-total effect of ONE marketplace Sale/RTO (negative /
+        positive `quantity_delta`, in outers), recorded on the SAME
+        ledger a manual CatalogVariant Edit Stock uses -- so the product's
+        total changes without redistributing anything across the
+        underlying SKUs, and there is no second source of truth.
+
+        Scope is deterministic, never chosen: if the product's OMS-visible
+        variants are exactly ONE real `CatalogVariant`, the row attaches
+        to it (its card and the product header both move); otherwise
+        (several CatalogVariants, or an ungrouped product) attaching to
+        any one would be an arbitrary allocation, so the row is
+        PRODUCT-scoped and counts toward the product total only.
+
+        Deliberately does NOT commit: `PlatformInventoryService.
+        record_product_movement` writes the `ProductMarketplaceMovement`
+        and this row in ONE transaction and commits (or rolls back) both
+        together. No `ProductVariant` row is read for a decision or
+        written to.
+        """
+        _product, groups = await self.get_oms_variants_for_product(product_id)
+        cv_id = (
+            groups[0].catalog_variant_id
+            if len(groups) == 1 and groups[0].catalog_variant_id is not None
+            else None
+        )
+        if cv_id is not None:
+            previous_total = await self.get_catalog_variant_total(cv_id)
+        else:
+            previous_total = await self.get_product_total(product_id)
+        new_total = previous_total + quantity_delta
+
+        adjustment = await self.catalog_variant_adjustments.create(
+            catalog_variant_id=cv_id,
+            product_id=None if cv_id is not None else product_id,
+            product_marketplace_movement_id=product_marketplace_movement_id,
+            quantity_delta=quantity_delta,
+            quantity_after=new_total,
+            reason=reason[:255],
+            actor_user_id=actor.id if actor else None,
+        )
+        await self.audit.record(
+            user=actor,
+            action="inventory.marketplace_stock_effect",
+            entity_type="catalog_variant" if cv_id is not None else "product",
+            entity_id=str(cv_id if cv_id is not None else product_id),
+            previous_value={"available_boxes": previous_total},
+            new_value={"available_boxes": new_total},
+            metadata={
+                "product_marketplace_movement_id": str(product_marketplace_movement_id),
+                "reason": reason,
+            },
+        )
         return adjustment
 
     async def update_packets_per_box(

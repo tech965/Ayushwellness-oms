@@ -207,13 +207,19 @@ class PlatformInventoryService:
         stock_date: date_type | None,
         actor,
     ) -> ProductMarketplaceMovement:
-        """Product-level Add Stock / Record Sale / RTO -- staff enters
-        ONLY a packet quantity for the whole product on this platform,
-        never a SKU and never the resulting total. `Sale` is a negative
-        delta, `Add Stock`/`RTO` are positive -- recorded as their own
-        distinct `movement_type` so history never merges an RTO into a
-        generic "stock added" bucket (Record Sale = -qty, RTO/Returned
-        = +qty are separate events, never netted before being stored).
+        """Product-level Record Sale / RTO -- staff enters ONLY a packet
+        quantity for the whole product on this platform, never a SKU and
+        never the resulting total. `Sale` is a negative delta and `RTO`
+        a positive one, recorded as their own distinct `movement_type`
+        (never netted before being stored).
+
+        TWO ledgers change, in ONE transaction: the marketplace-channel
+        `ProductMarketplaceMovement` (this platform's own balance and
+        history) AND the product's OMS total stock, via
+        `InventoryService.apply_marketplace_stock_effect` (the same
+        ledger a manual CatalogVariant Edit Stock uses). If either write
+        fails, the whole operation rolls back -- neither ledger is left
+        ahead of the other.
 
         The packet quantity is converted to outers via
         `_product_conversion_factor` (this product's own approved
@@ -221,8 +227,13 @@ class PlatformInventoryService:
         `InventoryService.apply_dispatch` already uses) -- raises
         instead of guessing when that conversion isn't deterministic.
         No `ProductVariant` row is read for a stock decision or written
-        to by this method.
+        to by this method. Add Stock is not a marketplace operation.
         """
+        if movement_type not in (
+            ProductMarketplaceMovementType.SALE,
+            ProductMarketplaceMovementType.RTO,
+        ):
+            raise ValidationError("Only a Sale or an RTO can be recorded for a marketplace.")
         if quantity_packets <= 0:
             raise ValidationError("Quantity must be a positive number.")
         if platform not in InventoryPlatform.ALL:
@@ -252,6 +263,42 @@ class PlatformInventoryService:
         new_quantity = previous_quantity + delta
         cleaned_reason = reason.strip() if reason and reason.strip() else None
 
+        try:
+            movement = await self._write_movement_and_oms_effect(
+                product_id=product_id,
+                platform=platform,
+                movement_type=movement_type,
+                quantity_packets=quantity_packets,
+                delta=delta,
+                new_quantity=new_quantity,
+                previous_quantity=previous_quantity,
+                resolved_date=resolved_date,
+                cleaned_reason=cleaned_reason,
+                actor=actor,
+            )
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
+        return movement
+
+    async def _write_movement_and_oms_effect(
+        self,
+        *,
+        product_id: uuid.UUID,
+        platform: str,
+        movement_type: ProductMarketplaceMovementType,
+        quantity_packets: int,
+        delta: int,
+        new_quantity: int,
+        previous_quantity: int,
+        resolved_date: date_type,
+        cleaned_reason: str | None,
+        actor,
+    ) -> ProductMarketplaceMovement:
+        """Flush-only (never commits) -- `record_product_movement` owns
+        the single commit/rollback covering both ledger writes.
+        """
         movement = await self.product_movements.create(
             product_id=product_id,
             platform=platform,
@@ -289,7 +336,19 @@ class PlatformInventoryService:
                 "reason": cleaned_reason,
             },
         )
-        await self.session.commit()
+
+        label = InventoryPlatform.LABELS.get(platform, platform)
+        kind = "sale" if movement_type == ProductMarketplaceMovementType.SALE else "RTO"
+        oms_reason = f"{label} {kind}: {quantity_packets} packets"
+        if cleaned_reason:
+            oms_reason = f"{oms_reason} - {cleaned_reason}"
+        await self.inventory.apply_marketplace_stock_effect(
+            product_id=product_id,
+            quantity_delta=delta,
+            reason=oms_reason,
+            actor=actor,
+            product_marketplace_movement_id=movement.id,
+        )
         return movement
 
     # ------------------------------------------------------------------
@@ -415,11 +474,26 @@ class PlatformInventoryService:
                 )
             )
 
+        # "Sold This Month": the CURRENT IST calendar month (independent
+        # of the selected `stock_date`), SALE movements only, summed from
+        # the packet quantities staff actually entered.
+        today = ist_today()
+        month_start = today.replace(day=1)
+        next_month_start = (
+            month_start.replace(year=month_start.year + 1, month=1)
+            if month_start.month == 12
+            else month_start.replace(month=month_start.month + 1)
+        )
+        sold_this_month = await self.product_movements.sum_sold_packets(
+            product_id=product_id, date_from=month_start, date_to_exclusive=next_month_start
+        )
+
         return ProductPlatformStockResponse(
             product_id=product.id,
             product_title=product.title_override or product.title,
             stock_date=stock_date,
             platforms=rows,
+            sold_this_month_packets=sold_this_month,
         )
 
     # ------------------------------------------------------------------

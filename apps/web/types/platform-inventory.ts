@@ -111,20 +111,31 @@ export interface ProductPlatformStock {
   product_title: string
   stock_date: string
   platforms: PlatformStockSummaryRow[]
+  /** Packets sold across every manual platform in the CURRENT IST
+   * calendar month -- Sale movements only, computed by the backend from
+   * real records (never RTO, never Shopify's automatic movements).
+   */
+  sold_this_month_packets: number
 }
 
-/** Add Stock / Record Sale / RTO -- for the whole PRODUCT on one
- * platform, no SKU. `quantity_packets` is what the business user
- * actually typed; the backend converts it to outers using this
- * product's own pack_size/packets_per_box (422 if those aren't uniform
- * across the product's real SKUs -- see
- * `PlatformInventoryService.record_product_movement`).
+/** A marketplace movement's type. `stock_added` is legacy only (no UI or
+ * API path creates it any more); Sale and RTO are the only operations.
  */
 export type ProductMarketplaceMovementType = "stock_added" | "sale" | "rto"
 
+/** What the Record Sale / RTO dialogs may submit -- for the whole PRODUCT
+ * on one platform, no SKU. `quantity_packets` is what the business user
+ * actually typed; the backend converts it to outers using this
+ * product's own pack_size/packets_per_box (422 if those aren't uniform
+ * across the product's real SKUs -- see
+ * `PlatformInventoryService.record_product_movement`) and applies the
+ * same effect to the product's OMS total stock in one transaction.
+ */
+export type MarketplaceOperation = "sale" | "rto"
+
 export interface ProductMarketplaceMovementCreateInput {
   platform: ManualPlatform
-  movement_type: ProductMarketplaceMovementType
+  movement_type: MarketplaceOperation
   quantity_packets: number
   reason?: string
   /** `YYYY-MM-DD` (IST). Omit to default to today (IST) on the backend. */
