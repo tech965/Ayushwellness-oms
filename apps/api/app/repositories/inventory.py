@@ -296,6 +296,21 @@ class CatalogVariantStockAdjustmentRepository(AppendOnlyRepository[CatalogVarian
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_for_movement(
+        self, product_marketplace_movement_id: uuid.UUID
+    ) -> CatalogVariantStockAdjustment | None:
+        """The OMS-total ledger row a marketplace movement wrote (there is
+        at most one -- the column is unique), or None for a movement that
+        pre-dates OMS-stock linking and so never had an OMS effect.
+        """
+        result = await self.session.execute(
+            select(CatalogVariantStockAdjustment).where(
+                CatalogVariantStockAdjustment.product_marketplace_movement_id
+                == product_marketplace_movement_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def sum_for_catalog_variant(self, catalog_variant_id: uuid.UUID) -> int:
         """Cumulative reconciliation offset recorded so far -- 0 with no
         prior adjustments. Summed live, never cached, so it can never

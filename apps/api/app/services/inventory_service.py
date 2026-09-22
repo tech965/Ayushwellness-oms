@@ -656,32 +656,43 @@ class InventoryService:
         reason: str,
         actor: User | None,
         product_marketplace_movement_id: uuid.UUID,
+        catalog_variant_id: uuid.UUID | None = None,
+        product_level: bool = False,
     ) -> CatalogVariantStockAdjustment:
-        """The OMS-total effect of ONE marketplace Sale/RTO (negative /
+        """The OMS-total effect of ONE marketplace movement (negative /
         positive `quantity_delta`, in outers), recorded on the SAME
         ledger a manual CatalogVariant Edit Stock uses -- so the product's
         total changes without redistributing anything across the
         underlying SKUs, and there is no second source of truth.
 
-        Scope is deterministic, never chosen: if the product's OMS-visible
-        variants are exactly ONE real `CatalogVariant`, the row attaches
-        to it (its card and the product header both move); otherwise
-        (several CatalogVariants, or an ungrouped product) attaching to
-        any one would be an arbitrary allocation, so the row is
-        PRODUCT-scoped and counts toward the product total only.
+        Scope is always deterministic, never chosen by this method:
+          * `catalog_variant_id` given: the row attaches to exactly that
+            OMS-visible variant (a variant-scoped product such as Herbal
+            Masala -- Gold's movement moves Gold's card only).
+          * `product_level=True`: forced product-scoped (used to reverse
+            a row that was itself product-scoped).
+          * neither: resolved from the product -- exactly ONE real
+            `CatalogVariant` -> it; otherwise (an ungrouped product)
+            attaching to any one would be an arbitrary allocation, so the
+            row is PRODUCT-scoped and counts toward the product total only.
 
-        Deliberately does NOT commit: `PlatformInventoryService.
-        record_product_movement` writes the `ProductMarketplaceMovement`
-        and this row in ONE transaction and commits (or rolls back) both
-        together. No `ProductVariant` row is read for a decision or
-        written to.
+        Deliberately does NOT commit: `PlatformInventoryService` writes
+        the `ProductMarketplaceMovement` and this row in ONE transaction
+        and commits (or rolls back) both together. No `ProductVariant`
+        row is read for a decision or written to.
         """
-        _product, groups = await self.get_oms_variants_for_product(product_id)
-        cv_id = (
-            groups[0].catalog_variant_id
-            if len(groups) == 1 and groups[0].catalog_variant_id is not None
-            else None
-        )
+        cv_id: uuid.UUID | None
+        if product_level:
+            cv_id = None
+        elif catalog_variant_id is not None:
+            cv_id = catalog_variant_id
+        else:
+            _product, groups = await self.get_oms_variants_for_product(product_id)
+            cv_id = (
+                groups[0].catalog_variant_id
+                if len(groups) == 1 and groups[0].catalog_variant_id is not None
+                else None
+            )
         if cv_id is not None:
             previous_total = await self.get_catalog_variant_total(cv_id)
         else:

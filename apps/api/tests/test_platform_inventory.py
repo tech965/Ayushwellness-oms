@@ -1592,7 +1592,8 @@ async def test_record_product_marketplace_movement_endpoint_end_to_end(
         rows = {r["platform"]: r for r in stock.json()["data"]["platforms"]}
         assert rows["amazon"]["current_stock"] == -18
         # ONE table per product -- a flat platforms list, never a per-SKU breakdown
-        assert "variants" not in stock.json()["data"]
+        assert stock.json()["data"]["scope"] == "product"
+        assert stock.json()["data"]["variants"] == []
 
 
 async def test_record_product_marketplace_movement_requires_inventory_manage(

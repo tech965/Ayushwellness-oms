@@ -179,17 +179,17 @@ async def test_each_event_creates_exactly_one_movement_and_one_linked_ledger_row
     assert "Marketplace sale" in ledger[sale.id].reason
 
 
-async def test_multi_catalog_variant_product_gets_a_product_level_row_and_no_card_moves(
+async def test_multi_catalog_variant_product_requires_a_variant_and_never_chooses_one(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
+    """Two or more CatalogVariants: the movement MUST name its OMS-visible
+    variant -- it is never defaulted to a flavour, and nothing is written.
+    """
     product, _, _ = await _make_grouped_product(
         db_session,
         key="OMS3",
         groups={
-            "Gold": [
-                {"sku": "O3-G60", "available_quantity": 10},
-                {"sku": "O3-G120", "available_quantity": 20},
-            ],
+            "Gold": [{"sku": "O3-G60", "available_quantity": 10}],
             "Red": [{"sku": "O3-R60", "available_quantity": 40}],
             "Blue": [{"sku": "O3-B60", "available_quantity": 70}],
         },
@@ -197,19 +197,10 @@ async def test_multi_catalog_variant_product_gets_a_product_level_row_and_no_car
     async with await make_authenticated_client(
         db_session, permission_codes=["inventory.read", "inventory.manage"]
     ) as client:
-        await _post(client, product.id, "amazon", "sale", 20)
-        body = await _stock(client, product.id)
-
-    assert body["available_boxes"] == 120 and body["total_packets"] == 120  # 140 - 20
-    assert body["product_level_adjustment_boxes"] == -20
-    # no flavour was chosen: every card is exactly what the SKUs say
-    assert {g["name"]: g["available_boxes"] for g in body["oms_variants"]} == {
-        "Gold": 30,
-        "Red": 40,
-        "Blue": 70,
-    }
-    row = (await db_session.execute(select(CatalogVariantStockAdjustment))).scalars().one()
-    assert row.catalog_variant_id is None and row.product_id == product.id
+        response = await _post(client, product.id, "amazon", "sale", 20)
+    assert response.status_code == 422
+    assert await _count(db_session, ProductMarketplaceMovement) == 0
+    assert await _count(db_session, CatalogVariantStockAdjustment) == 0
 
 
 async def test_product_with_no_catalog_variant_gets_a_product_level_row(
@@ -222,6 +213,49 @@ async def test_product_with_no_catalog_variant_gets_a_product_level_row(
         await _post(client, product.id, "blinkit", "sale", 5)
         body = await _stock(client, product.id)
     assert body["available_boxes"] == 45 and body["product_level_adjustment_boxes"] == -5
+    # With one packet per outer, "Total Units" moves by the same 5 and the
+    # product-level line reconciles in packets too.
+    assert body["product_level_adjustment_packets"] == -5
+    assert body["total_packets"] == 45
+
+
+async def test_product_level_adjustment_packets_follow_packets_per_box_and_hide_when_mixed(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _, variants = await _make_grouped_product(
+        db_session,
+        key="PPB",
+        groups={"Only": [{"sku": "PPB-A", "available_quantity": 50}]},
+    )
+    variants[0].packets_per_box = 60
+    # No CatalogVariant-attached effect: force the product-level scope by
+    # removing the group so the plain-product path is used.
+    variants[0].catalog_variant_id = None
+    await db_session.commit()
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        await _post(client, product.id, "blinkit", "sale", 300)  # 300 packets / 60 = 5 outers
+        body = await _stock(client, product.id)
+        assert body["product_level_adjustment_boxes"] == -5
+        assert body["product_level_adjustment_packets"] == -300
+        assert body["total_packets"] == 50 * 60 - 300
+
+        # A second SKU with a different packets_per_box makes the packet
+        # figure undefined -- reported as null, never guessed.
+        await ProductVariantRepository(db_session).upsert_by_external_id(
+            source_system="shopify",
+            external_id="var-PPB-B",
+            product_id=product.id,
+            sku="PPB-B",
+            price=Decimal("100.00"),
+            available_quantity=10,
+            packets_per_box=30,
+        )
+        await db_session.commit()
+        mixed = await _stock(client, product.id)
+        assert mixed["product_level_adjustment_boxes"] == -5
+        assert mixed["product_level_adjustment_packets"] is None
 
 
 async def test_no_product_variant_or_sku_movement_is_touched(db_session: AsyncSession) -> None:
@@ -299,7 +333,7 @@ async def test_failure_writing_the_marketplace_movement_leaves_the_oms_total_unt
     async def _boom(self, **kwargs):
         raise RuntimeError("marketplace ledger write failed")
 
-    monkeypatch.setattr(PlatformInventoryService, "_write_movement_and_oms_effect", _boom)
+    monkeypatch.setattr(PlatformInventoryService, "_append_movement", _boom)
     with pytest.raises(RuntimeError):
         await PlatformInventoryService(db_session).record_product_movement(
             product.id,

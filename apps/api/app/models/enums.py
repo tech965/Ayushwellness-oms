@@ -193,6 +193,9 @@ class ProductMarketplaceMovementType(StrEnum):
     STOCK_ADDED = "stock_added"
     SALE = "sale"
     RTO = "rto"
+    # A compensating row that cancels an earlier SALE/RTO (Undo, or the
+    # first half of an Edit). Never an operation staff enter directly.
+    REVERSAL = "reversal"
 
 
 class StockStatus(StrEnum):

@@ -47,7 +47,7 @@ from datetime import date as date_type
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, ForeignKey, Index, Integer, String, func
+from sqlalchemy import Date, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import AwareDateTime, Base, UUIDPrimaryKeyMixin
@@ -55,7 +55,7 @@ from app.models.enums import PlatformStockMovementType, ProductMarketplaceMoveme
 
 if TYPE_CHECKING:
     from app.models.auth import User
-    from app.models.product import Product, ProductVariant
+    from app.models.product import CatalogVariant, Product, ProductVariant
 
 
 class InventoryPlatform:
@@ -152,6 +152,21 @@ class ProductMarketplaceMovement(Base, UUIDPrimaryKeyMixin):
     IST business date this movement belongs to), so the existing
     date-scoped "opening/closing balance as of a selected date" technique
     (`get_latest_as_of`) works identically at this table's own grain.
+
+    SCOPE: `catalog_variant_id` NULL = a product-scoped balance (every
+    product with fewer than two CatalogVariants); set = that OMS-visible
+    variant's OWN balance (a product with two or more, e.g. Herbal
+    Masala's Gold/Red/Blue). The balance key is therefore
+    `(product_id, catalog_variant_id, platform)`. Never an underlying
+    60/120/180 SKU.
+
+    EDIT / UNDO never update or delete a row. Undo appends a REVERSAL row
+    (`reverses_movement_id` -> the original) whose delta is the exact
+    negative of the original's; an Edit is a reversal PLUS a replacement
+    row (`replaces_movement_id` -> the original) at the new quantity.
+    Each original can be reversed at most once and replaced at most once
+    (unique constraints), so the history is a permanent audit trail and
+    the effective balance is simply the running sum.
     """
 
     __tablename__ = "product_marketplace_movements"
@@ -162,10 +177,28 @@ class ProductMarketplaceMovement(Base, UUIDPrimaryKeyMixin):
             "platform",
             "stock_date",
         ),
+        Index(
+            "ix_product_marketplace_movements_scope_platform_date",
+            "product_id",
+            "catalog_variant_id",
+            "platform",
+            "stock_date",
+        ),
+        UniqueConstraint("reverses_movement_id", name="uq_product_marketplace_movements_reverses"),
+        UniqueConstraint("replaces_movement_id", name="uq_product_marketplace_movements_replaces"),
     )
 
     product_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    catalog_variant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("catalog_variants.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    reverses_movement_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("product_marketplace_movements.id", ondelete="RESTRICT"), nullable=True
+    )
+    replaces_movement_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("product_marketplace_movements.id", ondelete="RESTRICT"), nullable=True
     )
     platform: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     movement_type: Mapped[ProductMarketplaceMovementType] = mapped_column(
@@ -191,4 +224,5 @@ class ProductMarketplaceMovement(Base, UUIDPrimaryKeyMixin):
     )
 
     product: Mapped[Product] = relationship()
+    catalog_variant: Mapped[CatalogVariant | None] = relationship()
     actor: Mapped[User | None] = relationship()

@@ -117,6 +117,11 @@ export interface InventoryProductStock {
    * reconciles with the sum of the variant cards below it.
    */
   product_level_adjustment_boxes: number
+  /** The same adjustment in packets (Total Units), or null when the
+   * product's SKUs disagree on packets_per_box (then it is also left out
+   * of `total_packets`, so the packet total still reconciles).
+   */
+  product_level_adjustment_packets: number | null
   /** Shopify's own, immutable product id -- the only safe key to scope
    * any product-specific display behaviour by (never `product_id`, the
    * per-environment OMS UUID, and never `title`/`product_name`, which

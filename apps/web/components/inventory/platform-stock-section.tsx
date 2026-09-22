@@ -4,6 +4,8 @@ import * as React from "react"
 import { Minus, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 
+import { MonthlySalesSummary } from "@/components/inventory/monthly-sales-summary"
+import { ProductMarketplaceHistory } from "@/components/inventory/product-marketplace-history"
 import { QueryStates } from "@/components/shared/query-states"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -25,6 +27,7 @@ import type {
   ManualPlatform,
   MarketplaceOperation,
   PlatformStockSummaryRow,
+  VariantMarketplaceStock,
 } from "@/types/platform-inventory"
 
 interface MovementDialogState {
@@ -33,6 +36,11 @@ interface MovementDialogState {
   direction: MarketplaceOperation
   currentStock: number
   stockDate: string
+  /** Set ONLY for a variant-scoped product: the OMS-visible variant
+   * (Gold/Red/Blue) the movement belongs to. Never an underlying SKU.
+   */
+  catalogVariantId?: string
+  variantName?: string
 }
 
 interface PlatformStockSectionProps {
@@ -41,23 +49,31 @@ interface PlatformStockSectionProps {
   isLoading: boolean
   isError: boolean
   error: unknown
-  data: { platforms: PlatformStockSummaryRow[] } | undefined
+  data:
+    | {
+        scope: "product" | "catalog_variant"
+        platforms: PlatformStockSummaryRow[]
+        variants: VariantMarketplaceStock[]
+      }
+    | undefined
   onRetry: () => void
   canManage: boolean
   stockDate: string
 }
 
-/** "Marketplace Stock" — ONE table per PRODUCT, never one per SKU:
- * Shopify (automatic, read-only) plus every manual platform, already
- * aggregated server-side for the selected `stockDate`. Record Sale and
- * RTO are the only actions (there is no marketplace "Add Stock") and
- * both are PRODUCT-level -- no SKU is selected or shown anywhere in this
- * section. The backend converts the packet quantity entered here to
- * outers using the product's own pack_size, applies the same effect to
- * the product's OMS total stock in one transaction (see
- * `PlatformInventoryService.record_product_movement`), and rejects the
- * write (422) if that conversion isn't deterministic rather than
- * guessing. Shopify's row is automatic and never gets manual controls.
+/** "Marketplace Stock", in one of two shapes decided by the backend:
+ *  - a product with fewer than two OMS-visible variants: ONE table for the
+ *    product;
+ *  - a product with two or more (Herbal Masala): ONE independent table PER
+ *    OMS-visible variant (Gold / Red / Blue), each with its own monthly
+ *    sales and history -- never combined, and never split by the
+ *    underlying 60/120/180 SKUs.
+ * Record Sale and RTO are the only actions (there is no marketplace "Add
+ * Stock") and there is no SKU picker anywhere. The backend converts the
+ * packet quantity to outers, applies the same effect to the OMS total in
+ * one transaction, and rejects (422) rather than guess when the conversion
+ * isn't deterministic. Shopify's row is automatic and never gets manual
+ * controls.
  */
 export function PlatformStockSection({
   productId,
@@ -71,6 +87,80 @@ export function PlatformStockSection({
   stockDate,
 }: PlatformStockSectionProps) {
   const [dialogState, setDialogState] = React.useState<MovementDialogState | null>(null)
+  const [openHistory, setOpenHistory] = React.useState<Record<string, boolean>>({})
+
+  const dialog = dialogState && (
+    <ProductMarketplaceMovementDialog
+      key={`${dialogState.catalogVariantId ?? "product"}-${dialogState.platform}-${dialogState.direction}`}
+      productId={productId}
+      state={dialogState}
+      productTitle={productTitle}
+      onClose={() => setDialogState(null)}
+    />
+  )
+
+  if (data && data.scope === "catalog_variant" && data.variants.length > 0) {
+    return (
+      <>
+        <div className="flex flex-col gap-6">
+          {data.variants.map((variant) => (
+            <div key={variant.catalog_variant_id} className="flex flex-col gap-3">
+              <MonthlySalesSummary
+                soldPackets={variant.sold_this_month_packets}
+                variantName={variant.name}
+              />
+              <Card data-testid={`marketplace-variant-${variant.catalog_variant_id}`}>
+                <CardHeader>
+                  <CardTitle>Marketplace Stock — {variant.name}</CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-4">
+                  <MarketplaceTable
+                    rows={variant.platforms}
+                    canManage={canManage}
+                    onOperation={(row, direction) =>
+                      setDialogState({
+                        platform: row.platform as ManualPlatform,
+                        platformLabel: row.platform_label,
+                        direction,
+                        currentStock: row.current_stock ?? 0,
+                        stockDate,
+                        catalogVariantId: variant.catalog_variant_id,
+                        variantName: variant.name,
+                      })
+                    }
+                  />
+                  <div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setOpenHistory((prev) => ({
+                          ...prev,
+                          [variant.catalog_variant_id]: !prev[variant.catalog_variant_id],
+                        }))
+                      }
+                    >
+                      {openHistory[variant.catalog_variant_id]
+                        ? `Hide ${variant.name} History`
+                        : `Show ${variant.name} History`}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+              {openHistory[variant.catalog_variant_id] && (
+                <ProductMarketplaceHistory
+                  productId={productId}
+                  catalogVariantId={variant.catalog_variant_id}
+                  title={`${variant.name} Marketplace History`}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+        {dialog}
+      </>
+    )
+  }
 
   return (
     <Card>
@@ -84,66 +174,67 @@ export function PlatformStockSection({
           error={error}
           data={data}
           onRetry={onRetry}
-          isEmpty={(d) => d.platforms.length === 0}
+          isEmpty={(d) => (d.scope === "product" ? d.platforms.length === 0 : true)}
           emptyTitle="No marketplace stock data for this product"
         >
           {(loaded) => (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-muted-foreground border-border border-b text-left text-xs font-medium tracking-wide uppercase">
-                    <th className="py-2 pr-3">Platform</th>
-                    <th className="py-2 pr-3 text-right">Opening Stock</th>
-                    <th className="py-2 pr-3 text-right">Stock Added</th>
-                    <th className="py-2 pr-3 text-right">Sold / Deducted</th>
-                    <th className="py-2 pr-3 text-right">Current Stock</th>
-                    <th className="py-2 pr-3">Last Updated</th>
-                    <th className="py-2 pr-3 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loaded.platforms.map((row) => (
-                    <PlatformStockTableRow
-                      key={row.platform}
-                      row={row}
-                      canManage={canManage}
-                      onSale={() =>
-                        setDialogState({
-                          platform: row.platform as ManualPlatform,
-                          platformLabel: row.platform_label,
-                          direction: "sale",
-                          currentStock: row.current_stock ?? 0,
-                          stockDate,
-                        })
-                      }
-                      onRto={() =>
-                        setDialogState({
-                          platform: row.platform as ManualPlatform,
-                          platformLabel: row.platform_label,
-                          direction: "rto",
-                          currentStock: row.current_stock ?? 0,
-                          stockDate,
-                        })
-                      }
-                    />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <MarketplaceTable
+              rows={loaded.platforms}
+              canManage={canManage}
+              onOperation={(row, direction) =>
+                setDialogState({
+                  platform: row.platform as ManualPlatform,
+                  platformLabel: row.platform_label,
+                  direction,
+                  currentStock: row.current_stock ?? 0,
+                  stockDate,
+                })
+              }
+            />
           )}
         </QueryStates>
       </CardContent>
-
-      {dialogState && (
-        <ProductMarketplaceMovementDialog
-          key={`${dialogState.platform}-${dialogState.direction}`}
-          productId={productId}
-          state={dialogState}
-          productTitle={productTitle}
-          onClose={() => setDialogState(null)}
-        />
-      )}
+      {dialog}
     </Card>
+  )
+}
+
+function MarketplaceTable({
+  rows,
+  canManage,
+  onOperation,
+}: {
+  rows: PlatformStockSummaryRow[]
+  canManage: boolean
+  onOperation: (row: PlatformStockSummaryRow, direction: MarketplaceOperation) => void
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-muted-foreground border-border border-b text-left text-xs font-medium tracking-wide uppercase">
+            <th className="py-2 pr-3">Platform</th>
+            <th className="py-2 pr-3 text-right">Opening Stock</th>
+            <th className="py-2 pr-3 text-right">Stock Added</th>
+            <th className="py-2 pr-3 text-right">Sold / Deducted</th>
+            <th className="py-2 pr-3 text-right">Current Stock</th>
+            <th className="py-2 pr-3">Last Updated</th>
+            <th className="py-2 pr-3 text-right">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <PlatformStockTableRow
+              key={row.platform}
+              row={row}
+              canManage={canManage}
+              onSale={() => onOperation(row, "sale")}
+              onRto={() => onOperation(row, "rto")}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -229,14 +320,13 @@ const QUANTITY_PLACEHOLDERS: Record<MarketplaceOperation, string> = {
   rto: "e.g. Customer return",
 }
 
-/** Record Sale / RTO for the whole PRODUCT on one platform -- NO SKU
- * field anywhere in this dialog. Staff enters only a packet quantity
- * and an optional reason; the resulting outer delta and both new
- * balances (this platform's, and the product's OMS total) are always
+/** Record Sale / RTO on one platform -- NO SKU field anywhere in this
+ * dialog. Staff enters only a packet quantity and an optional reason; for
+ * a variant-scoped product the movement belongs to the variant whose
+ * table it was opened from (shown read-only). The resulting outer delta
+ * and both new balances (this platform's, and the OMS total) are always
  * computed server-side, never trusted from the client. A Sale can
- * legitimately take the platform balance negative (e.g. a sale recorded
- * before that day's stock was ever added) -- never blocked, matching
- * the approved business example.
+ * legitimately take the platform balance negative -- never blocked.
  */
 function ProductMarketplaceMovementDialog({
   productId,
@@ -267,6 +357,7 @@ function ProductMarketplaceMovementDialog({
         platform: state.platform,
         movement_type: state.direction,
         quantity_packets: parsed,
+        catalog_variant_id: state.catalogVariantId,
         reason: reason.trim() || undefined,
         stock_date: state.stockDate,
       })
@@ -289,7 +380,9 @@ function ProductMarketplaceMovementDialog({
             {DIALOG_TITLES[state.direction]} — {state.platformLabel}
           </DialogTitle>
           <DialogDescription>
-            Product: {productTitle} · Stock Date {state.stockDate}
+            Product: {productTitle}
+            {state.variantName ? ` · Variant: ${state.variantName}` : ""} · Stock Date{" "}
+            {state.stockDate}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">

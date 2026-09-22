@@ -147,6 +147,11 @@ class InventoryProductStockResponse(BaseModel):
     # separately so the header reconciles with the cards below it (which
     # only include their own CatalogVariant-scoped ledger rows).
     product_level_adjustment_boxes: int = 0
+    # The same adjustment in PACKETS (boxes x packets_per_box) when every SKU
+    # agrees on packets_per_box; None when they don't (no single ratio to
+    # convert with -- and then `total_packets` leaves it out as well, so the
+    # packet total still reconciles with the cards).
+    product_level_adjustment_packets: int | None = 0
     # Shopify's own, immutable product id -- the ONLY safe key for the
     # frontend to scope any product-specific display behaviour by (e.g.
     # the canonical Herbal Masala product's pack-size labels). Never the

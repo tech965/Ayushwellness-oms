@@ -50,7 +50,9 @@ from app.schemas.platform_inventory import (
     PlatformStockMovementCreateRequest,
     PlatformStockMovementResponse,
     ProductMarketplaceMovementCreateRequest,
+    ProductMarketplaceMovementEditRequest,
     ProductMarketplaceMovementResponse,
+    ProductMarketplaceMovementUndoRequest,
     ProductPlatformStockResponse,
     ProductShipmentSummaryResponse,
     UnifiedStockMovementResponse,
@@ -60,7 +62,6 @@ from app.services.inventory_service import InventoryService, OmsVariantGroup
 from app.services.platform_inventory_service import (
     PlatformInventoryService,
     to_movement_response,
-    to_product_movement_response,
 )
 
 router = APIRouter()
@@ -214,11 +215,17 @@ def _product_stock_response(  # noqa: ANN001
     ]
     total_packets = sum(g.total_packets for g in oms_variants)
     pack_sizes = {v.packets_per_box for v in all_underlying}
-    if product_level_adjustment and len(pack_sizes) == 1:
-        total_packets += product_level_adjustment * next(iter(pack_sizes))
+    product_level_packets: int | None = 0
+    if product_level_adjustment:
+        if len(pack_sizes) == 1:
+            product_level_packets = product_level_adjustment * next(iter(pack_sizes))
+            total_packets += product_level_packets
+        else:
+            product_level_packets = None
     return InventoryProductStockResponse(
         product_id=product.id,
         product_level_adjustment_boxes=product_level_adjustment,
+        product_level_adjustment_packets=product_level_packets,
         shopify_product_id=product.shopify_product_id,
         product_name=_product_display_title(product),
         title=product.title,
@@ -803,13 +810,15 @@ async def record_product_marketplace_movement(
     session: Any = Depends(get_db),
     current_user: User = Depends(require_permission("inventory.manage")),
 ) -> ApiResponse[ProductMarketplaceMovementResponse]:
-    """Add Stock / Record Sale / RTO for the whole PRODUCT on one
-    platform -- NO SKU is selected. Staff enters a packet quantity;
-    `PlatformInventoryService.record_product_movement` converts it to
-    outers using this product's own pack_size/packets_per_box (422 if
-    the product's SKUs don't agree on those, since there would be no
-    deterministic conversion). No `ProductVariant` row is ever read for
-    a decision or written to by this endpoint.
+    """Record Sale / RTO on one platform -- NO SKU is selected. Staff
+    enters a packet quantity; `PlatformInventoryService.
+    record_product_movement` converts it to outers using the in-scope
+    SKUs' pack_size/packets_per_box (422 if they don't agree, since there
+    would be no deterministic conversion) and applies the same effect to
+    the OMS total in one transaction. A product with two or more
+    CatalogVariants (Herbal Masala) is tracked per OMS-visible variant:
+    `catalog_variant_id` is required there and rejected elsewhere. No
+    `ProductVariant` row is ever read for a decision or written to.
     """
     service = PlatformInventoryService(session)
     movement = await service.record_product_movement(
@@ -820,12 +829,11 @@ async def record_product_marketplace_movement(
         reason=payload.reason,
         stock_date=payload.stock_date,
         actor=current_user,
+        catalog_variant_id=payload.catalog_variant_id,
     )
     resolved = await service.product_movements.get_by_id_with_relations(movement.id)
-    return ApiResponse(
-        data=to_product_movement_response(resolved or movement),
-        message="Stock movement recorded.",
-    )
+    (described,) = await service.describe_movements([resolved or movement])
+    return ApiResponse(data=described, message="Stock movement recorded.")
 
 
 @router.get(
@@ -835,15 +843,20 @@ async def record_product_marketplace_movement(
 async def list_product_marketplace_movements(
     product_id: uuid.UUID,
     platform: str | None = Query(default=None, description="Filter to one manual platform."),
+    catalog_variant_id: uuid.UUID | None = Query(
+        default=None,
+        description="Filter to ONE OMS-visible variant's own history (e.g. Gold Packet).",
+    ),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     page_params: PageParams = Depends(pagination_params),
     session: Any = Depends(get_db),
     _: User = Depends(require_permission("inventory.read")),
 ) -> PaginatedResponse[ProductMarketplaceMovementResponse]:
-    """Product-level marketplace adjustment history -- Add Stock / Sale /
-    RTO, each its own event (a sale and a later RTO are never merged or
-    netted). Distinct from the existing per-SKU
+    """Marketplace history -- Sale / RTO / Reversal, each its own event
+    (a Sale, its reversal and any replacement are never merged or netted)
+    with its effective status and whether it can still be edited/undone.
+    Distinct from the existing per-SKU
     `GET /stock/{variant_id}/platform-stock/movements` above.
     """
     service = PlatformInventoryService(session)
@@ -853,10 +866,62 @@ async def list_product_marketplace_movements(
         date_from=date_from,
         date_to=date_to,
         page_params=page_params,
+        catalog_variant_id=catalog_variant_id,
     )
     return PaginatedResponse(
         data=rows, meta=build_pagination_meta(total_items=total, page_params=page_params)
     )
+
+
+@router.post(
+    "/marketplace-movements/{movement_id}/edit",
+    response_model=ApiResponse[ProductMarketplaceMovementResponse],
+    status_code=201,
+)
+async def edit_marketplace_movement(
+    movement_id: uuid.UUID,
+    payload: ProductMarketplaceMovementEditRequest,
+    session: Any = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory.manage")),
+) -> ApiResponse[ProductMarketplaceMovementResponse]:
+    """Correct a manual Sale/RTO's packet quantity. The original row is
+    never updated or deleted: a reversal and a replacement at the new
+    quantity are appended in one transaction (both the marketplace balance
+    and the OMS total end up reflecting only the new quantity). Returns
+    the replacement row.
+    """
+    service = PlatformInventoryService(session)
+    replacement = await service.edit_movement(
+        movement_id,
+        quantity_packets=payload.quantity_packets,
+        reason=payload.reason,
+        actor=current_user,
+    )
+    resolved = await service.product_movements.get_by_id_with_relations(replacement.id)
+    (described,) = await service.describe_movements([resolved or replacement])
+    return ApiResponse(data=described, message="Marketplace movement edited.")
+
+
+@router.post(
+    "/marketplace-movements/{movement_id}/undo",
+    response_model=ApiResponse[ProductMarketplaceMovementResponse],
+    status_code=201,
+)
+async def undo_marketplace_movement(
+    movement_id: uuid.UUID,
+    payload: ProductMarketplaceMovementUndoRequest,
+    session: Any = Depends(get_db),
+    current_user: User = Depends(require_permission("inventory.manage")),
+) -> ApiResponse[ProductMarketplaceMovementResponse]:
+    """Undo a manual Sale/RTO by appending a reversal row -- the original
+    is kept (history stays auditable) and the effective balance returns
+    to its pre-movement value. Returns the reversal row.
+    """
+    service = PlatformInventoryService(session)
+    reversal = await service.undo_movement(movement_id, reason=payload.reason, actor=current_user)
+    resolved = await service.product_movements.get_by_id_with_relations(reversal.id)
+    (described,) = await service.describe_movements([resolved or reversal])
+    return ApiResponse(data=described, message="Marketplace movement undone.")
 
 
 @router.get(

@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from datetime import date as date_type
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
@@ -55,6 +56,7 @@ from app.schemas.platform_inventory import (
     ProductShipmentSummaryResponse,
     ShipmentTransitSummaryRow,
     UnifiedStockMovementResponse,
+    VariantMarketplaceStockResponse,
 )
 from app.services.audit_service import AuditService
 from app.services.inventory_service import InventoryService, _ceil_div
@@ -196,119 +198,87 @@ class PlatformInventoryService:
             )
         return next(iter(pack_sizes)), next(iter(packets_per_box_values))
 
-    async def record_product_movement(
-        self,
-        product_id: uuid.UUID,
-        *,
-        platform: str,
-        movement_type: ProductMarketplaceMovementType,
-        quantity_packets: int,
-        reason: str | None,
-        stock_date: date_type | None,
-        actor,
-    ) -> ProductMarketplaceMovement:
-        """Product-level Record Sale / RTO -- staff enters ONLY a packet
-        quantity for the whole product on this platform, never a SKU and
-        never the resulting total. `Sale` is a negative delta and `RTO`
-        a positive one, recorded as their own distinct `movement_type`
-        (never netted before being stored).
+    async def _resolve_marketplace_scope(
+        self, product_id: uuid.UUID, catalog_variant_id: uuid.UUID | None
+    ) -> tuple[uuid.UUID | None, list]:
+        """`(scope catalog_variant_id, the variants whose pack_size/
+        packets_per_box decide the conversion)`.
 
-        TWO ledgers change, in ONE transaction: the marketplace-channel
-        `ProductMarketplaceMovement` (this platform's own balance and
-        history) AND the product's OMS total stock, via
-        `InventoryService.apply_marketplace_stock_effect` (the same
-        ledger a manual CatalogVariant Edit Stock uses). If either write
-        fails, the whole operation rolls back -- neither ledger is left
-        ahead of the other.
-
-        The packet quantity is converted to outers via
-        `_product_conversion_factor` (this product's own approved
-        pack_size/packets_per_box, the exact formula
-        `InventoryService.apply_dispatch` already uses) -- raises
-        instead of guessing when that conversion isn't deterministic.
-        No `ProductVariant` row is read for a stock decision or written
-        to by this method. Add Stock is not a marketplace operation.
+        A product with TWO OR MORE real CatalogVariants (Herbal Masala) is
+        tracked PER OMS-visible variant: the caller must name one (never
+        defaulted, never guessed), and only THAT variant's SKUs decide
+        the conversion. Any other product is product-scoped and must NOT
+        name a variant. An underlying 60/120/180 SKU is never a scope.
         """
-        if movement_type not in (
-            ProductMarketplaceMovementType.SALE,
-            ProductMarketplaceMovementType.RTO,
-        ):
-            raise ValidationError("Only a Sale or an RTO can be recorded for a marketplace.")
-        if quantity_packets <= 0:
-            raise ValidationError("Quantity must be a positive number.")
-        if platform not in InventoryPlatform.ALL:
-            allowed = ", ".join(InventoryPlatform.ALL)
-            raise ValidationError(f"Unknown platform {platform!r}. Must be one of: {allowed}.")
-
         _product, variants = await self.inventory.list_variants_for_product(product_id)
-        pack_size, packets_per_box = self._product_conversion_factor(variants)
-        outers = _ceil_div(quantity_packets * pack_size, packets_per_box)
-
-        resolved_date = stock_date or ist_today()
-
-        latest = await self.product_movements.get_latest_as_of(
-            product_id=product_id, platform=platform, as_of=resolved_date
-        )
-        previous_quantity = latest.quantity_after if latest else 0
-
-        # Unlike the per-SKU manual ledger (`record_movement`, above),
-        # a Sale here is NOT rejected for taking the balance negative --
-        # the approved worked example (20 sold with nothing ever added
-        # -> -20) explicitly expects that outcome. Staff records
-        # marketplace activity as it happens, not necessarily in the
-        # order opening stock arrives; a negative product-level balance
-        # is a legitimate, visible signal to reconcile, never blocked.
-        delta = -outers if movement_type == ProductMarketplaceMovementType.SALE else outers
-
-        new_quantity = previous_quantity + delta
-        cleaned_reason = reason.strip() if reason and reason.strip() else None
-
-        try:
-            movement = await self._write_movement_and_oms_effect(
-                product_id=product_id,
-                platform=platform,
-                movement_type=movement_type,
-                quantity_packets=quantity_packets,
-                delta=delta,
-                new_quantity=new_quantity,
-                previous_quantity=previous_quantity,
-                resolved_date=resolved_date,
-                cleaned_reason=cleaned_reason,
-                actor=actor,
+        cvs = await self.inventory.catalog_variants.list_for_product(product_id)
+        if len(cvs) >= 2:
+            if catalog_variant_id is None:
+                raise ValidationError(
+                    "This product's marketplace stock is tracked per variant -- choose which "
+                    "variant (e.g. Gold Packet) this movement belongs to."
+                )
+            if catalog_variant_id not in {cv.id for cv in cvs}:
+                raise ValidationError("That variant does not belong to this product.")
+            members = [v for v in variants if v.catalog_variant_id == catalog_variant_id]
+            return catalog_variant_id, members
+        if catalog_variant_id is not None:
+            raise ValidationError(
+                "This product's marketplace stock is not tracked per variant; "
+                "do not send a variant."
             )
-            await self.session.commit()
-        except Exception:
-            await self.session.rollback()
-            raise
-        return movement
+        return None, variants
 
-    async def _write_movement_and_oms_effect(
+    async def _latest_balance(
         self,
         *,
         product_id: uuid.UUID,
+        catalog_variant_id: uuid.UUID | None,
+        platform: str,
+        as_of: date_type,
+    ) -> int:
+        latest = await self.product_movements.get_latest_as_of(
+            product_id=product_id,
+            catalog_variant_id=catalog_variant_id,
+            platform=platform,
+            as_of=as_of,
+        )
+        return latest.quantity_after if latest else 0
+
+    async def _append_movement(
+        self,
+        *,
+        product_id: uuid.UUID,
+        catalog_variant_id: uuid.UUID | None,
         platform: str,
         movement_type: ProductMarketplaceMovementType,
         quantity_packets: int,
         delta: int,
-        new_quantity: int,
         previous_quantity: int,
-        resolved_date: date_type,
-        cleaned_reason: str | None,
+        stock_date: date_type,
+        reason: str | None,
         actor,
+        reverses_movement_id: uuid.UUID | None = None,
+        replaces_movement_id: uuid.UUID | None = None,
     ) -> ProductMarketplaceMovement:
-        """Flush-only (never commits) -- `record_product_movement` owns
-        the single commit/rollback covering both ledger writes.
+        """Flush-only append of ONE ledger row plus its audit entry --
+        never commits (the caller owns the single transaction) and never
+        updates an existing row.
         """
+        new_quantity = previous_quantity + delta
         movement = await self.product_movements.create(
             product_id=product_id,
+            catalog_variant_id=catalog_variant_id,
             platform=platform,
             movement_type=movement_type,
             quantity_packets=quantity_packets,
             quantity_delta=delta,
             quantity_after=new_quantity,
-            stock_date=resolved_date,
-            reason=cleaned_reason,
+            stock_date=stock_date,
+            reason=reason,
             actor_user_id=actor.id if actor else None,
+            reverses_movement_id=reverses_movement_id,
+            replaces_movement_id=replaces_movement_id,
             # Explicit Python-clock timestamp (microsecond precision),
             # not the column's server_default -- `get_latest_as_of`
             # breaks ties on `created_at.desc()` among same-`stock_date`
@@ -332,35 +302,417 @@ class PlatformInventoryService:
             metadata={
                 "movement_type": movement_type.value,
                 "quantity_packets": quantity_packets,
-                "stock_date": resolved_date.isoformat(),
-                "reason": cleaned_reason,
+                "stock_date": stock_date.isoformat(),
+                "reason": reason,
+                "catalog_variant_id": str(catalog_variant_id) if catalog_variant_id else None,
+                "reverses_movement_id": str(reverses_movement_id) if reverses_movement_id else None,
+                "replaces_movement_id": str(replaces_movement_id) if replaces_movement_id else None,
             },
         )
+        return movement
 
+    @staticmethod
+    def _movement_label(platform: str, movement_type: ProductMarketplaceMovementType) -> str:
         label = InventoryPlatform.LABELS.get(platform, platform)
         kind = "sale" if movement_type == ProductMarketplaceMovementType.SALE else "RTO"
-        oms_reason = f"{label} {kind}: {quantity_packets} packets"
-        if cleaned_reason:
-            oms_reason = f"{oms_reason} - {cleaned_reason}"
-        await self.inventory.apply_marketplace_stock_effect(
-            product_id=product_id,
-            quantity_delta=delta,
-            reason=oms_reason,
-            actor=actor,
-            product_marketplace_movement_id=movement.id,
+        return f"{label} {kind}"
+
+    async def record_product_movement(
+        self,
+        product_id: uuid.UUID,
+        *,
+        platform: str,
+        movement_type: ProductMarketplaceMovementType,
+        quantity_packets: int,
+        reason: str | None,
+        stock_date: date_type | None,
+        actor,
+        catalog_variant_id: uuid.UUID | None = None,
+    ) -> ProductMarketplaceMovement:
+        """Record Sale / RTO -- staff enters ONLY a packet quantity, never
+        a SKU and never the resulting total. `Sale` is a negative delta
+        and `RTO` a positive one, recorded as their own distinct
+        `movement_type` (never netted before being stored).
+
+        SCOPE: a product with two or more CatalogVariants (Herbal Masala)
+        is tracked per OMS-visible variant -- `catalog_variant_id` is
+        required and the movement touches THAT variant's balance only. Any
+        other product is product-scoped. See `_resolve_marketplace_scope`.
+
+        TWO ledgers change, in ONE transaction: the marketplace
+        `ProductMarketplaceMovement` (this scope+platform's balance and
+        history) AND the OMS total stock, via
+        `InventoryService.apply_marketplace_stock_effect` (the same ledger
+        a manual CatalogVariant Edit Stock uses). If either write fails,
+        the whole operation rolls back -- neither ledger is left ahead of
+        the other.
+
+        The packet quantity is converted to outers via
+        `_product_conversion_factor` (the in-scope SKUs' approved
+        pack_size/packets_per_box, the exact formula
+        `InventoryService.apply_dispatch` already uses) -- raises instead
+        of guessing when that conversion isn't deterministic. No
+        `ProductVariant` row is read for a stock decision or written to.
+        Add Stock is not a marketplace operation.
+        """
+        if movement_type not in (
+            ProductMarketplaceMovementType.SALE,
+            ProductMarketplaceMovementType.RTO,
+        ):
+            raise ValidationError("Only a Sale or an RTO can be recorded for a marketplace.")
+        if quantity_packets <= 0:
+            raise ValidationError("Quantity must be a positive number.")
+        if platform not in InventoryPlatform.ALL:
+            allowed = ", ".join(InventoryPlatform.ALL)
+            raise ValidationError(f"Unknown platform {platform!r}. Must be one of: {allowed}.")
+
+        scope_cv, scope_variants = await self._resolve_marketplace_scope(
+            product_id, catalog_variant_id
         )
+        pack_size, packets_per_box = self._product_conversion_factor(scope_variants)
+        outers = _ceil_div(quantity_packets * pack_size, packets_per_box)
+        resolved_date = stock_date or ist_today()
+        previous_quantity = await self._latest_balance(
+            product_id=product_id,
+            catalog_variant_id=scope_cv,
+            platform=platform,
+            as_of=resolved_date,
+        )
+
+        # Unlike the per-SKU manual ledger (`record_movement`, above),
+        # a Sale here is NOT rejected for taking the balance negative --
+        # the approved worked example (20 sold with nothing ever added
+        # -> -20) explicitly expects that outcome. Staff records
+        # marketplace activity as it happens, not necessarily in the
+        # order opening stock arrives; a negative balance is a
+        # legitimate, visible signal to reconcile, never blocked.
+        delta = -outers if movement_type == ProductMarketplaceMovementType.SALE else outers
+        cleaned_reason = reason.strip() if reason and reason.strip() else None
+
+        try:
+            movement = await self._append_movement(
+                product_id=product_id,
+                catalog_variant_id=scope_cv,
+                platform=platform,
+                movement_type=movement_type,
+                quantity_packets=quantity_packets,
+                delta=delta,
+                previous_quantity=previous_quantity,
+                stock_date=resolved_date,
+                reason=cleaned_reason,
+                actor=actor,
+            )
+            oms_reason = (
+                f"{self._movement_label(platform, movement_type)}: {quantity_packets} packets"
+            )
+            if cleaned_reason:
+                oms_reason = f"{oms_reason} - {cleaned_reason}"
+            await self.inventory.apply_marketplace_stock_effect(
+                product_id=product_id,
+                quantity_delta=delta,
+                reason=oms_reason,
+                actor=actor,
+                product_marketplace_movement_id=movement.id,
+                catalog_variant_id=scope_cv,
+            )
+            await self.session.commit()
+        except Exception:
+            await self.session.rollback()
+            raise
         return movement
+
+    # ------------------------------------------------------------------
+    # Edit / Undo -- append-only corrections (never update or delete a row)
+    # ------------------------------------------------------------------
+
+    async def _load_correctable(self, movement_id: uuid.UUID) -> ProductMarketplaceMovement:
+        original = await self.product_movements.get_by_id(movement_id)
+        if original is None:
+            raise NotFoundError("Marketplace movement not found.")
+        if original.movement_type not in (
+            ProductMarketplaceMovementType.SALE,
+            ProductMarketplaceMovementType.RTO,
+        ):
+            raise ValidationError(
+                "Only a manually recorded Sale or RTO can be edited or undone (a reversal cannot)."
+            )
+        if await self.product_movements.reversed_ids([original.id]):
+            raise ValidationError("This movement has already been undone or edited.")
+        return original
+
+    async def _append_reversal(
+        self,
+        original: ProductMarketplaceMovement,
+        *,
+        reason: str,
+        actor,
+        stock_date: date_type,
+        previous_quantity: int,
+    ) -> ProductMarketplaceMovement:
+        """Flush-only. The reversal's marketplace delta is the exact
+        negative of the original's; its OMS-total effect is the exact
+        negative of what the original ACTUALLY wrote to the OMS ledger --
+        zero if it wrote none (a movement recorded before OMS-stock
+        linking), so undoing a legacy row can never double-count.
+        """
+        reversal = await self._append_movement(
+            product_id=original.product_id,
+            catalog_variant_id=original.catalog_variant_id,
+            platform=original.platform,
+            movement_type=ProductMarketplaceMovementType.REVERSAL,
+            quantity_packets=original.quantity_packets,
+            delta=-original.quantity_delta,
+            previous_quantity=previous_quantity,
+            stock_date=stock_date,
+            reason=reason,
+            actor=actor,
+            reverses_movement_id=original.id,
+        )
+        original_effect = await self.inventory.catalog_variant_adjustments.get_for_movement(
+            original.id
+        )
+        if original_effect is not None:
+            label = self._movement_label(original.platform, original.movement_type)
+            await self.inventory.apply_marketplace_stock_effect(
+                product_id=original.product_id,
+                quantity_delta=-original_effect.quantity_delta,
+                reason=f"{label} reversed: {original.quantity_packets} packets - {reason}",
+                actor=actor,
+                product_marketplace_movement_id=reversal.id,
+                catalog_variant_id=original_effect.catalog_variant_id,
+                product_level=original_effect.catalog_variant_id is None,
+            )
+        return reversal
+
+    async def undo_movement(
+        self, movement_id: uuid.UUID, *, reason: str, actor
+    ) -> ProductMarketplaceMovement:
+        """Undo a manual Sale/RTO by APPENDING a reversal row -- the
+        original is never deleted or changed, so the history keeps both
+        ("Sale -20" then "Reversal +20") and the effective balance returns
+        to its pre-movement value. Dated today: past days' balances were
+        already true when they were recorded and are never restated.
+        """
+        cleaned = (reason or "").strip()
+        if not cleaned:
+            raise ValidationError("A reason is required.")
+        original = await self._load_correctable(movement_id)
+        today = ist_today()
+        try:
+            previous = await self._latest_balance(
+                product_id=original.product_id,
+                catalog_variant_id=original.catalog_variant_id,
+                platform=original.platform,
+                as_of=today,
+            )
+            reversal = await self._append_reversal(
+                original, reason=cleaned, actor=actor, stock_date=today, previous_quantity=previous
+            )
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ValidationError("This movement has already been undone or edited.") from exc
+        except Exception:
+            await self.session.rollback()
+            raise
+        return reversal
+
+    async def edit_movement(
+        self, movement_id: uuid.UUID, *, quantity_packets: int, reason: str, actor
+    ) -> ProductMarketplaceMovement:
+        """Correct a manual Sale/RTO's quantity WITHOUT touching the
+        original: in one transaction, append a reversal of it and a
+        replacement (same type/platform/scope) at the new quantity. The
+        history keeps "Sale -20", "Reversal +20", "Sale -15"; the
+        effective result is -15. The replacement's OMS effect is a normal
+        one for the NEW quantity, so editing a legacy row (recorded
+        before OMS-stock linking) also brings the OMS total in line.
+        """
+        cleaned = (reason or "").strip()
+        if not cleaned:
+            raise ValidationError("A reason is required.")
+        if quantity_packets <= 0:
+            raise ValidationError("Quantity must be a positive number.")
+        original = await self._load_correctable(movement_id)
+        if quantity_packets == original.quantity_packets:
+            raise ValidationError("The new quantity must be different from the current one.")
+
+        # Conversion for the NEW quantity, in the original's own scope.
+        # Checked before anything is written so a non-deterministic
+        # conversion rejects cleanly (422) with both ledgers untouched.
+        _product, variants = await self.inventory.list_variants_for_product(original.product_id)
+        scope_variants = (
+            [v for v in variants if v.catalog_variant_id == original.catalog_variant_id]
+            if original.catalog_variant_id is not None
+            else variants
+        )
+        pack_size, packets_per_box = self._product_conversion_factor(scope_variants)
+        outers = _ceil_div(quantity_packets * pack_size, packets_per_box)
+        delta = -outers if original.movement_type == ProductMarketplaceMovementType.SALE else outers
+
+        today = ist_today()
+        try:
+            previous = await self._latest_balance(
+                product_id=original.product_id,
+                catalog_variant_id=original.catalog_variant_id,
+                platform=original.platform,
+                as_of=today,
+            )
+            reversal = await self._append_reversal(
+                original, reason=cleaned, actor=actor, stock_date=today, previous_quantity=previous
+            )
+            replacement = await self._append_movement(
+                product_id=original.product_id,
+                catalog_variant_id=original.catalog_variant_id,
+                platform=original.platform,
+                movement_type=original.movement_type,
+                quantity_packets=quantity_packets,
+                delta=delta,
+                previous_quantity=previous + reversal.quantity_delta,
+                stock_date=today,
+                reason=cleaned,
+                actor=actor,
+                replaces_movement_id=original.id,
+            )
+            label = self._movement_label(original.platform, original.movement_type)
+            await self.inventory.apply_marketplace_stock_effect(
+                product_id=original.product_id,
+                quantity_delta=delta,
+                reason=(
+                    f"{label} (edited {original.quantity_packets} -> {quantity_packets}): "
+                    f"{quantity_packets} packets - {cleaned}"
+                ),
+                actor=actor,
+                product_marketplace_movement_id=replacement.id,
+                catalog_variant_id=original.catalog_variant_id,
+            )
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ValidationError("This movement has already been undone or edited.") from exc
+        except Exception:
+            await self.session.rollback()
+            raise
+        return replacement
+
+    async def describe_movements(
+        self, movements: list[ProductMarketplaceMovement]
+    ) -> list[ProductMarketplaceMovementResponse]:
+        """Response rows with their EFFECTIVE state, derived (never
+        stored) from the reversal/replacement links -- one bulk lookup,
+        no N+1: `active`, `undone` (reversed, not replaced), `edited`
+        (reversed and replaced), or `reversal`. Only an `active` Sale/RTO
+        can be edited or undone.
+        """
+        ids = [m.id for m in movements]
+        reversed_set = await self.product_movements.reversed_ids(ids)
+        replaced_set = await self.product_movements.replaced_ids(ids)
+        replaced_origins = [m.replaces_movement_id for m in movements if m.replaces_movement_id]
+        original_packets = await self.product_movements.packets_by_id(replaced_origins)
+
+        described: list[ProductMarketplaceMovementResponse] = []
+        for m in movements:
+            if m.movement_type == ProductMarketplaceMovementType.REVERSAL:
+                status = "reversal"
+            elif m.id in reversed_set:
+                status = "edited" if m.id in replaced_set else "undone"
+            else:
+                status = "active"
+            correctable = status == "active" and m.movement_type in (
+                ProductMarketplaceMovementType.SALE,
+                ProductMarketplaceMovementType.RTO,
+            )
+            described.append(
+                to_product_movement_response(
+                    m,
+                    status=status,
+                    can_edit=correctable,
+                    can_undo=correctable,
+                    edited_from_packets=(
+                        original_packets.get(m.replaces_movement_id)
+                        if m.replaces_movement_id
+                        else None
+                    ),
+                )
+            )
+        return described
 
     # ------------------------------------------------------------------
     # Read: platform stock summary for a date
     # ------------------------------------------------------------------
 
+    async def _manual_platform_rows(
+        self,
+        *,
+        product_id: uuid.UUID,
+        catalog_variant_id: uuid.UUID | None,
+        stock_date: date_type,
+    ) -> list[PlatformStockSummaryRow]:
+        """Every manual platform's row for ONE scope, straight from
+        `ProductMarketplaceMovement` (already scoped -- no SKU-level
+        summation to do at all).
+        """
+        opening_date = stock_date - timedelta(days=1)
+        rows: list[PlatformStockSummaryRow] = []
+        for platform in InventoryPlatform.ALL:
+            closing_row = await self.product_movements.get_latest_as_of(
+                product_id=product_id,
+                catalog_variant_id=catalog_variant_id,
+                platform=platform,
+                as_of=stock_date,
+            )
+            opening_row = await self.product_movements.get_latest_as_of(
+                product_id=product_id,
+                catalog_variant_id=catalog_variant_id,
+                platform=platform,
+                as_of=opening_date,
+            )
+            added, deducted = await self.product_movements.sum_for_date(
+                product_id=product_id,
+                catalog_variant_id=catalog_variant_id,
+                platform=platform,
+                stock_date=stock_date,
+            )
+            rows.append(
+                PlatformStockSummaryRow(
+                    platform=platform,
+                    platform_label=InventoryPlatform.LABELS[platform],
+                    is_automatic=False,
+                    opening_stock=opening_row.quantity_after if opening_row else 0,
+                    stock_added=added,
+                    stock_deducted=deducted,
+                    current_stock=closing_row.quantity_after if closing_row else 0,
+                    last_updated=closing_row.created_at if closing_row else None,
+                )
+            )
+        return rows
+
+    async def _sold_this_month(
+        self, *, product_id: uuid.UUID, catalog_variant_id: uuid.UUID | None
+    ) -> int:
+        """ "Sold This Month": the CURRENT IST calendar month (independent
+        of the selected `stock_date`), effective SALE movements only,
+        summed from the packet quantities staff actually entered.
+        """
+        month_start = ist_today().replace(day=1)
+        next_month_start = (
+            month_start.replace(year=month_start.year + 1, month=1)
+            if month_start.month == 12
+            else month_start.replace(month=month_start.month + 1)
+        )
+        return await self.product_movements.sum_sold_packets(
+            product_id=product_id,
+            catalog_variant_id=catalog_variant_id,
+            date_from=month_start,
+            date_to_exclusive=next_month_start,
+        )
+
     async def get_product_platform_stock(
         self, product_id: uuid.UUID, *, stock_date: date_type
     ) -> ProductPlatformStockResponse:
         product, variants = await self.inventory.list_variants_for_product(product_id)
+        cvs = await self.inventory.catalog_variants.list_for_product(product_id)
         variant_ids = [v.id for v in variants]
-        opening_date = stock_date - timedelta(days=1)
         is_today = stock_date == ist_today()
 
         day_start, day_end = ist_day_bounds_for_date(stock_date)
@@ -386,114 +738,115 @@ class PlatformInventoryService:
             product_variant_ids=variant_ids, created_to=day_start
         )
 
-        # Shopify: ONE row for the whole product, summed across every
-        # real underlying SKU. `opening_stock`/`current_stock` propagate
-        # `None` (never silently sum only the known SKUs) if ANY
-        # contributing SKU's value is `None` for this date -- a partial
-        # sum that looks complete would misrepresent Shopify's
-        # historical balance as known when it genuinely isn't for at
-        # least one SKU (was previously done client-side in
-        # `aggregatePlatformRows`, moved here so both the API response
-        # and any other future consumer share one source of truth).
-        shopify_added = 0
-        shopify_deducted = 0
-        shopify_opening: int | None = 0
-        shopify_current: int | None = 0
-        shopify_last_updated_at = None
-        for variant in variants:
-            added, deducted = shopify_totals.get(variant.id, (0, 0))
-            shopify_added += added
-            shopify_deducted += deducted
+        def shopify_row(scope_variants: list) -> PlatformStockSummaryRow:
+            """ONE Shopify row summed across `scope_variants` (the whole
+            product, or one OMS-visible variant's own SKUs).
+            `opening_stock`/`current_stock` propagate `None` (never
+            silently sum only the known SKUs) if ANY contributing SKU's
+            value is `None` for this date -- a partial sum that looks
+            complete would misrepresent Shopify's historical balance as
+            known when it genuinely isn't for at least one SKU.
+            """
+            added_total = 0
+            deducted_total = 0
+            opening: int | None = 0
+            current: int | None = 0
+            last_updated_at = None
+            for variant in scope_variants:
+                added, deducted = shopify_totals.get(variant.id, (0, 0))
+                added_total += added
+                deducted_total += deducted
 
-            opening_movement = shopify_opening_as_of.get(variant.id)
-            variant_opening = opening_movement.quantity_after if opening_movement else None
-            shopify_opening = (
-                None
-                if shopify_opening is None or variant_opening is None
-                else shopify_opening + variant_opening
-            )
+                opening_movement = shopify_opening_as_of.get(variant.id)
+                variant_opening = opening_movement.quantity_after if opening_movement else None
+                opening = (
+                    None
+                    if opening is None or variant_opening is None
+                    else opening + variant_opening
+                )
 
-            if is_today:
-                variant_current: int | None = variant.available_quantity
-            else:
-                closing_movement = shopify_closing_as_of.get(variant.id)
-                # `None` (never 0) when no movement exists before this
-                # cutoff -- the ledger genuinely cannot reconstruct this
-                # date's balance (it may predate the variant's
-                # first-ever movement); never guessed.
-                variant_current = closing_movement.quantity_after if closing_movement else None
-            shopify_current = (
-                None
-                if shopify_current is None or variant_current is None
-                else shopify_current + variant_current
-            )
+                if is_today:
+                    variant_current: int | None = variant.available_quantity
+                else:
+                    closing_movement = shopify_closing_as_of.get(variant.id)
+                    # `None` (never 0) when no movement exists before this
+                    # cutoff -- the ledger genuinely cannot reconstruct
+                    # this date's balance; never guessed.
+                    variant_current = closing_movement.quantity_after if closing_movement else None
+                current = (
+                    None
+                    if current is None or variant_current is None
+                    else current + variant_current
+                )
 
-            variant_last_updated = shopify_last_updated.get(variant.id)
-            if variant_last_updated and (
-                shopify_last_updated_at is None or variant_last_updated > shopify_last_updated_at
-            ):
-                shopify_last_updated_at = variant_last_updated
+                variant_last_updated = shopify_last_updated.get(variant.id)
+                if variant_last_updated and (
+                    last_updated_at is None or variant_last_updated > last_updated_at
+                ):
+                    last_updated_at = variant_last_updated
 
-        rows: list[PlatformStockSummaryRow] = [
-            PlatformStockSummaryRow(
+            return PlatformStockSummaryRow(
                 platform="shopify",
                 platform_label="Shopify",
                 is_automatic=True,
-                opening_stock=shopify_opening,
-                stock_added=shopify_added,
-                stock_deducted=shopify_deducted,
-                current_stock=shopify_current,
-                last_updated=shopify_last_updated_at,
+                opening_stock=opening,
+                stock_added=added_total,
+                stock_deducted=deducted_total,
+                current_stock=current,
+                last_updated=last_updated_at,
             )
-        ]
 
-        # Every manual platform: ONE row for the whole product, sourced
-        # directly from `ProductMarketplaceMovement` -- already
-        # product-scoped, so unlike Shopify above there is no per-SKU
-        # summation to do at all.
-        for platform in InventoryPlatform.ALL:
-            closing_row = await self.product_movements.get_latest_as_of(
-                product_id=product_id, platform=platform, as_of=stock_date
-            )
-            opening_row = await self.product_movements.get_latest_as_of(
-                product_id=product_id, platform=platform, as_of=opening_date
-            )
-            added, deducted = await self.product_movements.sum_for_date(
-                product_id=product_id, platform=platform, stock_date=stock_date
-            )
-            rows.append(
-                PlatformStockSummaryRow(
-                    platform=platform,
-                    platform_label=InventoryPlatform.LABELS[platform],
-                    is_automatic=False,
-                    opening_stock=opening_row.quantity_after if opening_row else 0,
-                    stock_added=added,
-                    stock_deducted=deducted,
-                    current_stock=closing_row.quantity_after if closing_row else 0,
-                    last_updated=closing_row.created_at if closing_row else None,
+        title = product.title_override or product.title
+
+        # TWO OR MORE CatalogVariants (Herbal Masala): one independent
+        # Marketplace Stock table per OMS-visible variant. The 60/120/180
+        # SKUs only feed their own variant's Shopify row.
+        if len(cvs) >= 2:
+            sections: list[VariantMarketplaceStockResponse] = []
+            for cv in cvs:
+                members = [v for v in variants if v.catalog_variant_id == cv.id]
+                sections.append(
+                    VariantMarketplaceStockResponse(
+                        catalog_variant_id=cv.id,
+                        name=cv.name,
+                        display_order=cv.display_order,
+                        platforms=[
+                            shopify_row(members),
+                            *await self._manual_platform_rows(
+                                product_id=product_id,
+                                catalog_variant_id=cv.id,
+                                stock_date=stock_date,
+                            ),
+                        ],
+                        sold_this_month_packets=await self._sold_this_month(
+                            product_id=product_id, catalog_variant_id=cv.id
+                        ),
+                    )
                 )
+            return ProductPlatformStockResponse(
+                product_id=product.id,
+                product_title=title,
+                stock_date=stock_date,
+                scope="catalog_variant",
+                platforms=[],
+                variants=sections,
+                sold_this_month_packets=0,
             )
-
-        # "Sold This Month": the CURRENT IST calendar month (independent
-        # of the selected `stock_date`), SALE movements only, summed from
-        # the packet quantities staff actually entered.
-        today = ist_today()
-        month_start = today.replace(day=1)
-        next_month_start = (
-            month_start.replace(year=month_start.year + 1, month=1)
-            if month_start.month == 12
-            else month_start.replace(month=month_start.month + 1)
-        )
-        sold_this_month = await self.product_movements.sum_sold_packets(
-            product_id=product_id, date_from=month_start, date_to_exclusive=next_month_start
-        )
 
         return ProductPlatformStockResponse(
             product_id=product.id,
-            product_title=product.title_override or product.title,
+            product_title=title,
             stock_date=stock_date,
-            platforms=rows,
-            sold_this_month_packets=sold_this_month,
+            scope="product",
+            platforms=[
+                shopify_row(variants),
+                *await self._manual_platform_rows(
+                    product_id=product_id, catalog_variant_id=None, stock_date=stock_date
+                ),
+            ],
+            sold_this_month_packets=await self._sold_this_month(
+                product_id=product_id, catalog_variant_id=None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -698,24 +1051,29 @@ class PlatformInventoryService:
         date_from: date_type | None,
         date_to: date_type | None,
         page_params: PageParams,
+        catalog_variant_id: uuid.UUID | None = None,
     ) -> tuple[list[ProductMarketplaceMovementResponse], int]:
-        """Product-level "Add Stock" / "Sale" / "RTO" history -- each is
-        its own event, never merged or netted (a sale and a later RTO
-        for the same platform/day both appear as separate rows). This
-        is a distinct, additional view from the existing per-SKU
-        `get_movement_history` above; neither reads or writes the
-        other's table.
+        """Marketplace history -- Sale / RTO / Reversal, each its own
+        event (a Sale, its reversal and a replacement all appear as
+        separate rows, never merged or netted). `catalog_variant_id`
+        filters to ONE OMS-visible variant's own history (Gold's history
+        never includes Red's). Distinct from the per-SKU
+        `get_movement_history` above; neither reads the other's table.
         """
         # Only used to raise NotFoundError when the product doesn't exist.
         await self.inventory.list_variants_for_product(product_id)
         items, total = await self.product_movements.list(
             page_params=page_params,
             query=self.product_movements.search_query(
-                product_id=product_id, platform=platform, date_from=date_from, date_to=date_to
+                product_id=product_id,
+                platform=platform,
+                date_from=date_from,
+                date_to=date_to,
+                catalog_variant_id=catalog_variant_id,
             ),
             default_sort_column="created_at",
         )
-        return [to_product_movement_response(m) for m in items], total
+        return await self.describe_movements(list(items)), total
 
 
 def to_movement_response(movement: PlatformStockMovement) -> PlatformStockMovementResponse:
@@ -738,11 +1096,17 @@ def to_movement_response(movement: PlatformStockMovement) -> PlatformStockMoveme
 
 def to_product_movement_response(
     movement: ProductMarketplaceMovement,
+    *,
+    status: str = "active",
+    can_edit: bool = False,
+    can_undo: bool = False,
+    edited_from_packets: int | None = None,
 ) -> ProductMarketplaceMovementResponse:
     actor_label = movement.actor.name if movement.actor is not None else "System"
     return ProductMarketplaceMovementResponse(
         id=movement.id,
         product_id=movement.product_id,
+        catalog_variant_id=movement.catalog_variant_id,
         platform=movement.platform,
         platform_label=InventoryPlatform.LABELS.get(movement.platform, movement.platform),
         movement_type=movement.movement_type,
@@ -754,4 +1118,10 @@ def to_product_movement_response(
         actor_user_id=movement.actor_user_id,
         actor_label=actor_label,
         created_at=movement.created_at,
+        reverses_movement_id=movement.reverses_movement_id,
+        replaces_movement_id=movement.replaces_movement_id,
+        edited_from_packets=edited_from_packets,
+        status=status,
+        can_edit=can_edit,
+        can_undo=can_undo,
     )

@@ -4,7 +4,10 @@ import userEvent from "@testing-library/user-event"
 
 import { PlatformStockSection } from "@/components/inventory/platform-stock-section"
 import { renderWithProviders } from "@/test-utils/render-with-providers"
-import { useRecordProductMarketplaceMovement } from "@/services/platform-inventory"
+import {
+  useProductMarketplaceHistory,
+  useRecordProductMarketplaceMovement,
+} from "@/services/platform-inventory"
 import type { PlatformStockSummaryRow, ProductPlatformStock } from "@/types/platform-inventory"
 
 vi.mock("sonner", () => ({
@@ -13,9 +16,17 @@ vi.mock("sonner", () => ({
 
 vi.mock("@/services/platform-inventory", () => ({
   useRecordProductMarketplaceMovement: vi.fn(),
+  useProductMarketplaceHistory: vi.fn(),
+  useEditMarketplaceMovement: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
+  useUndoMarketplaceMovement: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
+}))
+
+vi.mock("@/lib/auth-context", () => ({
+  useAuth: () => ({ hasPermission: () => true }),
 }))
 
 const mockedUseRecord = vi.mocked(useRecordProductMarketplaceMovement)
+const mockedHistory = vi.mocked(useProductMarketplaceHistory)
 
 function manualRow(
   platform: string,
@@ -39,6 +50,8 @@ const DATA: ProductPlatformStock = {
   product_id: "prod-1",
   product_title: "Aayush Wellness Herbal Masala",
   stock_date: "2026-09-21",
+  scope: "product",
+  variants: [],
   sold_this_month_packets: 25,
   platforms: [
     {
@@ -293,5 +306,190 @@ describe("PlatformStockSection — states", () => {
       await user.click(retry)
       expect(onRetry).toHaveBeenCalled()
     }
+  })
+})
+
+const VARIANT_PLATFORMS = (amazon: number, sold: number): PlatformStockSummaryRow[] => [
+  {
+    platform: "shopify",
+    platform_label: "Shopify",
+    is_automatic: true,
+    opening_stock: null,
+    stock_added: 0,
+    stock_deducted: 0,
+    current_stock: 40,
+    last_updated: null,
+  },
+  manualRow("amazon", "Amazon", { current_stock: amazon, stock_deducted: sold }),
+  manualRow("flipkart", "Flipkart"),
+  manualRow("blinkit", "Blinkit"),
+  manualRow("meesho", "Meesho"),
+  manualRow("manual_other", "Manual / Other"),
+]
+
+const HERBAL: ProductPlatformStock = {
+  product_id: "prod-1",
+  product_title: "Aayush Wellness Herbal Masala",
+  stock_date: "2026-09-21",
+  scope: "catalog_variant",
+  platforms: [],
+  sold_this_month_packets: 0,
+  variants: [
+    {
+      catalog_variant_id: "cv-gold",
+      name: "Gold Packet",
+      display_order: 0,
+      platforms: VARIANT_PLATFORMS(111, 5),
+      sold_this_month_packets: 30,
+    },
+    {
+      catalog_variant_id: "cv-red",
+      name: "Red Packet",
+      display_order: 1,
+      platforms: VARIANT_PLATFORMS(222, 0),
+      sold_this_month_packets: 0,
+    },
+    {
+      catalog_variant_id: "cv-blue",
+      name: "Blue Packet",
+      display_order: 2,
+      platforms: VARIANT_PLATFORMS(333, 0),
+      sold_this_month_packets: 7,
+    },
+  ],
+}
+
+describe("PlatformStockSection — Herbal: one independent table per OMS variant", () => {
+  it("renders Gold, Red and Blue as three separate tables, never one per SKU", () => {
+    stub()
+    mockedHistory.mockReturnValue({ isLoading: true } as never)
+    const { container } = renderWithProviders(
+      <PlatformStockSection {...baseProps({ data: HERBAL })} />
+    )
+
+    expect(container.querySelectorAll("table")).toHaveLength(3)
+    for (const name of ["Gold Packet", "Red Packet", "Blue Packet"]) {
+      expect(screen.getByText(`Marketplace Stock — ${name}`)).toBeInTheDocument()
+    }
+    expect(screen.queryByText(/60 pack|120 pack|180 pack/i)).not.toBeInTheDocument()
+  })
+
+  it("each table carries all six platforms and its own balances (Gold ≠ Red ≠ Blue)", () => {
+    stub()
+    renderWithProviders(<PlatformStockSection {...baseProps({ data: HERBAL })} />)
+
+    for (const [id, amazon] of [
+      ["cv-gold", "111"],
+      ["cv-red", "222"],
+      ["cv-blue", "333"],
+    ] as const) {
+      const card = screen.getByTestId(`marketplace-variant-${id}`)
+      for (const platform of [
+        "Shopify",
+        "Amazon",
+        "Flipkart",
+        "Blinkit",
+        "Meesho",
+        "Manual / Other",
+      ]) {
+        expect(within(card).getByText(platform)).toBeInTheDocument()
+      }
+      const row = within(card).getByText("Amazon").closest("tr") as HTMLElement
+      expect(within(row).getByText(amazon)).toBeInTheDocument()
+    }
+  })
+
+  it("shows a monthly sales figure per variant and no combined Herbal total", () => {
+    stub()
+    renderWithProviders(<PlatformStockSection {...baseProps({ data: HERBAL })} />)
+
+    const summaries = screen.getAllByTestId("monthly-sales-summary")
+    expect(summaries).toHaveLength(3)
+    expect(summaries[0]).toHaveTextContent("Monthly Sales — Gold Packet")
+    expect(summaries[0]).toHaveTextContent("30 packets")
+    expect(summaries[1]).toHaveTextContent("Monthly Sales — Red Packet")
+    expect(summaries[1]).toHaveTextContent("0 packets")
+    expect(summaries[2]).toHaveTextContent("Monthly Sales — Blue Packet")
+    expect(summaries[2]).toHaveTextContent("7 packets")
+    expect(screen.queryByText(/37 packets/)).not.toBeInTheDocument()
+  })
+
+  it("offers no Add Stock and no SKU selector, and Shopify stays read-only in every table", () => {
+    stub()
+    renderWithProviders(<PlatformStockSection {...baseProps({ data: HERBAL })} />)
+
+    expect(screen.queryByRole("button", { name: /add stock/i })).not.toBeInTheDocument()
+    expect(screen.getAllByText("Synced from Shopify")).toHaveLength(3)
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument()
+  })
+
+  it("Record Sale on Red sends Red's catalog_variant_id and names the variant, with no SKU field", async () => {
+    const user = userEvent.setup()
+    const mutateAsync = stub("success", 200)
+    renderWithProviders(<PlatformStockSection {...baseProps({ data: HERBAL })} />)
+
+    const red = screen.getByTestId("marketplace-variant-cv-red")
+    const amazon = within(red).getByText("Amazon").closest("tr") as HTMLElement
+    await user.click(within(amazon).getByRole("button", { name: /^Record Sale$/ }))
+    const dialog = screen.getByRole("dialog")
+
+    expect(within(dialog).getByText(/Variant: Red Packet/)).toBeInTheDocument()
+    expect(within(dialog).getByText("222 outers")).toBeInTheDocument()
+    expect(within(dialog).queryByText(/sku/i)).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument()
+
+    await user.type(within(dialog).getByLabelText(/Quantity Sold/i), "22")
+    await user.click(within(dialog).getByRole("button", { name: /^Record Sale$/ }))
+
+    expect(mutateAsync).toHaveBeenCalledWith({
+      platform: "amazon",
+      movement_type: "sale",
+      quantity_packets: 22,
+      catalog_variant_id: "cv-red",
+      reason: undefined,
+      stock_date: "2026-09-21",
+    })
+  })
+
+  it("RTO on Blue sends Blue's id, never another variant's", async () => {
+    const user = userEvent.setup()
+    const mutateAsync = stub("success", 335)
+    renderWithProviders(<PlatformStockSection {...baseProps({ data: HERBAL })} />)
+
+    const blue = screen.getByTestId("marketplace-variant-cv-blue")
+    const amazon = within(blue).getByText("Amazon").closest("tr") as HTMLElement
+    await user.click(within(amazon).getByRole("button", { name: /^RTO$/ }))
+    const dialog = screen.getByRole("dialog")
+    await user.type(within(dialog).getByLabelText(/Quantity Returned/i), "2")
+    expect(within(dialog).getByText("New Stock: 335 outers")).toBeInTheDocument()
+    await user.click(within(dialog).getByRole("button", { name: /^Record RTO$/ }))
+
+    expect(mutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ movement_type: "rto", catalog_variant_id: "cv-blue" })
+    )
+  })
+
+  it("history is per variant: Gold's toggle asks only for Gold's rows", async () => {
+    const user = userEvent.setup()
+    stub()
+    mockedHistory.mockClear()
+    mockedHistory.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: { data: [], meta: { page: 1, page_size: 20, total: 0, total_pages: 1 } },
+      refetch: vi.fn(),
+    } as never)
+    renderWithProviders(<PlatformStockSection {...baseProps({ data: HERBAL })} />)
+
+    expect(screen.queryByText("Gold Packet Marketplace History")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Show Gold Packet History" }))
+
+    expect(screen.getByText("Gold Packet Marketplace History")).toBeInTheDocument()
+    expect(screen.queryByText("Red Packet Marketplace History")).not.toBeInTheDocument()
+    expect(mockedHistory).toHaveBeenCalledWith(
+      "prod-1",
+      expect.objectContaining({ catalog_variant_id: "cv-gold" })
+    )
   })
 })
