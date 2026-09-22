@@ -466,6 +466,27 @@ async def test_an_rto_can_be_undone_too(
     assert stock["available_boxes"] == 450
 
 
+async def test_shopify_movement_cannot_be_manually_undone_or_edited(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """A `platform="shopify"` row can never be created through the API
+    (`record_product_movement` rejects it -- see
+    `test_shopify_is_not_a_manual_platform`), so this constructs one
+    directly to prove Edit/Undo refuse it too, in depth.
+    """
+    product, _, _ = await _single_cv(db_session, "SHFY")
+    shopify_row = await PlatformInventoryService(db_session).product_movements.create(
+        product_id=product.id, platform="shopify", movement_type=SALE,
+        quantity_packets=5, quantity_delta=-5, quantity_after=-5,
+        stock_date=ist_today(), reason=None, actor_user_id=None,
+    )  # fmt: skip
+    await db_session.commit()
+    async with await make_authenticated_client(db_session, permission_codes=PERMS) as client:
+        assert (await _undo(client, shopify_row.id)).status_code == 422
+        assert (await _edit(client, shopify_row.id, 3)).status_code == 422
+    assert await _count(db_session, ProductMarketplaceMovement) == 1  # nothing appended
+
+
 async def test_undo_cannot_be_applied_twice_or_to_a_reversal(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:

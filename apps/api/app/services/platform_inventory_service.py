@@ -429,6 +429,15 @@ class PlatformInventoryService:
         original = await self.product_movements.get_by_id(movement_id)
         if original is None:
             raise NotFoundError("Marketplace movement not found.")
+        if original.platform not in InventoryPlatform.ALL:
+            # Belt-and-braces: `record_product_movement` already refuses to
+            # create a platform="shopify" row (`InventoryPlatform.ALL`
+            # deliberately excludes it), so this can't happen through the
+            # normal API -- but Edit/Undo must never act on a Shopify-
+            # synced row even if one existed (e.g. a future data import).
+            raise ValidationError(
+                "Shopify's stock is automatic and synced; it cannot be edited or undone here."
+            )
         if original.movement_type not in (
             ProductMarketplaceMovementType.SALE,
             ProductMarketplaceMovementType.RTO,
