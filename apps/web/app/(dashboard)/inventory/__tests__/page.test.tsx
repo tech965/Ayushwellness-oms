@@ -114,9 +114,30 @@ describe("InventoryPage — Variants column shows the OMS-visible count", () => 
     ])
     const { container } = renderWithProviders(<InventoryPage />)
 
-    // Columns: image, Product, Vendor, Variants, Total boxes, ...
+    // Columns: image, Product, Vendor, Variants, Total Units, ...
     const cells = container.querySelectorAll("tbody tr td")
     expect(cells[3]).toHaveTextContent("3")
     expect(cells[3].textContent?.trim()).toBe("3")
+  })
+})
+
+describe("InventoryPage — one 'Total Units' column", () => {
+  it("shows Total Units (the packets total) and no separate Total boxes / Total packets", () => {
+    setProducts([
+      product({ id: "p1", display_title: "Vajrashakti", total_available_boxes: 12, total_packets: 1234 }),
+    ])
+    const { container } = renderWithProviders(<InventoryPage />)
+
+    expect(screen.getByText("Total Units")).toBeInTheDocument()
+    expect(screen.queryByText("Total boxes")).not.toBeInTheDocument()
+    expect(screen.queryByText("Total packets")).not.toBeInTheDocument()
+    const cells = container.querySelectorAll("tbody tr td")
+    expect(cells[4].textContent?.trim()).toBe("1,234")
+  })
+
+  it("flags a non-positive total in red", () => {
+    setProducts([product({ id: "p1", display_title: "Low", total_packets: 0 })])
+    const { container } = renderWithProviders(<InventoryPage />)
+    expect(container.querySelector("tbody tr td:nth-child(5) span")).toHaveClass("text-red-600")
   })
 })

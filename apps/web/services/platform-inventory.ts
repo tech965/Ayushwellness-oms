@@ -5,6 +5,10 @@ import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
   PlatformStockMovement,
   PlatformStockMovementCreateInput,
+  ProductMarketplaceMovement,
+  ProductMarketplaceMovementCreateInput,
+  ProductMarketplaceMovementEditInput,
+  ProductMarketplaceMovementUndoInput,
   ProductPlatformStock,
   ProductShipmentSummary,
   UnifiedStockMovement,
@@ -135,6 +139,121 @@ export function useRecordPlatformStockMovement(variantId: string) {
       void queryClient.invalidateQueries({
         predicate: (query) => query.queryKey.includes("platform-stock"),
       })
+    },
+  })
+}
+
+/** Record Sale / RTO -- for the whole PRODUCT on one platform, no SKU.
+ * The caller sends only the packet quantity sold/returned, never the
+ * resulting total; the backend converts to outers, computes the new
+ * balances itself, and applies the same effect to the product's OMS
+ * total stock in one transaction (see
+ * `PlatformInventoryService.record_product_movement`).
+ */
+export function useRecordProductMarketplaceMovement(productId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: ProductMarketplaceMovementCreateInput) => {
+      const response = await apiClient.post<ApiResponse<ProductMarketplaceMovement>>(
+        `/inventory/products/${productId}/marketplace-movements`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      // A Sale/RTO now also changes the product's OMS TOTAL stock (the
+      // backend writes both in one transaction), so the product detail
+      // header, its variant cards and the Inventory overview must refetch
+      // too -- the displayed total always comes from the API, never from
+      // a local subtraction.
+      void queryClient.invalidateQueries({ queryKey: ["inventory"] })
+    },
+  })
+}
+
+interface ProductMarketplaceHistoryParams {
+  page: number
+  pageSize: number
+  platform?: string
+  /** Filter to ONE OMS-visible variant's own history (Gold / Red / Blue). */
+  catalog_variant_id?: string
+  date_from?: string
+  date_to?: string
+}
+
+async function fetchProductMarketplaceHistory(
+  productId: string,
+  params: ProductMarketplaceHistoryParams
+): Promise<PaginatedResponse<ProductMarketplaceMovement>> {
+  const response = await apiClient.get<PaginatedResponse<ProductMarketplaceMovement>>(
+    `/inventory/products/${productId}/marketplace-movements`,
+    {
+      params: {
+        page: params.page,
+        page_size: params.pageSize,
+        platform: params.platform || undefined,
+        catalog_variant_id: params.catalog_variant_id || undefined,
+        date_from: params.date_from || undefined,
+        date_to: params.date_to || undefined,
+      },
+    }
+  )
+  return response.data
+}
+
+/** Product-level Marketplace Adjustment history: Add Stock / Sale / RTO,
+ * each its own event -- never merged or netted. Distinct from
+ * `usePlatformMovementHistory` above (per-SKU, unaffected by this).
+ */
+export function useProductMarketplaceHistory(
+  productId: string,
+  params: ProductMarketplaceHistoryParams
+) {
+  return useQuery({
+    queryKey: ["inventory", "products", productId, "marketplace-movements", params],
+    queryFn: () => fetchProductMarketplaceHistory(productId, params),
+    enabled: Boolean(productId),
+    placeholderData: (previous) => previous,
+  })
+}
+
+/** Correct a manual Sale/RTO's packet quantity. The original row is never
+ * changed: the backend appends a reversal and a replacement in one
+ * transaction, so both the marketplace balance and the OMS total reflect
+ * only the new quantity. Refetches everything inventory-related (the OMS
+ * total is computed by the backend, never locally).
+ */
+export function useEditMarketplaceMovement(movementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: ProductMarketplaceMovementEditInput) => {
+      const response = await apiClient.post<ApiResponse<ProductMarketplaceMovement>>(
+        `/inventory/marketplace-movements/${movementId}/edit`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["inventory"] })
+    },
+  })
+}
+
+/** Undo a manual Sale/RTO by appending a reversal -- the original stays in
+ * the history and the effective balance returns to its pre-movement value.
+ */
+export function useUndoMarketplaceMovement(movementId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: ProductMarketplaceMovementUndoInput) => {
+      const response = await apiClient.post<ApiResponse<ProductMarketplaceMovement>>(
+        `/inventory/marketplace-movements/${movementId}/undo`,
+        input
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["inventory"] })
     },
   })
 }

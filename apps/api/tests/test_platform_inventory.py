@@ -17,6 +17,7 @@ from app.models.enums import (
     InventoryMovementType,
     PaymentType,
     PlatformStockMovementType,
+    ProductMarketplaceMovementType,
     ShipmentStatus,
 )
 from app.models.platform_inventory import InventoryPlatform
@@ -113,7 +114,7 @@ async def _add_shopify_movement(
 
 
 def _shopify_row(summary: ProductPlatformStockResponse):
-    rows = {row.platform: row for row in summary.variants[0].platforms}
+    rows = {row.platform: row for row in summary.platforms}
     return rows["shopify"]
 
 
@@ -142,17 +143,25 @@ async def test_add_amazon_stock_is_additive(db_session: AsyncSession) -> None:
     service = PlatformInventoryService(db_session)
 
     first = await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=500, reason="Initial warehouse stock", stock_date=None, actor=None,
+        quantity=500,
+        reason="Initial warehouse stock",
+        stock_date=None,
+        actor=None,
     )
     assert first.quantity_delta == 500
     assert first.quantity_after == 500
 
     second = await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=100, reason=None, stock_date=None, actor=None,
+        quantity=100,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     # current(500) + 100 = 600, never the client's raw "100" as a total.
     assert second.quantity_delta == 100
@@ -163,14 +172,22 @@ async def test_add_flipkart_stock_is_additive(db_session: AsyncSession) -> None:
     _, variant = await _make_variant(db_session, sku="PLAT-FLP-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.FLIPKART,
+        variant.id,
+        platform=InventoryPlatform.FLIPKART,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=350, reason=None, stock_date=None, actor=None,
+        quantity=350,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     second = await service.record_movement(
-        variant.id, platform=InventoryPlatform.FLIPKART,
+        variant.id,
+        platform=InventoryPlatform.FLIPKART,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=10, reason=None, stock_date=None, actor=None,
+        quantity=10,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     assert second.quantity_after == 360
 
@@ -179,14 +196,22 @@ async def test_add_blinkit_stock_is_additive(db_session: AsyncSession) -> None:
     _, variant = await _make_variant(db_session, sku="PLAT-BLK-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.BLINKIT,
+        variant.id,
+        platform=InventoryPlatform.BLINKIT,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=200, reason=None, stock_date=None, actor=None,
+        quantity=200,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     second = await service.record_movement(
-        variant.id, platform=InventoryPlatform.BLINKIT,
+        variant.id,
+        platform=InventoryPlatform.BLINKIT,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=15, reason=None, stock_date=None, actor=None,
+        quantity=15,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     assert second.quantity_after == 215
 
@@ -195,14 +220,22 @@ async def test_add_meesho_stock_is_additive(db_session: AsyncSession) -> None:
     _, variant = await _make_variant(db_session, sku="PLAT-MSH-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.MEESHO,
+        variant.id,
+        platform=InventoryPlatform.MEESHO,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=150, reason=None, stock_date=None, actor=None,
+        quantity=150,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     second = await service.record_movement(
-        variant.id, platform=InventoryPlatform.MEESHO,
+        variant.id,
+        platform=InventoryPlatform.MEESHO,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=5, reason=None, stock_date=None, actor=None,
+        quantity=5,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     assert second.quantity_after == 155
 
@@ -213,14 +246,22 @@ async def test_add_stock_calculates_from_actual_current_stock_not_a_hardcoded_va
     _, variant = await _make_variant(db_session, sku="PLAT-CALC-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=37, reason=None, stock_date=None, actor=None,
+        quantity=37,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     result = await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=13, reason=None, stock_date=None, actor=None,
+        quantity=13,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     assert result.quantity_after == 50  # 37 + 13, never a hardcoded/guessed number
 
@@ -230,9 +271,13 @@ async def test_add_stock_rejects_negative_quantity(db_session: AsyncSession) -> 
     service = PlatformInventoryService(db_session)
     with pytest.raises(ValidationError):
         await service.record_movement(
-            variant.id, platform=InventoryPlatform.AMAZON,
+            variant.id,
+            platform=InventoryPlatform.AMAZON,
             movement_type=PlatformStockMovementType.STOCK_ADDED,
-            quantity=-5, reason=None, stock_date=None, actor=None,
+            quantity=-5,
+            reason=None,
+            stock_date=None,
+            actor=None,
         )
 
 
@@ -241,9 +286,13 @@ async def test_add_stock_rejects_zero_quantity(db_session: AsyncSession) -> None
     service = PlatformInventoryService(db_session)
     with pytest.raises(ValidationError):
         await service.record_movement(
-            variant.id, platform=InventoryPlatform.AMAZON,
+            variant.id,
+            platform=InventoryPlatform.AMAZON,
             movement_type=PlatformStockMovementType.STOCK_ADDED,
-            quantity=0, reason=None, stock_date=None, actor=None,
+            quantity=0,
+            reason=None,
+            stock_date=None,
+            actor=None,
         )
 
 
@@ -253,9 +302,13 @@ async def test_reason_is_optional_for_platform_stock_unlike_shopify_adjustment(
     _, variant = await _make_variant(db_session, sku="PLAT-REASON-1")
     service = PlatformInventoryService(db_session)
     movement = await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=10, reason=None, stock_date=None, actor=None,
+        quantity=10,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     assert movement.reason is None  # never required to raise ValidationError
 
@@ -265,8 +318,13 @@ async def test_unknown_platform_is_rejected(db_session: AsyncSession) -> None:
     service = PlatformInventoryService(db_session)
     with pytest.raises(ValidationError):
         await service.record_movement(
-            variant.id, platform="ebay", movement_type=PlatformStockMovementType.STOCK_ADDED,
-            quantity=10, reason=None, stock_date=None, actor=None,
+            variant.id,
+            platform="ebay",
+            movement_type=PlatformStockMovementType.STOCK_ADDED,
+            quantity=10,
+            reason=None,
+            stock_date=None,
+            actor=None,
         )
 
 
@@ -277,14 +335,22 @@ async def test_record_deduction_subtracts_from_current_stock(db_session: AsyncSe
     _, variant = await _make_variant(db_session, sku="PLAT-DED-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=500, reason=None, stock_date=None, actor=None,
+        quantity=500,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     result = await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_DEDUCTED,
-        quantity=18, reason="Marketplace sale", stock_date=None, actor=None,
+        quantity=18,
+        reason="Marketplace sale",
+        stock_date=None,
+        actor=None,
     )
     assert result.quantity_delta == -18
     assert result.quantity_after == 482
@@ -294,15 +360,23 @@ async def test_deduction_below_zero_is_rejected(db_session: AsyncSession) -> Non
     _, variant = await _make_variant(db_session, sku="PLAT-DED-NEG-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=10, reason=None, stock_date=None, actor=None,
+        quantity=10,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     with pytest.raises(ValidationError):
         await service.record_movement(
-            variant.id, platform=InventoryPlatform.AMAZON,
+            variant.id,
+            platform=InventoryPlatform.AMAZON,
             movement_type=PlatformStockMovementType.STOCK_DEDUCTED,
-            quantity=11, reason=None, stock_date=None, actor=None,
+            quantity=11,
+            reason=None,
+            stock_date=None,
+            actor=None,
         )
 
 
@@ -315,9 +389,13 @@ async def test_platform_isolation_amazon_stock_never_affects_flipkart(
     _, variant = await _make_variant(db_session, sku="PLAT-ISO-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=999, reason=None, stock_date=None, actor=None,
+        quantity=999,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     latest_flipkart = await service.movements.get_latest_as_of(
         product_variant_id=variant.id, platform=InventoryPlatform.FLIPKART, as_of=ist_today()
@@ -332,9 +410,13 @@ async def test_variant_isolation_different_skus_never_share_platform_stock(
     _, variant_b = await _make_variant(db_session, sku="PLAT-VARB-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant_a.id, platform=InventoryPlatform.AMAZON,
+        variant_a.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=100, reason=None, stock_date=None, actor=None,
+        quantity=100,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     latest_b = await service.movements.get_latest_as_of(
         product_variant_id=variant_b.id, platform=InventoryPlatform.AMAZON, as_of=ist_today()
@@ -348,9 +430,13 @@ async def test_shopify_stock_is_unaffected_by_platform_stock_operations(
     _, variant = await _make_variant(db_session, sku="PLAT-SHOP-1", available_quantity=42)
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=500, reason=None, stock_date=None, actor=None,
+        quantity=500,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
     assert refreshed.available_quantity == 42  # completely untouched
@@ -368,14 +454,22 @@ async def test_historical_dates_remain_separate_and_are_never_overwritten(
     day2 = date(2026, 9, 12)
 
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=500, reason=None, stock_date=day1, actor=None,
+        quantity=500,
+        reason=None,
+        stock_date=day1,
+        actor=None,
     )
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=30, reason=None, stock_date=day2, actor=None,
+        quantity=30,
+        reason=None,
+        stock_date=day2,
+        actor=None,
     )
 
     as_of_day1 = await service.movements.get_latest_as_of(
@@ -396,14 +490,22 @@ async def test_todays_stock_movement_calculation_added_and_deducted(
     today = ist_today()
 
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=50, reason=None, stock_date=today, actor=None,
+        quantity=50,
+        reason=None,
+        stock_date=today,
+        actor=None,
     )
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_DEDUCTED,
-        quantity=20, reason=None, stock_date=today, actor=None,
+        quantity=20,
+        reason=None,
+        stock_date=today,
+        actor=None,
     )
 
     added, deducted = await service.movements.sum_for_date(
@@ -424,25 +526,36 @@ async def test_product_platform_stock_summary_shows_opening_added_deducted_curre
     yesterday = ist_today() - timedelta(days=1)
     today = ist_today()
 
-    await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
-        movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=500, reason=None, stock_date=yesterday, actor=None,
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=500,
+        reason=None,
+        stock_date=yesterday,
+        actor=None,
     )
-    await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
-        movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=50, reason=None, stock_date=today, actor=None,
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=50,
+        reason=None,
+        stock_date=today,
+        actor=None,
     )
-    await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
-        movement_type=PlatformStockMovementType.STOCK_DEDUCTED,
-        quantity=20, reason=None, stock_date=today, actor=None,
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.SALE,
+        quantity_packets=20,
+        reason=None,
+        stock_date=today,
+        actor=None,
     )
 
     summary = await service.get_product_platform_stock(product.id, stock_date=today)
-    assert len(summary.variants) == 1
-    rows = {row.platform: row for row in summary.variants[0].platforms}
+    rows = {row.platform: row for row in summary.platforms}
 
     amazon = rows[InventoryPlatform.AMAZON]
     assert amazon.opening_stock == 500
@@ -477,15 +590,23 @@ async def test_backfilling_a_past_date_does_not_change_a_later_dates_own_balance
     day2 = date(2026, 9, 12)
 
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=530, reason=None, stock_date=day2, actor=None,
+        quantity=530,
+        reason=None,
+        stock_date=day2,
+        actor=None,
     )
     # Backfilling day1 AFTER day2 already exists.
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=500, reason=None, stock_date=day1, actor=None,
+        quantity=500,
+        reason=None,
+        stock_date=day1,
+        actor=None,
     )
 
     as_of_day2 = await service.movements.get_latest_as_of(
@@ -503,19 +624,29 @@ async def test_movement_history_merges_platform_and_shopify_rows_sorted_by_time(
     _, variant = await _make_variant(db_session, sku="PLAT-HIST-MERGE-1", available_quantity=100)
     service = PlatformInventoryService(db_session)
     order = await _make_order_with_item(
-        db_session, order_number="PLAT-HIST-ORD-1", sku="PLAT-HIST-MERGE-1", quantity=1,
+        db_session,
+        order_number="PLAT-HIST-ORD-1",
+        sku="PLAT-HIST-MERGE-1",
+        quantity=1,
         product_variant_id=variant.id,
     )
     shipment = await _make_shipment(db_session, order_id=order.id, awb="PLAT-HIST-AWB-1")
     await apply_tracking_event(
-        db_session, shipment, _tracking_event(status=ShipmentStatus.PICKED_UP),
-        shipment_service=ShipmentService(db_session), rto_service=RTOService(db_session),
+        db_session,
+        shipment,
+        _tracking_event(status=ShipmentStatus.PICKED_UP),
+        shipment_service=ShipmentService(db_session),
+        rto_service=RTOService(db_session),
         inventory_service=InventoryService(db_session),
     )
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=50, reason="Warehouse stock", stock_date=None, actor=None,
+        quantity=50,
+        reason="Warehouse stock",
+        stock_date=None,
+        actor=None,
     )
 
     rows, total = await service.get_movement_history(
@@ -532,12 +663,19 @@ async def test_movement_history_filtered_to_one_platform_excludes_shopify(
     _, variant = await _make_variant(db_session, sku="PLAT-HIST-FILTER-1")
     service = PlatformInventoryService(db_session)
     await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
         movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=50, reason=None, stock_date=None, actor=None,
+        quantity=50,
+        reason=None,
+        stock_date=None,
+        actor=None,
     )
     rows, total = await service.get_movement_history(
-        variant.id, platform=InventoryPlatform.AMAZON, date_from=None, date_to=None,
+        variant.id,
+        platform=InventoryPlatform.AMAZON,
+        date_from=None,
+        date_to=None,
         page_params=_page_params(),
     )
     assert total == 1
@@ -552,14 +690,20 @@ async def test_shipment_summary_counts_in_transit_boxes_from_existing_dispatch_d
 ) -> None:
     product, variant = await _make_variant(db_session, sku="PLAT-SHIP-1", available_quantity=20)
     order = await _make_order_with_item(
-        db_session, order_number="PLAT-SHIP-ORD-1", sku="PLAT-SHIP-1", quantity=3,
+        db_session,
+        order_number="PLAT-SHIP-ORD-1",
+        sku="PLAT-SHIP-1",
+        quantity=3,
         product_variant_id=variant.id,
     )
     shipment = await _make_shipment(db_session, order_id=order.id, awb="PLAT-SHIP-AWB-1")
     for status in (ShipmentStatus.PICKED_UP, ShipmentStatus.IN_TRANSIT):
         await apply_tracking_event(
-            db_session, shipment, _tracking_event(status=status),
-            shipment_service=ShipmentService(db_session), rto_service=RTOService(db_session),
+            db_session,
+            shipment,
+            _tracking_event(status=status),
+            shipment_service=ShipmentService(db_session),
+            rto_service=RTOService(db_session),
             inventory_service=InventoryService(db_session),
         )
 
@@ -679,8 +823,12 @@ async def test_shopify_today_returns_the_live_current_stock(db_session: AsyncSes
     # A stale old movement exists -- "today" must use the live column,
     # never this ledger row's balance.
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-50, quantity_after=500, on_date=ist_today() - timedelta(days=5),
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-50,
+        quantity_after=500,
+        on_date=ist_today() - timedelta(days=5),
     )
 
     service = PlatformInventoryService(db_session)
@@ -699,14 +847,24 @@ async def test_shopify_previous_date_returns_historical_stock_not_zero(
     product, variant = await _make_variant(db_session, sku="SHOP-HIST-1", available_quantity=1200)
     target_date = ist_today() - timedelta(days=2)
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-35, quantity_after=955, on_date=target_date, hour=10,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-35,
+        quantity_after=955,
+        on_date=target_date,
+        hour=10,
     )
     # A LATER movement (after target_date, before today) exists too --
     # must never leak into target_date's own balance.
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-45, quantity_after=910, on_date=ist_today() - timedelta(days=1), hour=9,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-45,
+        quantity_after=910,
+        on_date=ist_today() - timedelta(days=1),
+        hour=9,
     )
 
     service = PlatformInventoryService(db_session)
@@ -725,13 +883,23 @@ async def test_shopify_stock_added_counts_only_positive_movements_on_the_selecte
     other_date = ist_today() - timedelta(days=1)
 
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.RTO_RESTOCK,
-        quantity_delta=20, quantity_after=920, on_date=target_date, hour=11,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.RTO_RESTOCK,
+        quantity_delta=20,
+        quantity_after=920,
+        on_date=target_date,
+        hour=11,
     )
     # A positive movement on a DIFFERENT date must not be counted.
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.RTO_RESTOCK,
-        quantity_delta=15, quantity_after=935, on_date=other_date, hour=11,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.RTO_RESTOCK,
+        quantity_delta=15,
+        quantity_after=935,
+        on_date=other_date,
+        hour=11,
     )
 
     service = PlatformInventoryService(db_session)
@@ -751,13 +919,23 @@ async def test_shopify_sold_deducted_counts_only_negative_movements_on_the_selec
     other_date = ist_today() - timedelta(days=1)
 
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-35, quantity_after=865, on_date=target_date, hour=15,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-35,
+        quantity_after=865,
+        on_date=target_date,
+        hour=15,
     )
     # A negative movement on a DIFFERENT date must not be counted.
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-12, quantity_after=853, on_date=other_date, hour=15,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-12,
+        quantity_after=853,
+        on_date=other_date,
+        hour=15,
     )
 
     service = PlatformInventoryService(db_session)
@@ -779,8 +957,13 @@ async def test_shopify_manual_adjustment_counts_toward_added_and_deducted_too(
     product, variant = await _make_variant(db_session, sku="SHOP-MANUAL-1", available_quantity=1200)
     target_date = ist_today() - timedelta(days=2)
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.MANUAL_ADJUSTMENT,
-        quantity_delta=100, quantity_after=1100, on_date=target_date, hour=17,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.MANUAL_ADJUSTMENT,
+        quantity_delta=100,
+        quantity_after=1100,
+        on_date=target_date,
+        hour=17,
     )
 
     service = PlatformInventoryService(db_session)
@@ -800,12 +983,22 @@ async def test_shopify_current_stock_is_the_balance_at_the_end_of_the_selected_d
     product, variant = await _make_variant(db_session, sku="SHOP-EOD-1", available_quantity=1200)
     target_date = ist_today() - timedelta(days=2)
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-10, quantity_after=990, on_date=target_date, hour=9,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-10,
+        quantity_after=990,
+        on_date=target_date,
+        hour=9,
     )
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-35, quantity_after=955, on_date=target_date, hour=15,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-35,
+        quantity_after=955,
+        on_date=target_date,
+        hour=15,
     )
 
     service = PlatformInventoryService(db_session)
@@ -827,8 +1020,13 @@ async def test_date_with_no_shopify_movement_still_reconstructs_the_correct_bala
     quiet_date = ist_today() - timedelta(days=3)  # no movement happens on this date
 
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-300, quantity_after=900, on_date=earlier_date, hour=10,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-300,
+        quantity_after=900,
+        on_date=earlier_date,
+        hour=10,
     )
 
     service = PlatformInventoryService(db_session)
@@ -853,8 +1051,13 @@ async def test_date_before_the_first_ever_movement_is_reported_as_unavailable_no
     before_history_date = ist_today() - timedelta(days=10)
 
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-300, quantity_after=900, on_date=first_movement_date, hour=10,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-300,
+        quantity_after=900,
+        on_date=first_movement_date,
+        hour=10,
     )
 
     service = PlatformInventoryService(db_session)
@@ -878,12 +1081,18 @@ async def test_ist_midnight_boundary_buckets_shopify_movements_to_the_correct_da
     _, day_end = ist_day_bounds_for_date(day)
 
     await InventoryMovementRepository(db_session).create(
-        product_variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-5, quantity_after=995, created_at=day_end - timedelta(minutes=5),
+        product_variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-5,
+        quantity_after=995,
+        created_at=day_end - timedelta(minutes=5),
     )
     await InventoryMovementRepository(db_session).create(
-        product_variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-3, quantity_after=992, created_at=day_end + timedelta(minutes=5),
+        product_variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-3,
+        quantity_after=992,
+        created_at=day_end + timedelta(minutes=5),
     )
     await db_session.commit()
 
@@ -909,21 +1118,576 @@ async def test_amazon_platform_data_is_unaffected_by_the_shopify_fix(
     )
     target_date = ist_today() - timedelta(days=2)
     await _add_shopify_movement(
-        db_session, variant_id=variant.id, movement_type=InventoryMovementType.DISPATCH,
-        quantity_delta=-35, quantity_after=955, on_date=target_date, hour=10,
+        db_session,
+        variant_id=variant.id,
+        movement_type=InventoryMovementType.DISPATCH,
+        quantity_delta=-35,
+        quantity_after=955,
+        on_date=target_date,
+        hour=10,
     )
 
     service = PlatformInventoryService(db_session)
-    await service.record_movement(
-        variant.id, platform=InventoryPlatform.AMAZON,
-        movement_type=PlatformStockMovementType.STOCK_ADDED,
-        quantity=500, reason=None, stock_date=target_date, actor=None,
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=500,
+        reason=None,
+        stock_date=target_date,
+        actor=None,
     )
 
     summary = await service.get_product_platform_stock(product.id, stock_date=target_date)
-    rows = {row.platform: row for row in summary.variants[0].platforms}
+    rows = {row.platform: row for row in summary.platforms}
 
     assert rows["shopify"].current_stock == 955
     assert rows[InventoryPlatform.AMAZON].current_stock == 500
     assert rows[InventoryPlatform.AMAZON].opening_stock == 0
     assert rows[InventoryPlatform.FLIPKART].current_stock == 0  # untouched, still a real 0 not None
+
+
+# --- Product-level marketplace movements (no SKU selection) --------------
+# See app.models.platform_inventory.ProductMarketplaceMovement and
+# PlatformInventoryService.record_product_movement.
+
+
+async def _make_product_with_variants(session: AsyncSession, *, key: str, variants: list[dict]):
+    product, _ = await ProductRepository(session).upsert_by_external_id(
+        source_system="shopify", external_id=f"prod-{key}", title=f"Product {key}"
+    )
+    made = []
+    for spec in variants:
+        variant, _ = await ProductVariantRepository(session).upsert_by_external_id(
+            source_system="shopify",
+            external_id=f"var-{spec['sku']}",
+            product_id=product.id,
+            sku=spec["sku"],
+            price=Decimal("100.00"),
+            available_quantity=spec.get("available_quantity", 0),
+            pack_size=spec.get("pack_size", 1),
+            packets_per_box=spec.get("packets_per_box", 1),
+        )
+        made.append(variant)
+    await session.commit()
+    return product, made
+
+
+async def test_amazon_sale_of_20_packets_creates_product_level_negative_adjustment(
+    db_session: AsyncSession,
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-SALE-1")
+    service = PlatformInventoryService(db_session)
+    today = ist_today()
+
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.SALE,
+        quantity_packets=20,
+        reason="Marketplace sale",
+        stock_date=today,
+        actor=None,
+    )
+
+    summary = await service.get_product_platform_stock(product.id, stock_date=today)
+    amazon = {row.platform: row for row in summary.platforms}[InventoryPlatform.AMAZON]
+    assert amazon.current_stock == -20
+    assert amazon.stock_deducted == 20
+    assert amazon.stock_added == 0
+
+
+async def test_flipkart_sale_works_the_same_way_as_amazon(db_session: AsyncSession) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-SALE-FK-1")
+    service = PlatformInventoryService(db_session)
+    today = ist_today()
+
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.FLIPKART,
+        movement_type=ProductMarketplaceMovementType.SALE,
+        quantity_packets=7,
+        reason=None,
+        stock_date=today,
+        actor=None,
+    )
+
+    summary = await service.get_product_platform_stock(product.id, stock_date=today)
+    rows = {row.platform: row for row in summary.platforms}
+    assert rows[InventoryPlatform.FLIPKART].current_stock == -7
+    # untouched -- the platform is preserved, never leaked into another row
+    assert rows[InventoryPlatform.AMAZON].current_stock == 0
+
+
+async def test_amazon_rto_of_2_packets_creates_product_level_positive_adjustment(
+    db_session: AsyncSession,
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-RTO-1")
+    service = PlatformInventoryService(db_session)
+    today = ist_today()
+
+    movement = await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=2,
+        reason="Customer return",
+        stock_date=today,
+        actor=None,
+    )
+    assert movement.quantity_delta == 2
+    assert movement.quantity_after == 2
+
+    summary = await service.get_product_platform_stock(product.id, stock_date=today)
+    amazon = {row.platform: row for row in summary.platforms}[InventoryPlatform.AMAZON]
+    assert amazon.current_stock == 2
+    assert amazon.stock_added == 2  # RTO counts toward "added", same bucket as stock_added
+
+
+async def test_sale_and_rto_are_separate_history_events_never_merged(
+    db_session: AsyncSession,
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-HIST-1")
+    service = PlatformInventoryService(db_session)
+    today = ist_today()
+
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.SALE,
+        quantity_packets=20,
+        reason="Marketplace sale",
+        stock_date=today,
+        actor=None,
+    )
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=2,
+        reason="Customer return",
+        stock_date=today,
+        actor=None,
+    )
+
+    rows, total = await service.get_product_marketplace_history(
+        product.id, platform=None, date_from=None, date_to=None, page_params=_page_params()
+    )
+    assert total == 2
+    by_type = {r.movement_type.value: r for r in rows}
+    assert set(by_type) == {"sale", "rto"}  # never netted into one row
+    assert by_type["sale"].quantity_delta == -20
+    assert by_type["sale"].quantity_packets == 20
+    assert by_type["sale"].reason == "Marketplace sale"
+    assert by_type["rto"].quantity_delta == 2
+    assert by_type["rto"].quantity_packets == 2
+    assert by_type["rto"].reason == "Customer return"
+
+
+async def test_net_marketplace_adjustment_after_sale_and_rto_matches_the_example(
+    db_session: AsyncSession,
+) -> None:
+    """20 Amazon packets sold -> -20; 2 returned -> +2; net = -18."""
+    product, _ = await _make_variant(db_session, sku="MKT-NET-1")
+    service = PlatformInventoryService(db_session)
+    today = ist_today()
+
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.SALE,
+        quantity_packets=20,
+        reason=None,
+        stock_date=today,
+        actor=None,
+    )
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=2,
+        reason=None,
+        stock_date=today,
+        actor=None,
+    )
+
+    summary = await service.get_product_platform_stock(product.id, stock_date=today)
+    amazon = {row.platform: row for row in summary.platforms}[InventoryPlatform.AMAZON]
+    assert amazon.current_stock == -18
+
+
+async def test_product_level_movement_never_touches_any_product_variant_row(
+    db_session: AsyncSession,
+) -> None:
+    """No ProductVariant is arbitrarily selected or modified -- exact
+    snapshot equality of every underlying row before/after.
+    """
+    product, variants = await _make_product_with_variants(
+        db_session,
+        key="MKT-NOSKU",
+        variants=[
+            {"sku": "MKT-NOSKU-A", "available_quantity": 111, "pack_size": 1},
+            {"sku": "MKT-NOSKU-B", "available_quantity": 222, "pack_size": 1},
+        ],
+    )
+    before = {
+        v.id: (v.available_quantity, v.inventory_quantity, v.pack_size, v.packets_per_box)
+        for v in variants
+    }
+
+    service = PlatformInventoryService(db_session)
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.SALE,
+        quantity_packets=20,
+        reason=None,
+        stock_date=ist_today(),
+        actor=None,
+    )
+
+    refreshed = await ProductVariantRepository(db_session).list_for_product(product.id)
+    after = {
+        v.id: (v.available_quantity, v.inventory_quantity, v.pack_size, v.packets_per_box)
+        for v in refreshed
+    }
+    assert after == before  # not one field on any SKU moved
+
+
+async def test_product_level_movement_never_modifies_shopify_inventory_quantity(
+    db_session: AsyncSession,
+) -> None:
+    product, variant = await _make_variant(db_session, sku="MKT-SHOPIFY-1", available_quantity=50)
+    await ProductVariantRepository(db_session).update(variant, inventory_quantity=999)
+    await db_session.commit()
+
+    service = PlatformInventoryService(db_session)
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.MEESHO,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=5,
+        reason=None,
+        stock_date=ist_today(),
+        actor=None,
+    )
+
+    refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert refreshed.inventory_quantity == 999  # Shopify's own field, completely untouched
+    assert refreshed.available_quantity == 50  # OMS stock also untouched
+
+
+async def test_existing_dispatch_still_works_unaffected_by_product_level_ledger(
+    db_session: AsyncSession,
+) -> None:
+    """Existing Dispatch/RTO-restock SKU-level inventory logic is
+    completely independent of the new product-level ledger.
+    """
+    product, variant = await _make_variant(db_session, sku="MKT-DISPATCH-1", available_quantity=100)
+    order = await _make_order_with_item(
+        db_session,
+        order_number="MKT-DISPATCH-ORD-1",
+        sku="MKT-DISPATCH-1",
+        quantity=3,
+        product_variant_id=variant.id,
+    )
+    shipment = await _make_shipment(db_session, order_id=order.id, awb="MKT-DISPATCH-AWB-1")
+
+    service = PlatformInventoryService(db_session)
+    await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.BLINKIT,
+        movement_type=ProductMarketplaceMovementType.SALE,
+        quantity_packets=10,
+        reason=None,
+        stock_date=ist_today(),
+        actor=None,
+    )
+
+    for status in (ShipmentStatus.PICKED_UP, ShipmentStatus.IN_TRANSIT):
+        await apply_tracking_event(
+            db_session,
+            shipment,
+            _tracking_event(status=status),
+            shipment_service=ShipmentService(db_session),
+            rto_service=RTOService(db_session),
+            inventory_service=InventoryService(db_session),
+        )
+
+    refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert refreshed.available_quantity == 97  # 100 - 3, Shopify-side dispatch, unaffected
+
+
+async def test_marketplace_platform_is_preserved_across_multiple_platforms(
+    db_session: AsyncSession,
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-MULTI-PLATFORM-1")
+    service = PlatformInventoryService(db_session)
+    today = ist_today()
+
+    for platform, qty in (
+        (InventoryPlatform.AMAZON, 10),
+        (InventoryPlatform.FLIPKART, 20),
+        (InventoryPlatform.BLINKIT, 30),
+        (InventoryPlatform.MEESHO, 40),
+        (InventoryPlatform.MANUAL_OTHER, 50),
+    ):
+        await service.record_product_movement(
+            product.id,
+            platform=platform,
+            movement_type=ProductMarketplaceMovementType.RTO,
+            quantity_packets=qty,
+            reason=None,
+            stock_date=today,
+            actor=None,
+        )
+
+    summary = await service.get_product_platform_stock(product.id, stock_date=today)
+    rows = {row.platform: row for row in summary.platforms}
+    assert rows[InventoryPlatform.AMAZON].current_stock == 10
+    assert rows[InventoryPlatform.FLIPKART].current_stock == 20
+    assert rows[InventoryPlatform.BLINKIT].current_stock == 30
+    assert rows[InventoryPlatform.MEESHO].current_stock == 40
+    assert rows[InventoryPlatform.MANUAL_OTHER].current_stock == 50
+
+
+async def test_reason_is_optional_and_trimmed(db_session: AsyncSession) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-REASON-1")
+    service = PlatformInventoryService(db_session)
+
+    no_reason = await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=1,
+        reason="   ",
+        stock_date=ist_today(),
+        actor=None,
+    )
+    assert no_reason.reason is None  # whitespace-only reason normalized to None
+
+    with_reason = await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=1,
+        reason="  Warehouse received  ",
+        stock_date=ist_today(),
+        actor=None,
+    )
+    assert with_reason.reason == "Warehouse received"  # trimmed
+
+
+async def test_zero_or_negative_quantity_packets_is_rejected(db_session: AsyncSession) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-INVALID-QTY-1")
+    service = PlatformInventoryService(db_session)
+
+    for bad_qty in (0, -5):
+        with pytest.raises(ValidationError):
+            await service.record_product_movement(
+                product.id,
+                platform=InventoryPlatform.AMAZON,
+                movement_type=ProductMarketplaceMovementType.SALE,
+                quantity_packets=bad_qty,
+                reason=None,
+                stock_date=ist_today(),
+                actor=None,
+            )
+
+
+async def test_non_uniform_pack_size_rejects_the_product_level_movement(
+    db_session: AsyncSession,
+) -> None:
+    """THE critical safety gap this feature must never silently guess
+    past: once a product's real SKUs disagree on pack_size (e.g. the
+    approved 60/120/180 -> 1/2/3 boxes-per-unit backfill), a bare
+    "N packets sold" has no deterministic outer-count without knowing
+    which pack size was sold -- must be REJECTED, never averaged/
+    defaulted/allocated to one arbitrary SKU.
+    """
+    product, _ = await _make_product_with_variants(
+        db_session,
+        key="MKT-NONUNIFORM",
+        variants=[
+            {"sku": "MKT-NU-60", "available_quantity": 100, "pack_size": 1},
+            {"sku": "MKT-NU-120", "available_quantity": 100, "pack_size": 2},
+            {"sku": "MKT-NU-180", "available_quantity": 100, "pack_size": 3},
+        ],
+    )
+    service = PlatformInventoryService(db_session)
+
+    with pytest.raises(ValidationError):
+        await service.record_product_movement(
+            product.id,
+            platform=InventoryPlatform.AMAZON,
+            movement_type=ProductMarketplaceMovementType.SALE,
+            quantity_packets=20,
+            reason=None,
+            stock_date=ist_today(),
+            actor=None,
+        )
+
+
+async def test_uniform_pack_size_greater_than_one_converts_packets_to_outers(
+    db_session: AsyncSession,
+) -> None:
+    """When a product's SKUs DO agree (e.g. every SKU pack_size=2), the
+    conversion is deterministic and must actually apply -- not silently
+    treated as 1:1.
+    """
+    product, _ = await _make_product_with_variants(
+        db_session,
+        key="MKT-UNIFORM2",
+        variants=[
+            {"sku": "MKT-U2-A", "available_quantity": 50, "pack_size": 2},
+            {"sku": "MKT-U2-B", "available_quantity": 50, "pack_size": 2},
+        ],
+    )
+    service = PlatformInventoryService(db_session)
+
+    movement = await service.record_product_movement(
+        product.id,
+        platform=InventoryPlatform.AMAZON,
+        movement_type=ProductMarketplaceMovementType.RTO,
+        quantity_packets=10,
+        reason=None,
+        stock_date=ist_today(),
+        actor=None,
+    )
+    assert movement.quantity_packets == 10
+    assert movement.quantity_delta == 20  # 10 packets * pack_size 2 = 20 outers
+    assert movement.quantity_after == 20
+
+
+# --- Product-level marketplace movement endpoints -------------------------
+
+
+async def test_record_product_marketplace_movement_endpoint_end_to_end(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-EP-E2E-1")
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        sale = await client.post(
+            f"/api/v1/inventory/products/{product.id}/marketplace-movements",
+            json={"platform": "amazon", "movement_type": "sale", "quantity_packets": 20},
+        )
+        assert sale.status_code == 201
+        body = sale.json()["data"]
+        assert body["platform"] == "amazon"
+        assert body["movement_type"] == "sale"
+        assert body["quantity_packets"] == 20
+        assert body["quantity_delta"] == -20
+        assert body["quantity_after"] == -20
+
+        rto = await client.post(
+            f"/api/v1/inventory/products/{product.id}/marketplace-movements",
+            json={"platform": "amazon", "movement_type": "rto", "quantity_packets": 2},
+        )
+        assert rto.status_code == 201
+        assert rto.json()["data"]["quantity_after"] == -18
+
+        stock = await client.get(f"/api/v1/inventory/products/{product.id}/platform-stock")
+        rows = {r["platform"]: r for r in stock.json()["data"]["platforms"]}
+        assert rows["amazon"]["current_stock"] == -18
+        # ONE table per product -- a flat platforms list, never a per-SKU breakdown
+        assert stock.json()["data"]["scope"] == "product"
+        assert stock.json()["data"]["variants"] == []
+
+
+async def test_record_product_marketplace_movement_requires_inventory_manage(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-EP-MANAGE-1")
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read"], email="mkt-readonly@example.com"
+    ) as client:
+        response = await client.post(
+            f"/api/v1/inventory/products/{product.id}/marketplace-movements",
+            json={"platform": "amazon", "movement_type": "sale", "quantity_packets": 5},
+        )
+        assert response.status_code == 403
+
+
+async def test_record_product_marketplace_movement_rejects_non_positive_quantity(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-EP-422-1")
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        response = await client.post(
+            f"/api/v1/inventory/products/{product.id}/marketplace-movements",
+            json={"platform": "amazon", "movement_type": "sale", "quantity_packets": -1},
+        )
+        assert response.status_code == 422  # Pydantic Field(gt=0) rejects at the schema layer
+
+
+async def test_record_product_marketplace_movement_rejects_non_uniform_pack_size_with_422(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _ = await _make_product_with_variants(
+        db_session,
+        key="MKT-EP-NONUNIFORM",
+        variants=[
+            {"sku": "MKT-EP-NU-60", "available_quantity": 100, "pack_size": 1},
+            {"sku": "MKT-EP-NU-120", "available_quantity": 100, "pack_size": 2},
+        ],
+    )
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        response = await client.post(
+            f"/api/v1/inventory/products/{product.id}/marketplace-movements",
+            json={"platform": "amazon", "movement_type": "sale", "quantity_packets": 20},
+        )
+        assert response.status_code == 422
+
+
+async def test_list_product_marketplace_movements_endpoint(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-EP-HIST-1")
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        await client.post(
+            f"/api/v1/inventory/products/{product.id}/marketplace-movements",
+            json={
+                "platform": "amazon",
+                "movement_type": "sale",
+                "quantity_packets": 20,
+                "reason": "Marketplace sale",
+            },
+        )
+        await client.post(
+            f"/api/v1/inventory/products/{product.id}/marketplace-movements",
+            json={
+                "platform": "amazon",
+                "movement_type": "rto",
+                "quantity_packets": 2,
+                "reason": "Customer return",
+            },
+        )
+
+        history = await client.get(f"/api/v1/inventory/products/{product.id}/marketplace-movements")
+        assert history.status_code == 200
+        rows = history.json()["data"]
+        assert len(rows) == 2
+        by_type = {r["movement_type"]: r for r in rows}
+        assert by_type["sale"]["quantity_delta"] == -20
+        assert by_type["rto"]["quantity_delta"] == 2
+
+
+async def test_list_product_marketplace_movements_requires_inventory_read(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    product, _ = await _make_variant(db_session, sku="MKT-EP-HIST-READ-1")
+    async with await make_authenticated_client(
+        db_session, permission_codes=["analytics.read"], email="mkt-hist-noperm@example.com"
+    ) as client:
+        response = await client.get(
+            f"/api/v1/inventory/products/{product.id}/marketplace-movements"
+        )
+        assert response.status_code == 403

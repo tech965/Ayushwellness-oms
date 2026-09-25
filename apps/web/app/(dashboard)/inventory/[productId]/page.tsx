@@ -11,8 +11,9 @@ import { PaginationBar } from "@/components/shared/pagination-bar"
 import { ProductThumbnail } from "@/components/shared/product-thumbnail"
 import { QueryStates } from "@/components/shared/query-states"
 import { StockDatePicker } from "@/components/shared/stock-date-picker"
-import { PlatformMovementHistory } from "@/components/inventory/platform-movement-history"
+import { MonthlySalesSummary } from "@/components/inventory/monthly-sales-summary"
 import { PlatformStockSection } from "@/components/inventory/platform-stock-section"
+import { ProductMarketplaceHistory } from "@/components/inventory/product-marketplace-history"
 import { ShipmentSummarySection } from "@/components/inventory/shipment-summary-section"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -57,6 +58,18 @@ import {
   type ProductVariantStockLine,
   type StockStatus,
 } from "@/types/inventory"
+
+/** The word for one unit of stock on this page. Ledgers are unchanged and
+ * are counted in the same integer everywhere; only the LABEL differs. A
+ * product tracked per OMS variant (Herbal Masala: 2+ variants) calls it an
+ * "outer"; every other product keeps "box" for raw stock movements. No
+ * conversion happens here.
+ */
+const StockUnitContext = React.createContext<"boxes" | "outers">("boxes")
+
+function useStockUnit(): "boxes" | "outers" {
+  return React.useContext(StockUnitContext)
+}
 
 function StockStatusBadge({ status }: { status: StockStatus }) {
   return (
@@ -301,6 +314,7 @@ function CatalogVariantNameDialog({
  * `POST /inventory/stock/{id}/adjust`.
  */
 function SingleSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
+  const unit = useStockUnit()
   const add = useAddVariantStock()
   const [open, setOpen] = React.useState(false)
   const [reason, setReason] = React.useState("")
@@ -326,7 +340,7 @@ function SingleSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
         reason: reason.trim(),
       })
       toast.success(
-        `Stock Added: +${parsed} boxes. New Stock: ${result?.quantity_after ?? "—"} boxes.`
+        `Stock Added: +${parsed} ${unit}. New Stock: ${result?.quantity_after ?? "—"} ${unit}.`
       )
       setOpen(false)
     } catch (error) {
@@ -346,7 +360,9 @@ function SingleSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
         <div className="flex flex-col gap-3">
           <div className="text-sm">
             Current Stock:{" "}
-            <span className="font-semibold">{variant?.available_boxes ?? 0} boxes</span>
+            <span className="font-semibold">
+              {variant?.available_boxes ?? 0} {unit}
+            </span>
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="quantity-to-add">Quantity to Add</Label>
@@ -363,7 +379,7 @@ function SingleSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
           </div>
           {valid && (
             <span className="font-semibold text-emerald-600">
-              New Stock: {(variant?.available_boxes ?? 0) + parsed} boxes
+              New Stock: {(variant?.available_boxes ?? 0) + parsed} {unit}
             </span>
           )}
           <div className="flex flex-col gap-1.5">
@@ -400,6 +416,7 @@ function SingleSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
  * `InventoryService.add_catalog_variant_stock`).
  */
 function MultiSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
+  const unit = useStockUnit()
   const catalogVariantId = group.catalog_variant_id
   const add = useAddCatalogVariantStock()
   const [open, setOpen] = React.useState(false)
@@ -425,7 +442,7 @@ function MultiSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
         reason: reason.trim(),
       })
       toast.success(
-        `Stock Added: +${parsed} boxes. New Stock: ${result?.quantity_after ?? "—"} boxes.`
+        `Stock Added: +${parsed} ${unit}. New Stock: ${result?.quantity_after ?? "—"} ${unit}.`
       )
       setOpen(false)
     } catch (error) {
@@ -450,7 +467,9 @@ function MultiSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
           </p>
           <div className="text-sm">
             Current Stock:{" "}
-            <span className="font-semibold">{group.available_boxes} boxes</span>
+            <span className="font-semibold">
+              {group.available_boxes} {unit}
+            </span>
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="quantity-to-add">Quantity to Add</Label>
@@ -467,7 +486,7 @@ function MultiSkuAddStockDialog({ group }: { group: OmsCatalogVariant }) {
           </div>
           {valid && (
             <span className="font-semibold text-emerald-600">
-              New Stock: {group.available_boxes + parsed} boxes
+              New Stock: {group.available_boxes + parsed} {unit}
             </span>
           )}
           <div className="flex flex-col gap-1.5">
@@ -510,6 +529,7 @@ function OmsAddStockDialog({ group }: { group: OmsCatalogVariant }) {
  */
 function PacketsPerBoxDialog({ variant }: { variant: ProductVariantStockLine }) {
   const [open, setOpen] = React.useState(false)
+  const unit = useStockUnit()
   const [value, setValue] = React.useState(String(variant.packets_per_box))
   const update = useUpdatePacketsPerBox(variant.id)
 
@@ -545,8 +565,8 @@ function PacketsPerBoxDialog({ variant }: { variant: ProductVariantStockLine }) 
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <p className="text-muted-foreground text-sm">
-            Changes only how packets are converted/displayed — the box count itself (
-            {variant.available_boxes} boxes) and past movement history are not affected.
+            Changes only how packets are converted/displayed — the stock count itself (
+            {variant.available_boxes} {unit}) and past movement history are not affected.
           </p>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="ppb">Packets per box</Label>
@@ -578,6 +598,7 @@ function PacketsPerBoxDialog({ variant }: { variant: ProductVariantStockLine }) 
  */
 function PackSizeDialog({ variant }: { variant: ProductVariantStockLine }) {
   const [open, setOpen] = React.useState(false)
+  const unit = useStockUnit()
   const [value, setValue] = React.useState(String(variant.pack_size))
   const update = useUpdatePackSize(variant.id)
 
@@ -614,9 +635,9 @@ function PackSizeDialog({ variant }: { variant: ProductVariantStockLine }) {
         <div className="flex flex-col gap-3">
           <p className="text-muted-foreground text-sm">
             How many packets ONE unit of this SKU contains (e.g. 120 for a &quot;120
-            Pack&quot;) -- drives future shipment/RTO box math for this SKU only. The box
-            count itself (
-            {variant.available_boxes} boxes) and past movement history are not affected.
+            Pack&quot;) -- drives future shipment/RTO stock math for this SKU only. The
+            stock count itself (
+            {variant.available_boxes} {unit}) and past movement history are not affected.
           </p>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="pack-size">Pack size (packets per unit)</Label>
@@ -652,6 +673,7 @@ function UnderlyingShopifyVariants({
   canManage: boolean
   isCanonicalHerbalMasala: boolean
 }) {
+  const unit = useStockUnit()
   if (group.underlying_variant_count === 0) {
     return (
       <p className="text-muted-foreground mt-3 text-sm">
@@ -679,7 +701,7 @@ function UnderlyingShopifyVariants({
                   <span className="font-medium">{label}</span>
                   <span className="text-muted-foreground">
                     {" "}
-                    · SKU {v.sku} · {v.available_boxes} boxes · {v.packets_per_box}/box · pack
+                    · SKU {v.sku} · {v.available_boxes} {unit} · {v.packets_per_box}/box · pack
                     size {v.pack_size}
                   </span>
                 </div>
@@ -738,6 +760,7 @@ function OmsVariantHistory({
   spansMultipleSkus: boolean
   isCanonicalHerbalMasala: boolean
 }) {
+  const unitWord = useStockUnit()
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const [movementType, setMovementType] = React.useState<
     InventoryMovementType | undefined
@@ -766,7 +789,8 @@ function OmsVariantHistory({
       id: "movement",
       header: "Movement",
       cell: (row) => {
-        const unit = Math.abs(row.quantity_delta) === 1 ? "box" : "boxes"
+        const unit =
+          Math.abs(row.quantity_delta) === 1 ? (unitWord === "boxes" ? "box" : "outer") : unitWord
         const signed =
           row.quantity_delta > 0 ? `+${row.quantity_delta}` : `${row.quantity_delta}`
         return (
@@ -776,7 +800,11 @@ function OmsVariantHistory({
         )
       },
     },
-    { id: "balance", header: "Stock Balance", cell: (row) => `${row.quantity_after} boxes` },
+    {
+      id: "balance",
+      header: "Stock Balance",
+      cell: (row) => `${row.quantity_after} ${unitWord}`,
+    },
     {
       id: "reference",
       header: "Reference",
@@ -833,6 +861,7 @@ function OmsVariantHistory({
  * completely unaffected by this). Shown alongside it, never merged in.
  */
 function CatalogVariantTotalAdjustmentHistory({ group }: { group: OmsCatalogVariant }) {
+  const unitWord = useStockUnit()
   const { page, pageSize, setPage } = usePaginationState()
   const catalogVariantId = group.catalog_variant_id
   const query = useCatalogVariantAdjustments(catalogVariantId ?? "", { page, pageSize })
@@ -845,11 +874,15 @@ function CatalogVariantTotalAdjustmentHistory({ group }: { group: OmsCatalogVari
       cell: (row) => (
         <span className={row.quantity_delta < 0 ? "text-red-600" : "text-emerald-600"}>
           {row.quantity_delta > 0 ? "+" : ""}
-          {row.quantity_delta} boxes
+          {row.quantity_delta} {unitWord}
         </span>
       ),
     },
-    { id: "balance", header: "Stock Balance", cell: (row) => `${row.quantity_after} boxes` },
+    {
+      id: "balance",
+      header: "Stock Balance",
+      cell: (row) => `${row.quantity_after} ${unitWord}`,
+    },
     { id: "reason", header: "Reason", cell: (row) => row.reason },
     { id: "actor", header: "Actor/source", cell: (row) => row.actor_label },
   ]
@@ -889,6 +922,7 @@ function OmsVariantCard({
 }) {
   const { hasPermission } = useAuth()
   const canManage = hasPermission("inventory.manage")
+  const unit = useStockUnit()
   const [showHistory, setShowHistory] = React.useState(false)
   const spansMultipleSkus = group.underlying_variant_count > 1
 
@@ -925,16 +959,25 @@ function OmsVariantCard({
               {group.underlying_variants.map((v) => v.sku).join(", ")}
             </dd>
           </div>
-          <div>
-            <dt className="text-muted-foreground">Available stock</dt>
-            <dd className="font-medium">
-              {group.available_boxes.toLocaleString()} boxes
-            </dd>
-          </div>
-          <div>
-            <dt className="text-muted-foreground">Total packets</dt>
-            <dd className="font-medium">{group.total_packets.toLocaleString()}</dd>
-          </div>
+          {/* Exactly ONE stock figure per card. A per-variant (Herbal) product
+           * is counted in outers; every other product shows "Total Units"
+           * (the existing packets total) instead of separate box and
+           * packet counts. */}
+          {unit === "outers" ? (
+            <div>
+              <dt className="text-muted-foreground">Available Stock</dt>
+              <dd className="font-medium" data-testid="oms-variant-stock">
+                {group.available_boxes.toLocaleString()} outers
+              </dd>
+            </div>
+          ) : (
+            <div>
+              <dt className="text-muted-foreground">Total Units</dt>
+              <dd className="font-medium" data-testid="oms-variant-stock">
+                {group.total_packets.toLocaleString()}
+              </dd>
+            </div>
+          )}
           <div>
             <dt className="text-muted-foreground">Status</dt>
             <dd className="font-medium">{STOCK_STATUS_LABELS[group.stock_status]}</dd>
@@ -975,22 +1018,50 @@ function ProductInventory({ product }: { product: InventoryProductStock }) {
   const canManage = hasPermission("inventory.manage")
   const isCanonicalHerbalMasala =
     product.shopify_product_id === CANONICAL_HERBAL_MASALA_SHOPIFY_PRODUCT_ID
+  const unit = useStockUnit()
+  // The unresolved product-level Sale/RTO effect, in the same unit as the
+  // headline (outers for a per-variant product; packets = "units" otherwise).
+  // Null when packets can't be derived: hidden rather than guessed.
+  const adjustment =
+    unit === "outers"
+      ? product.product_level_adjustment_boxes
+      : product.product_level_adjustment_packets
 
   return (
     <div className="flex flex-col gap-6">
       <div className="bg-muted/40 flex flex-wrap items-center justify-between gap-3 rounded-md border p-3 text-sm">
         <div>
-          <span className="text-muted-foreground">Product total: </span>
-          <span className="font-semibold">
-            {product.available_boxes.toLocaleString()} boxes
-          </span>
+          {unit === "outers" ? (
+            <>
+              <span className="text-muted-foreground">Available Stock: </span>
+              <span className="font-semibold" data-testid="product-total">
+                {product.available_boxes.toLocaleString()} outers
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="text-muted-foreground">Total Units: </span>
+              <span className="font-semibold" data-testid="product-total">
+                {product.total_packets.toLocaleString()}
+              </span>
+            </>
+          )}
           <span className="text-muted-foreground">
             {" "}
-            · {product.total_packets.toLocaleString()} packets ·{" "}
-            {product.oms_variant_count} OMS variant
+            · {product.oms_variant_count} OMS variant
             {product.oms_variant_count === 1 ? "" : "s"} ·{" "}
             {product.underlying_variant_count} Shopify SKUs
           </span>
+          {adjustment !== null && adjustment !== 0 && (
+            <p className="text-muted-foreground mt-1 text-xs" data-testid="product-level-adjustment">
+              Includes marketplace Sale/RTO adjustments that belong to the product as a whole
+              (not to any one variant below):{" "}
+              <span className="text-foreground font-medium">
+                {adjustment > 0 ? "+" : ""}
+                {adjustment.toLocaleString()} {unit === "outers" ? "outers" : "units"}
+              </span>
+            </p>
+          )}
         </div>
         {canManage && (
           <ProductNameEditor
@@ -1039,7 +1110,14 @@ function MultiPlatformInventorySection({ productId }: { productId: string }) {
         </p>
       </div>
 
+      {/* A per-variant product (Herbal) renders one Monthly Sales figure per
+       * variant inside PlatformStockSection -- never a combined number. */}
+      {platformStockQuery.data?.scope !== "catalog_variant" && (
+        <MonthlySalesSummary soldPackets={platformStockQuery.data?.sold_this_month_packets} />
+      )}
+
       <PlatformStockSection
+        productId={productId}
         productTitle={platformStockQuery.data?.product_title ?? ""}
         isLoading={platformStockQuery.isLoading}
         isError={platformStockQuery.isError}
@@ -1058,19 +1136,16 @@ function MultiPlatformInventorySection({ productId }: { productId: string }) {
         onRetry={() => void shipmentSummaryQuery.refetch()}
       />
 
-      <div>
-        <Button variant="outline" size="sm" onClick={() => setShowHistory((v) => !v)}>
-          {showHistory ? "Hide Movement History" : "Show Movement History"}
-        </Button>
-      </div>
-      {showHistory &&
-        platformStockQuery.data?.variants.map((variant) => (
-          <PlatformMovementHistory
-            key={variant.product_variant_id}
-            variantId={variant.product_variant_id}
-            variantLabel={variant.variant_title || variant.sku}
-          />
-        ))}
+      {platformStockQuery.data?.scope !== "catalog_variant" && (
+        <>
+          <div>
+            <Button variant="outline" size="sm" onClick={() => setShowHistory((v) => !v)}>
+              {showHistory ? "Hide Movement History" : "Show Movement History"}
+            </Button>
+          </div>
+          {showHistory && <ProductMarketplaceHistory productId={productId} />}
+        </>
+      )}
     </div>
   )
 }
@@ -1084,7 +1159,7 @@ export default function InventoryProductPage() {
     <>
       <PageHeader
         title={query.data?.product_name ?? "Product inventory"}
-        description="OMS-visible variants only. Stock is in boxes, owned by the OMS and moved only by manual edits and Shiprocket dispatch/RTO events — never by Shopify."
+        description="OMS-visible variants only. Stock is owned by the OMS and moved only by manual edits, marketplace Sale/RTO entries and Shiprocket dispatch/RTO events — never by Shopify."
         backHref="/inventory"
         backLabel="Back to Inventory"
       />
@@ -1099,10 +1174,18 @@ export default function InventoryProductPage() {
         emptyDescription="This product has no variants yet."
       >
         {(data) => (
-          <div className="flex flex-col gap-8">
-            <ProductInventory product={data} />
-            <MultiPlatformInventorySection productId={productId} />
-          </div>
+          <StockUnitContext.Provider
+            value={
+              data.oms_variants.filter((v) => v.catalog_variant_id !== null).length >= 2
+                ? "outers"
+                : "boxes"
+            }
+          >
+            <div className="flex flex-col gap-8">
+              <ProductInventory product={data} />
+              <MultiPlatformInventorySection productId={productId} />
+            </div>
+          </StockUnitContext.Provider>
         )}
       </QueryStates>
     </>

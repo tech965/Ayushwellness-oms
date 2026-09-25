@@ -155,29 +155,37 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
         """
         if not product_variant_ids:
             return {}
-        stmt = select(
-            InventoryMovement.product_variant_id,
-            func.sum(InventoryMovement.quantity_delta),
-        ).where(
-            InventoryMovement.product_variant_id.in_(product_variant_ids),
-            InventoryMovement.quantity_delta > 0,
-            InventoryMovement.created_at >= created_from,
-            InventoryMovement.created_at < created_to,
-        ).group_by(InventoryMovement.product_variant_id)
+        stmt = (
+            select(
+                InventoryMovement.product_variant_id,
+                func.sum(InventoryMovement.quantity_delta),
+            )
+            .where(
+                InventoryMovement.product_variant_id.in_(product_variant_ids),
+                InventoryMovement.quantity_delta > 0,
+                InventoryMovement.created_at >= created_from,
+                InventoryMovement.created_at < created_to,
+            )
+            .group_by(InventoryMovement.product_variant_id)
+        )
         added_result = await self.session.execute(stmt)
         added: dict[uuid.UUID, int] = {
             variant_id: int(total or 0) for variant_id, total in added_result.all()
         }
 
-        stmt = select(
-            InventoryMovement.product_variant_id,
-            func.sum(InventoryMovement.quantity_delta),
-        ).where(
-            InventoryMovement.product_variant_id.in_(product_variant_ids),
-            InventoryMovement.quantity_delta < 0,
-            InventoryMovement.created_at >= created_from,
-            InventoryMovement.created_at < created_to,
-        ).group_by(InventoryMovement.product_variant_id)
+        stmt = (
+            select(
+                InventoryMovement.product_variant_id,
+                func.sum(InventoryMovement.quantity_delta),
+            )
+            .where(
+                InventoryMovement.product_variant_id.in_(product_variant_ids),
+                InventoryMovement.quantity_delta < 0,
+                InventoryMovement.created_at >= created_from,
+                InventoryMovement.created_at < created_to,
+            )
+            .group_by(InventoryMovement.product_variant_id)
+        )
         deducted_result = await self.session.execute(stmt)
         deducted: dict[uuid.UUID, int] = {
             variant_id: -int(total or 0) for variant_id, total in deducted_result.all()
@@ -288,6 +296,21 @@ class CatalogVariantStockAdjustmentRepository(AppendOnlyRepository[CatalogVarian
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_for_movement(
+        self, product_marketplace_movement_id: uuid.UUID
+    ) -> CatalogVariantStockAdjustment | None:
+        """The OMS-total ledger row a marketplace movement wrote (there is
+        at most one -- the column is unique), or None for a movement that
+        pre-dates OMS-stock linking and so never had an OMS effect.
+        """
+        result = await self.session.execute(
+            select(CatalogVariantStockAdjustment).where(
+                CatalogVariantStockAdjustment.product_marketplace_movement_id
+                == product_marketplace_movement_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def sum_for_catalog_variant(self, catalog_variant_id: uuid.UUID) -> int:
         """Cumulative reconciliation offset recorded so far -- 0 with no
         prior adjustments. Summed live, never cached, so it can never
@@ -319,6 +342,52 @@ class CatalogVariantStockAdjustmentRepository(AppendOnlyRepository[CatalogVarian
         )
         result = await self.session.execute(stmt)
         return {row[0]: int(row[1] or 0) for row in result.all()}
+
+    async def sum_product_level(self, product_id: uuid.UUID) -> int:
+        """Cumulative PRODUCT-scoped rows (marketplace Sale/RTO on a
+        product with no single deterministic CatalogVariant). Counts
+        toward the product total only, never toward any one CatalogVariant.
+        """
+        total = await self.session.scalar(
+            select(func.coalesce(func.sum(CatalogVariantStockAdjustment.quantity_delta), 0)).where(
+                CatalogVariantStockAdjustment.product_id == product_id
+            )
+        )
+        return int(total or 0)
+
+    async def sum_all_for_products(self, product_ids: list[uuid.UUID]) -> dict[uuid.UUID, int]:
+        """`{product_id: total ledger delta}` across BOTH scopes
+        (CatalogVariant-scoped + product-scoped) for many products in two
+        queries -- what the Inventory overview list adds to its per-SKU
+        sums so it agrees with the product detail header.
+        """
+        if not product_ids:
+            return {}
+        totals: dict[uuid.UUID, int] = {}
+        via_cv = await self.session.execute(
+            select(
+                CatalogVariant.product_id, func.sum(CatalogVariantStockAdjustment.quantity_delta)
+            )
+            .join(
+                CatalogVariant,
+                CatalogVariant.id == CatalogVariantStockAdjustment.catalog_variant_id,
+            )
+            .where(CatalogVariant.product_id.in_(product_ids))
+            .group_by(CatalogVariant.product_id)
+        )
+        for pid, total in via_cv.all():
+            totals[pid] = totals.get(pid, 0) + int(total or 0)
+        direct = await self.session.execute(
+            select(
+                CatalogVariantStockAdjustment.product_id,
+                func.sum(CatalogVariantStockAdjustment.quantity_delta),
+            )
+            .where(CatalogVariantStockAdjustment.product_id.in_(product_ids))
+            .group_by(CatalogVariantStockAdjustment.product_id)
+        )
+        for pid, total in direct.all():
+            totals[pid] = totals.get(pid, 0) + int(total or 0)
+        return totals
 
     def search_query(self, *, catalog_variant_id: uuid.UUID):
         return (

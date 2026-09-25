@@ -810,32 +810,51 @@ async def test_catalog_variant_total_adjust_does_not_change_grouping_or_packets(
         assert u["packets_per_box"] == 1
 
 
-async def test_catalog_variant_total_packets_not_fabricated_from_the_reconciliation_total(
+async def test_catalog_variant_total_packets_follow_boxes_when_packets_per_box_is_uniform(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:
-    """total_packets has no defined meaning for the offset (it has no
-    pack size), so it must stay a plain sum of the REAL rows only, even
-    while available_boxes includes the offset.
+    """Boxes and packets move together: with every grouped SKU on the
+    same packets_per_box (1 here), the ledger total converts exactly.
     """
     product, _by_sku, cv = await _herbal_masala_gold_red_blue(db_session)
 
     async with await make_authenticated_client(
         db_session, permission_codes=["inventory.read", "inventory.manage"]
     ) as client:
-        before = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
-        before_packets = next(g for g in before["oms_variants"] if g["name"] == "Blue Packet")[
-            "total_packets"
-        ]
-
         await client.post(
             f"/api/v1/inventory/catalog-variants/{cv['blue'].id}/adjust",
             json={"quantity_to_add": 759, "reason": "x"},  # 240 + 759 = 999
         )
-        after = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
-        blue = next(g for g in after["oms_variants"] if g["name"] == "Blue Packet")
+        body = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
+        blue = next(g for g in body["oms_variants"] if g["name"] == "Blue Packet")
 
     assert blue["available_boxes"] == 999
-    assert blue["total_packets"] == before_packets  # unchanged by the offset
+    assert blue["total_packets"] == 999  # 240*1 real + 759 ledger * 1
+
+
+async def test_catalog_variant_total_packets_never_guessed_when_packets_per_box_differs(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """SKUs on different packets_per_box (60 vs 120) have no single ratio
+    to convert the ledger total with -- packets stay the real rows' sum
+    rather than a guessed conversion, even while boxes include the ledger.
+    """
+    product, _by_sku, cv = await _herbal_masala(db_session)
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["inventory.read", "inventory.manage"]
+    ) as client:
+        before = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
+        before_gutka = next(g for g in before["oms_variants"] if g["name"] == "Ghutka Flavour")
+        await client.post(
+            f"/api/v1/inventory/catalog-variants/{cv['gutka'].id}/adjust",
+            json={"quantity_to_add": 10, "reason": "x"},
+        )
+        after = (await client.get(f"/api/v1/inventory/products/{product.id}/stock")).json()["data"]
+        after_gutka = next(g for g in after["oms_variants"] if g["name"] == "Ghutka Flavour")
+
+    assert after_gutka["available_boxes"] == before_gutka["available_boxes"] + 10
+    assert after_gutka["total_packets"] == before_gutka["total_packets"]
 
 
 # --- 15: history aggregates underlying movements ----------------------

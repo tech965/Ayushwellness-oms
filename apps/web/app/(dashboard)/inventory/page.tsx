@@ -135,19 +135,12 @@ export default function InventoryPage() {
       cell: (product) => product.variant_count,
     },
     {
-      id: "boxes",
-      header: "Total boxes",
+      id: "units",
+      header: "Total Units",
       cell: (product) => (
-        <span className={product.total_available_boxes <= 0 ? "font-semibold text-red-600" : ""}>
-          {product.total_available_boxes}
+        <span className={product.total_packets <= 0 ? "font-semibold text-red-600" : ""}>
+          {product.total_packets.toLocaleString()}
         </span>
-      ),
-    },
-    {
-      id: "packets",
-      header: "Total packets",
-      cell: (product) => (
-        <span className="text-muted-foreground">{product.total_packets.toLocaleString()}</span>
       ),
     },
     {

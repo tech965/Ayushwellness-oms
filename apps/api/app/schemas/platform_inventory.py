@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.enums import PlatformStockMovementType
+from app.models.enums import PlatformStockMovementType, ProductMarketplaceMovementType
 from app.models.platform_inventory import InventoryPlatform
 
 
@@ -123,19 +123,145 @@ class PlatformStockSummaryRow(BaseModel):
     last_updated: datetime | None
 
 
-class VariantPlatformStockResponse(BaseModel):
-    product_variant_id: uuid.UUID
-    sku: str
-    variant_title: str | None
-    stock_date: date
+class VariantMarketplaceStockResponse(BaseModel):
+    """ONE OMS-visible variant's own Marketplace Stock (a product with two
+    or more CatalogVariants -- Herbal Masala's Gold/Red/Blue). Its
+    Shopify row is summed across only THAT variant's underlying SKUs; its
+    manual-platform rows come from movements scoped to this variant, so
+    Amazon Gold never mixes with Amazon Red. The 60/120/180 SKUs never
+    get a table of their own.
+    """
+
+    catalog_variant_id: uuid.UUID
+    name: str
+    display_order: int
     platforms: list[PlatformStockSummaryRow]
+    sold_this_month_packets: int = 0
 
 
 class ProductPlatformStockResponse(BaseModel):
+    """Marketplace Stock for one product, in ONE of two shapes:
+
+    * `scope="product"` (fewer than two CatalogVariants): ONE row per
+      platform for the whole product in `platforms` -- Shopify summed
+      across every real underlying `ProductVariant`, every manual
+      platform straight from `ProductMarketplaceMovement`.
+    * `scope="catalog_variant"` (two or more, e.g. Herbal Masala): the
+      same table PER OMS-visible variant in `variants`; `platforms` is
+      empty. Never combined across variants.
+    """
+
     product_id: uuid.UUID
     product_title: str
     stock_date: date
-    variants: list[VariantPlatformStockResponse]
+    scope: Literal["product", "catalog_variant"] = "product"
+    platforms: list[PlatformStockSummaryRow]
+    variants: list[VariantMarketplaceStockResponse] = []
+    # Packets sold across every manual platform during the CURRENT IST
+    # calendar month (independent of `stock_date`) -- SALE movements only,
+    # effective (a reversed sale is excluded). For `scope="product"`; a
+    # variant-scoped product reports this per variant instead (0 here).
+    sold_this_month_packets: int = 0
+
+
+class ProductMarketplaceMovementCreateRequest(BaseModel):
+    """Record ONE manual marketplace movement (Record Sale / RTO) -- NO
+    SKU is selected or implied. The business user enters a bare packet
+    quantity; `catalog_variant_id` names the OMS-visible variant ONLY for
+    a product tracked per variant (two or more CatalogVariants: required
+    there, rejected otherwise -- never an underlying SKU). See
+    `PlatformInventoryService.record_product_movement` for the
+    packet->outer conversion and the uniform-pack-size safety check that
+    can reject this request (422) rather than guess an allocation. A Sale
+    is a negative and an RTO a positive effect on BOTH the marketplace
+    balance and the OMS total stock.
+    """
+
+    platform: str = Field(max_length=50)
+    movement_type: Literal["sale", "rto"]
+    quantity_packets: int = Field(gt=0, description="Quantity in packets, as entered by staff.")
+    catalog_variant_id: uuid.UUID | None = None
+    reason: str | None = Field(default=None, max_length=255)
+    stock_date: date | None = Field(
+        default=None,
+        description="IST business date this movement belongs to. Defaults to today (IST).",
+    )
+
+    @field_validator("platform")
+    @classmethod
+    def _validate_platform(cls, value: str) -> str:
+        if value not in InventoryPlatform.ALL:
+            allowed = ", ".join(InventoryPlatform.ALL)
+            raise ValueError(f"Unknown platform {value!r}. Must be one of: {allowed}.")
+        return value
+
+
+class ProductMarketplaceMovementEditRequest(BaseModel):
+    """Correct a manual Sale/RTO's packet quantity. Never updates the
+    original row: a reversal and a replacement at the new quantity are
+    appended in one transaction. A reason is required for the audit trail.
+    """
+
+    quantity_packets: int = Field(gt=0, description="The corrected quantity, in packets.")
+    reason: str = Field(min_length=1, max_length=255)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("A reason is required.")
+        return stripped
+
+
+class ProductMarketplaceMovementUndoRequest(BaseModel):
+    """Undo a manual Sale/RTO by appending a reversal row -- the original
+    is never deleted or changed. A reason is required for the audit trail.
+    """
+
+    reason: str = Field(min_length=1, max_length=255)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("A reason is required.")
+        return stripped
+
+
+class ProductMarketplaceMovementResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    product_id: uuid.UUID
+    # None = product-scoped; set = that OMS-visible variant's own ledger.
+    catalog_variant_id: uuid.UUID | None = None
+    platform: str
+    platform_label: str
+    movement_type: ProductMarketplaceMovementType
+    quantity_packets: int
+    quantity_delta: int
+    quantity_after: int
+    stock_date: date
+    reason: str | None
+    actor_user_id: uuid.UUID | None
+    actor_label: str
+    created_at: datetime
+    # Audit links (the row is never mutated; these only point at others).
+    reverses_movement_id: uuid.UUID | None = None
+    replaces_movement_id: uuid.UUID | None = None
+    # `edited_from_packets`: on a replacement row, the quantity it
+    # replaced ("edited from 20 -> 15 packets").
+    edited_from_packets: int | None = None
+    # Effective state, derived from the reversal/replacement links:
+    #   active   -- in force
+    #   undone   -- reversed, not replaced
+    #   edited   -- reversed AND replaced (superseded by its replacement)
+    #   reversal -- a compensating row (never itself editable/undoable)
+    status: Literal["active", "undone", "edited", "reversal"] = "active"
+    can_edit: bool = False
+    can_undo: bool = False
 
 
 class ShipmentTransitSummaryRow(BaseModel):

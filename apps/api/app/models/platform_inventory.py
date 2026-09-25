@@ -47,15 +47,15 @@ from datetime import date as date_type
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Date, ForeignKey, Index, Integer, String, func
+from sqlalchemy import Date, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import AwareDateTime, Base, UUIDPrimaryKeyMixin
-from app.models.enums import PlatformStockMovementType, sa_enum
+from app.models.enums import PlatformStockMovementType, ProductMarketplaceMovementType, sa_enum
 
 if TYPE_CHECKING:
     from app.models.auth import User
-    from app.models.product import ProductVariant
+    from app.models.product import CatalogVariant, Product, ProductVariant
 
 
 class InventoryPlatform:
@@ -119,4 +119,110 @@ class PlatformStockMovement(Base, UUIDPrimaryKeyMixin):
     )
 
     product_variant: Mapped[ProductVariant] = relationship()
+    actor: Mapped[User | None] = relationship()
+
+
+class ProductMarketplaceMovement(Base, UUIDPrimaryKeyMixin):
+    """Append-only, product-level (never SKU-level) manual marketplace
+    ledger -- "Record Sale" / "Add Stock" / "RTO" on the Marketplace
+    Stock table's ONE combined row per platform, with no SKU picker.
+
+    Deliberately a THIRD, separate table from both `InventoryMovement`
+    (Shopify/dispatch-shaped, per-SKU) and `PlatformStockMovement`
+    (manual marketplace, but still per-SKU, pre-dating this table): a
+    business user enters a bare packet quantity ("20 packets sold on
+    Amazon") with no SKU attached, and there is no non-arbitrary way to
+    attribute that to one of the product's several real `ProductVariant`
+    rows (see `PlatformInventoryService.record_product_movement`'s
+    uniform pack_size/packets_per_box check) -- so this ledger's balance
+    lives at the PRODUCT level instead, and no `ProductVariant` row is
+    ever read for a decision or written to by this table.
+
+    Same append-only, `quantity_delta` + `quantity_after` running-balance
+    shape as the other two ledgers, scoped by `(product_id, platform)`
+    instead of `(product_variant_id, platform)`. `quantity_delta`/
+    `quantity_after` are in OUTERS (boxes) -- the same unit the
+    Marketplace Stock table's Opening/Added/Deducted/Current columns
+    already use -- converted from the packet quantity the user actually
+    typed (`quantity_packets`, kept verbatim so the movement history can
+    always show the exact number a human entered, never a value
+    reverse-computed from outers).
+
+    `stock_date` mirrors `PlatformStockMovement.stock_date` exactly (the
+    IST business date this movement belongs to), so the existing
+    date-scoped "opening/closing balance as of a selected date" technique
+    (`get_latest_as_of`) works identically at this table's own grain.
+
+    SCOPE: `catalog_variant_id` NULL = a product-scoped balance (every
+    product with fewer than two CatalogVariants); set = that OMS-visible
+    variant's OWN balance (a product with two or more, e.g. Herbal
+    Masala's Gold/Red/Blue). The balance key is therefore
+    `(product_id, catalog_variant_id, platform)`. Never an underlying
+    60/120/180 SKU.
+
+    EDIT / UNDO never update or delete a row. Undo appends a REVERSAL row
+    (`reverses_movement_id` -> the original) whose delta is the exact
+    negative of the original's; an Edit is a reversal PLUS a replacement
+    row (`replaces_movement_id` -> the original) at the new quantity.
+    Each original can be reversed at most once and replaced at most once
+    (unique constraints), so the history is a permanent audit trail and
+    the effective balance is simply the running sum.
+    """
+
+    __tablename__ = "product_marketplace_movements"
+    __table_args__ = (
+        Index(
+            "ix_product_marketplace_movements_product_platform_date",
+            "product_id",
+            "platform",
+            "stock_date",
+        ),
+        Index(
+            "ix_product_marketplace_movements_scope_platform_date",
+            "product_id",
+            "catalog_variant_id",
+            "platform",
+            "stock_date",
+        ),
+        UniqueConstraint("reverses_movement_id", name="uq_product_marketplace_movements_reverses"),
+        UniqueConstraint("replaces_movement_id", name="uq_product_marketplace_movements_replaces"),
+    )
+
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    catalog_variant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("catalog_variants.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    reverses_movement_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("product_marketplace_movements.id", ondelete="RESTRICT"), nullable=True
+    )
+    replaces_movement_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("product_marketplace_movements.id", ondelete="RESTRICT"), nullable=True
+    )
+    platform: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    movement_type: Mapped[ProductMarketplaceMovementType] = mapped_column(
+        sa_enum(ProductMarketplaceMovementType, "product_marketplace_movement_type"),
+        nullable=False,
+        index=True,
+    )
+    # The exact value the business user typed -- always positive,
+    # regardless of movement_type/sign. Never reverse-derived from
+    # `quantity_delta` (that would be lossy whenever pack_size != 1).
+    quantity_packets: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity_delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    stock_date: Mapped[date_type] = mapped_column(Date(), nullable=False, index=True)
+
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        AwareDateTime(), server_default=func.now(), nullable=False, index=True
+    )
+
+    product: Mapped[Product] = relationship()
+    catalog_variant: Mapped[CatalogVariant | None] = relationship()
     actor: Mapped[User | None] = relationship()

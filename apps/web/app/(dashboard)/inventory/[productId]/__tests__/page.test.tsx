@@ -21,7 +21,8 @@ import {
 import {
   useProductPlatformStock,
   useProductShipmentSummary,
-  usePlatformMovementHistory,
+  useProductMarketplaceHistory,
+  useRecordProductMarketplaceMovement,
 } from "@/services/platform-inventory"
 import { useAuth } from "@/lib/auth-context"
 import type {
@@ -61,8 +62,10 @@ vi.mock("@/services/inventory", () => ({
 vi.mock("@/services/platform-inventory", () => ({
   useProductPlatformStock: vi.fn(),
   useProductShipmentSummary: vi.fn(),
-  usePlatformMovementHistory: vi.fn(),
-  useRecordPlatformStockMovement: vi.fn(),
+  useProductMarketplaceHistory: vi.fn(),
+  useRecordProductMarketplaceMovement: vi.fn(),
+  useEditMarketplaceMovement: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
+  useUndoMarketplaceMovement: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
 }))
 
 vi.mock("@/lib/auth-context", () => ({ useAuth: vi.fn() }))
@@ -79,7 +82,8 @@ const mockedUseAddCatalogVariantStock = vi.mocked(useAddCatalogVariantStock)
 const mockedUseCatalogVariantAdjustments = vi.mocked(useCatalogVariantAdjustments)
 const mockedUseProductPlatformStock = vi.mocked(useProductPlatformStock)
 const mockedUseProductShipmentSummary = vi.mocked(useProductShipmentSummary)
-const mockedUsePlatformMovementHistory = vi.mocked(usePlatformMovementHistory)
+const mockedUseProductMarketplaceHistory = vi.mocked(useProductMarketplaceHistory)
+const mockedUseRecordProductMarketplaceMovement = vi.mocked(useRecordProductMarketplaceMovement)
 const mockedUseAuth = vi.mocked(useAuth)
 
 function mutationStub(behaviour: "success" | "error" = "success") {
@@ -144,6 +148,8 @@ function omsVariant(
 // Aayush Herbal Masala: 3 OMS flavour variants, each grouping a 60- and a 120-pack SKU.
 const HERBAL_MASALA: InventoryProductStock = {
   product_id: "prod-1",
+  product_level_adjustment_boxes: 0,
+  product_level_adjustment_packets: 0,
   shopify_product_id: "8009941287101", // the canonical product this feature is scoped to
   product_name: "Aayush Wellness Herbal Masala",
   title: "आयुष हर्बल मसाला",
@@ -224,6 +230,8 @@ const HERBAL_MASALA: InventoryProductStock = {
 // A non-Herbal-Masala product: ONE OMS variant grouping 3 pack SKUs.
 const VAJRASHAKTI: InventoryProductStock = {
   product_id: "prod-1",
+  product_level_adjustment_boxes: 0,
+  product_level_adjustment_packets: 0,
   shopify_product_id: "8471325999293", // not the canonical Herbal Masala product
   product_name: "Vajrashakti",
   title: "Vajrashakti",
@@ -266,6 +274,8 @@ const VAJRASHAKTI: InventoryProductStock = {
 // An implicit (ungrouped) OMS variant -- catalog_variant_id null, 1 underlying row.
 const IMPLICIT: InventoryProductStock = {
   product_id: "prod-1",
+  product_level_adjustment_boxes: 0,
+  product_level_adjustment_packets: 0,
   shopify_product_id: null,
   product_name: "Ungrouped Product",
   title: "Ungrouped Product",
@@ -337,13 +347,17 @@ beforeEach(() => {
     error: null,
     refetch: vi.fn(),
   } as unknown as ReturnType<typeof useProductShipmentSummary>)
-  mockedUsePlatformMovementHistory.mockReturnValue({
+  mockedUseProductMarketplaceHistory.mockReturnValue({
     data: { data: [], meta: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } },
     isLoading: false,
     isError: false,
     error: null,
     refetch: vi.fn(),
-  } as unknown as ReturnType<typeof usePlatformMovementHistory>)
+  } as unknown as ReturnType<typeof useProductMarketplaceHistory>)
+  mockedUseRecordProductMarketplaceMovement.mockReturnValue({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useRecordProductMarketplaceMovement>)
   setProduct(HERBAL_MASALA)
 })
 
@@ -409,10 +423,10 @@ describe("InventoryProductPage — OMS-visible variants only", () => {
     )
   })
 
-  it("shows aggregated boxes/packets per OMS variant and 'mixed pack sizes'", () => {
+  it("shows 'Available Stock: N outers' per OMS variant (Herbal) and 'mixed pack sizes'", () => {
     renderWithProviders(<InventoryProductPage />)
     // Ghutka = 100 + 40 boxes
-    expect(screen.getByText("140 boxes")).toBeInTheDocument()
+    expect(screen.getByText("140 outers")).toBeInTheDocument()
     // each flavour groups a 60- and a 120-pack -> mixed
     expect(screen.getAllByText(/mixed pack sizes/).length).toBeGreaterThanOrEqual(3)
   })
@@ -483,7 +497,7 @@ describe("InventoryProductPage — Add Stock (CatalogVariant TOTAL, never per-SK
     renderWithProviders(<InventoryProductPage />)
     await user.click(screen.getAllByRole("button", { name: "Add Stock" })[1]) // Ghutka: 100 + 40
     const dialog = screen.getByRole("dialog")
-    expect(within(dialog).getByText("140 boxes")).toBeInTheDocument() // Current Stock
+    expect(within(dialog).getByText("140 outers")).toBeInTheDocument() // Current Stock
     expect(within(dialog).getByLabelText("Quantity to Add")).toHaveValue(null) // empty, never pre-filled
   })
 
@@ -555,7 +569,7 @@ describe("InventoryProductPage — Add Stock (CatalogVariant TOTAL, never per-SK
     const input = within(dialog).getByLabelText("Quantity to Add")
     expect(input).toHaveAttribute("min", "1")
     await user.type(input, "60")
-    expect(within(dialog).getByText("New Stock: 200 boxes")).toBeInTheDocument() // 140 + 60
+    expect(within(dialog).getByText("New Stock: 200 outers")).toBeInTheDocument() // 140 + 60
     expect(within(dialog).getByRole("button", { name: "Add Stock" })).toBeDisabled() // still no reason
     await user.type(within(dialog).getByLabelText("Reason"), "x")
     expect(within(dialog).getByRole("button", { name: "Add Stock" })).toBeEnabled()
@@ -957,74 +971,69 @@ const PLATFORM_STOCK_FIXTURE: ProductPlatformStock = {
   product_id: "prod-1",
   product_title: "Vajrashakti",
   stock_date: "2026-09-11",
-  variants: [
+  scope: "product",
+  variants: [],
+  sold_this_month_packets: 25,
+  platforms: [
     {
-      product_variant_id: "v-1",
-      sku: "VJR-30",
-      variant_title: "Pack of 1",
-      stock_date: "2026-09-11",
-      platforms: [
-        {
-          platform: "shopify",
-          platform_label: "Shopify",
-          is_automatic: true,
-          opening_stock: null,
-          stock_added: 0,
-          stock_deducted: 35,
-          current_stock: 1200,
-          last_updated: "2026-09-11T09:00:00Z",
-        },
-        {
-          platform: "amazon",
-          platform_label: "Amazon",
-          is_automatic: false,
-          opening_stock: 500,
-          stock_added: 30,
-          stock_deducted: 0,
-          current_stock: 530,
-          last_updated: null,
-        },
-        {
-          platform: "flipkart",
-          platform_label: "Flipkart",
-          is_automatic: false,
-          opening_stock: 0,
-          stock_added: 0,
-          stock_deducted: 0,
-          current_stock: 0,
-          last_updated: null,
-        },
-        {
-          platform: "blinkit",
-          platform_label: "Blinkit",
-          is_automatic: false,
-          opening_stock: 0,
-          stock_added: 0,
-          stock_deducted: 0,
-          current_stock: 0,
-          last_updated: null,
-        },
-        {
-          platform: "meesho",
-          platform_label: "Meesho",
-          is_automatic: false,
-          opening_stock: 0,
-          stock_added: 0,
-          stock_deducted: 0,
-          current_stock: 0,
-          last_updated: null,
-        },
-        {
-          platform: "manual_other",
-          platform_label: "Manual / Other",
-          is_automatic: false,
-          opening_stock: 0,
-          stock_added: 0,
-          stock_deducted: 0,
-          current_stock: 0,
-          last_updated: null,
-        },
-      ],
+      platform: "shopify",
+      platform_label: "Shopify",
+      is_automatic: true,
+      opening_stock: null,
+      stock_added: 0,
+      stock_deducted: 35,
+      current_stock: 1200,
+      last_updated: "2026-09-11T09:00:00Z",
+    },
+    {
+      platform: "amazon",
+      platform_label: "Amazon",
+      is_automatic: false,
+      opening_stock: 500,
+      stock_added: 30,
+      stock_deducted: 0,
+      current_stock: 530,
+      last_updated: null,
+    },
+    {
+      platform: "flipkart",
+      platform_label: "Flipkart",
+      is_automatic: false,
+      opening_stock: 0,
+      stock_added: 0,
+      stock_deducted: 0,
+      current_stock: 0,
+      last_updated: null,
+    },
+    {
+      platform: "blinkit",
+      platform_label: "Blinkit",
+      is_automatic: false,
+      opening_stock: 0,
+      stock_added: 0,
+      stock_deducted: 0,
+      current_stock: 0,
+      last_updated: null,
+    },
+    {
+      platform: "meesho",
+      platform_label: "Meesho",
+      is_automatic: false,
+      opening_stock: 0,
+      stock_added: 0,
+      stock_deducted: 0,
+      current_stock: 0,
+      last_updated: null,
+    },
+    {
+      platform: "manual_other",
+      platform_label: "Manual / Other",
+      is_automatic: false,
+      opening_stock: 0,
+      stock_added: 0,
+      stock_deducted: 0,
+      current_stock: 0,
+      last_updated: null,
     },
   ],
 }
@@ -1062,7 +1071,7 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     renderWithProviders(<InventoryProductPage />)
 
     expect(screen.getByText("Stock Date")).toBeInTheDocument()
-    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+    expect(screen.getByText(/Marketplace Stock/)).toBeInTheDocument()
     expect(screen.getByText("Shipments")).toBeInTheDocument()
     expect(screen.getByText("Amazon")).toBeInTheDocument()
     expect(screen.getByText("530")).toBeInTheDocument() // Amazon current stock
@@ -1102,7 +1111,7 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     // an ambiguous singular match).
     expect(screen.getAllByText("Vajrashakti").length).toBeGreaterThan(0)
     // The new section renders its own clean empty state, not a crash.
-    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+    expect(screen.getByText(/Marketplace Stock/)).toBeInTheDocument()
   })
 
   it("shows a loading state for the Marketplace Stock section without crashing", () => {
@@ -1116,7 +1125,7 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     } as unknown as ReturnType<typeof useProductPlatformStock>)
 
     renderWithProviders(<InventoryProductPage />)
-    expect(screen.getByText("Marketplace Stock")).toBeInTheDocument()
+    expect(screen.getByText(/Marketplace Stock/)).toBeInTheDocument()
   })
 
   it("shows an API error state for the Shipments section without crashing", () => {
@@ -1134,7 +1143,7 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     expect(screen.getByText("Something went wrong")).toBeInTheDocument()
   })
 
-  it("toggles the Platform Stock Movement History section", async () => {
+  it("toggles the Marketplace Adjustment History section", async () => {
     const user = userEvent.setup()
     setProduct(VAJRASHAKTI)
     mockedUseProductPlatformStock.mockReturnValue({
@@ -1147,9 +1156,86 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
 
     renderWithProviders(<InventoryProductPage />)
 
-    expect(screen.queryByText(/Platform Stock Movement History/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Marketplace Adjustment History/i)).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Show Movement History" }))
-    expect(screen.getByText(/Platform Stock Movement History/i)).toBeInTheDocument()
+    expect(screen.getByText(/Marketplace Adjustment History/i)).toBeInTheDocument()
+  })
+
+  it("shows ONE product-level 'Sold This Month' summary above Marketplace Stock", () => {
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: PLATFORM_STOCK_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+
+    renderWithProviders(<InventoryProductPage />)
+
+    const summaries = screen.getAllByTestId("monthly-sales-summary")
+    expect(summaries).toHaveLength(1) // once per product -- never per SKU or per platform
+    expect(within(summaries[0]).getByText("Sold This Month:")).toBeInTheDocument()
+    expect(within(summaries[0]).getByText("25 packets")).toBeInTheDocument()
+    // and it sits above the Marketplace Stock table
+    const marketplace = screen.getByText(/Marketplace Stock/)
+    expect(
+      summaries[0].compareDocumentPosition(marketplace) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
+  it("the marketplace section has no SKU selector and no Add Stock action", async () => {
+    const user = userEvent.setup()
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: PLATFORM_STOCK_FIXTURE,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+
+    renderWithProviders(<InventoryProductPage />)
+
+    // The OMS variant card's own stock action is unrelated and stays; only
+    // the MARKETPLACE table must have no "Add Stock".
+    for (const label of ["Amazon", "Flipkart", "Blinkit", "Meesho", "Manual / Other"]) {
+      const row = screen.getByText(label).closest("tr") as HTMLElement
+      expect(within(row).queryByRole("button", { name: /add stock/i })).not.toBeInTheDocument()
+      expect(within(row).getByRole("button", { name: /^Record Sale$/ })).toBeInTheDocument()
+      expect(within(row).getByRole("button", { name: /^RTO$/ })).toBeInTheDocument()
+    }
+    await user.click(screen.getAllByRole("button", { name: /^Record Sale$/i })[0])
+    const dialog = screen.getByRole("dialog")
+    expect(within(dialog).queryByRole("combobox")).not.toBeInTheDocument()
+    expect(within(dialog).queryByText(/select a sku/i)).not.toBeInTheDocument()
+  })
+
+  it("shows 0 packets when nothing has been sold this month", () => {
+    setProduct(VAJRASHAKTI)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: { ...PLATFORM_STOCK_FIXTURE, sold_this_month_packets: 0 },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.getByText("0 packets")).toBeInTheDocument()
+  })
+
+  it("shows the product-level marketplace adjustment line only when there is one", () => {
+    setProduct({ ...HERBAL_MASALA, product_level_adjustment_boxes: -18, available_boxes: 612 })
+    renderWithProviders(<InventoryProductPage />)
+    const line = screen.getByTestId("product-level-adjustment")
+    expect(line).toHaveTextContent("-18 outers")
+  })
+
+  it("does not show the marketplace adjustment line when it is zero", () => {
+    setProduct(HERBAL_MASALA)
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.queryByTestId("product-level-adjustment")).not.toBeInTheDocument()
   })
 
   it("existing Shopify product-detail rendering is unaffected by the new section", () => {
@@ -1159,6 +1245,102 @@ describe("InventoryProductPage — Marketplace Stock (multi-platform inventory)"
     // Same assertions the pre-existing "Aayush Herbal Masala..." suite
     // makes for Vajrashakti elsewhere in this file -- the Shopify card
     // still renders exactly as before.
-    expect(screen.getByText("900")).toBeInTheDocument() // total available boxes
+    expect(screen.getByTestId("product-total")).toHaveTextContent("900") // Total Units
+    expect(screen.getByTestId("oms-variant-stock")).toHaveTextContent("900")
+  })
+})
+
+describe("InventoryProductPage — units: 'outers' for Herbal, 'Total Units' for everything else", () => {
+  it("Herbal shows 'Available Stock: N outers' in the header and on every variant card, never boxes", () => {
+    setProduct(HERBAL_MASALA)
+    renderWithProviders(<InventoryProductPage />)
+
+    expect(screen.getByTestId("product-total")).toHaveTextContent("630 outers")
+    expect(screen.getByText("Available Stock:")).toBeInTheDocument()
+    expect(screen.getAllByTestId("oms-variant-stock").map((el) => el.textContent)).toEqual([
+      "13 outers",
+      "140 outers",
+      "255 outers",
+    ])
+    expect(screen.queryByText(/\bboxes?\b/i)).not.toBeInTheDocument()
+    expect(screen.queryByText("Total Units")).not.toBeInTheDocument()
+    expect(screen.queryByText("Total packets")).not.toBeInTheDocument()
+  })
+
+  it("Herbal's Add Stock dialog and history speak in outers too", async () => {
+    const user = userEvent.setup()
+    setProduct(HERBAL_MASALA)
+    renderWithProviders(<InventoryProductPage />)
+    await user.click(screen.getAllByRole("button", { name: "Add Stock" })[0])
+    expect(within(screen.getByRole("dialog")).getByText("13 outers")).toBeInTheDocument()
+  })
+
+  it("another product shows ONE 'Total Units' figure and no separate boxes / packets totals", () => {
+    setProduct(VAJRASHAKTI)
+    renderWithProviders(<InventoryProductPage />)
+
+    expect(screen.getByText("Total Units:")).toBeInTheDocument() // header
+    expect(screen.getByText("Total Units")).toBeInTheDocument() // card
+    expect(screen.queryByText("Available stock")).not.toBeInTheDocument()
+    expect(screen.queryByText("Available Stock")).not.toBeInTheDocument()
+    expect(screen.queryByText("Total packets")).not.toBeInTheDocument()
+    expect(screen.queryByText("Total boxes")).not.toBeInTheDocument()
+    expect(screen.queryByText(/outers/i)).not.toBeInTheDocument()
+  })
+
+  it("Total Units is the existing packets total, not a new conversion", () => {
+    setProduct({ ...VAJRASHAKTI, total_packets: 1234 })
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.getByTestId("product-total")).toHaveTextContent("1,234")
+  })
+
+  it("shows the product-level adjustment for a Total Units product in units (packets), hidden when unknown", () => {
+    setProduct({ ...VAJRASHAKTI, product_level_adjustment_packets: -18 })
+    const { unmount } = renderWithProviders(<InventoryProductPage />)
+    expect(screen.getByTestId("product-level-adjustment")).toHaveTextContent("-18 units")
+    unmount()
+
+    setProduct({ ...VAJRASHAKTI, product_level_adjustment_boxes: -3, product_level_adjustment_packets: null })
+    renderWithProviders(<InventoryProductPage />)
+    expect(screen.queryByTestId("product-level-adjustment")).not.toBeInTheDocument()
+  })
+})
+
+describe("InventoryProductPage — marketplace section follows the backend's scope", () => {
+  const VARIANT_SCOPED: ProductPlatformStock = {
+    product_id: "prod-1",
+    product_title: "Aayush Wellness Herbal Masala",
+    stock_date: "2026-09-11",
+    scope: "catalog_variant",
+    platforms: [],
+    sold_this_month_packets: 0,
+    variants: ["Gold Packet", "Red Packet", "Blue Packet"].map((name, i) => ({
+      catalog_variant_id: `cv-${i}`,
+      name,
+      display_order: i,
+      sold_this_month_packets: 10 * (i + 1),
+      platforms: PLATFORM_STOCK_FIXTURE.platforms,
+    })),
+  }
+
+  it("Herbal renders three per-variant marketplace tables, per-variant sales, and no combined summary or global history toggle", () => {
+    setProduct(HERBAL_MASALA)
+    mockedUseProductPlatformStock.mockReturnValue({
+      data: VARIANT_SCOPED,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProductPlatformStock>)
+    renderWithProviders(<InventoryProductPage />)
+
+    for (const name of ["Gold Packet", "Red Packet", "Blue Packet"]) {
+      expect(screen.getByText(`Marketplace Stock — ${name}`)).toBeInTheDocument()
+      expect(screen.getByText(`Monthly Sales — ${name}`)).toBeInTheDocument()
+      expect(screen.getByRole("button", { name: `Show ${name} History` })).toBeInTheDocument()
+    }
+    expect(screen.getAllByTestId("monthly-sales-summary")).toHaveLength(3)
+    expect(screen.queryByText("Monthly Sales")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Show Movement History" })).not.toBeInTheDocument()
   })
 })
