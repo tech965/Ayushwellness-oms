@@ -100,6 +100,7 @@ const ORDER = {
   attempt_count: 1,
   last_attempt_at: "2026-08-27T11:32:00Z",
   next_follow_up_at: null,
+  order_channel: "Amazon Order",
 }
 
 const CALL_HISTORY = [
@@ -195,6 +196,19 @@ describe("TelecallerOrderDetailPage", () => {
       expect.anything()
     )
   }, 15000)
+
+  it("shows the Order Channel badge from the server-provided order_channel field", () => {
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("Order Channel")).toBeInTheDocument()
+    expect(screen.getByText("Amazon Order")).toBeInTheDocument()
+  })
 
   it("CRITICAL REVIEW FIX: selecting Confirmed in the Log Call dialog and saving calls the same existing log-call API (no second 'Confirm Order' action)", async () => {
     const user = userEvent.setup()

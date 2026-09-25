@@ -45,6 +45,7 @@ from app.schemas.telecalling import (
     TelecallingSummaryResponse,
 )
 from app.services.lead_classification import classify_order, classify_priority
+from app.services.shopify_fulfillment_service import resolve_order_channel_label
 from app.services.telecalling_service import ScopeFilter, TelecallingService, resolve_team_scope
 
 router = APIRouter()
@@ -137,6 +138,7 @@ def to_assigned_order_response(
         next_follow_up_at=assignment.next_follow_up_at if assignment else None,
         lead_category=category,
         priority=priority,
+        order_channel=resolve_order_channel_label(order),
     )
 
 

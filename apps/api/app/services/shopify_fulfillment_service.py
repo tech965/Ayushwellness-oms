@@ -190,6 +190,16 @@ def resolve_order_channel(order: Order) -> str:
     return OrderChannel.SHOPIFY
 
 
+def resolve_order_channel_label(order: Order) -> str:
+    """Human-readable `OrderChannel.LABELS` counterpart of
+    `resolve_order_channel` (e.g. "Amazon Order") -- the single source of
+    truth for anything that needs to DISPLAY an order's channel (the
+    Telecaller order detail page's "Order Channel" badge), so the label
+    text is never duplicated/reimplemented client-side.
+    """
+    return OrderChannel.LABELS[resolve_order_channel(order)]
+
+
 def _to_shopify_address_input(address: dict) -> dict[str, str | None]:
     """Maps the OMS's own `Order.shipping_address` shape (`line1`/
     `line2`/`city`/`state`/`country`/`pin_code`/`contact_name`/

@@ -117,6 +117,10 @@ export interface AssignedOrder {
   next_follow_up_at: string | null
   lead_category: LeadCategory | null
   priority: LeadPriority | null
+  // Human-readable order-source classification (e.g. "Amazon Order",
+  // "Distributor Order") -- server-derived, always populated, never a
+  // raw internal key. Render verbatim, never re-derive from tags client-side.
+  order_channel: string
 }
 
 export interface AssignedCheckout {

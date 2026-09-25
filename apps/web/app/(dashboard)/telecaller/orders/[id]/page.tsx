@@ -28,6 +28,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -322,6 +323,14 @@ export default function TelecallerOrderDetailPage() {
                 </CardHeader>
                 <CardContent className="grid grid-cols-2 gap-4">
                   <SummaryStat label="Customer" value={order.customer_name ?? "—"} />
+                  <SummaryStat
+                    label="Order Channel"
+                    value={
+                      <Badge variant="secondary" className="rounded-md font-semibold">
+                        {order.order_channel}
+                      </Badge>
+                    }
+                  />
                   <SummaryStat
                     label="Phone"
                     value={

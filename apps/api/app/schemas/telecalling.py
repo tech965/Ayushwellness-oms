@@ -259,6 +259,12 @@ class AssignedOrderResponse(BaseModel):
     # categories (see `app.services.lead_classification.classify_order`).
     lead_category: LeadCategory | None = None
     priority: LeadPriority | None = None
+    # Human-readable order-source classification (e.g. "Amazon Order",
+    # "Distributor Order") -- always populated, server-derived via
+    # `ShopifyFulfillmentService.resolve_order_channel_label`, the exact
+    # same function that decides the outbound Shopify channel tag. Never
+    # a raw internal key ("amazon") and never recomputed in the frontend.
+    order_channel: str
 
 
 class AssignedCheckoutResponse(BaseModel):
