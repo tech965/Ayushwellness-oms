@@ -49,3 +49,43 @@ class SourceSystem:
     BLUE_DART = "blue_dart"
     CASHFREE = "cashfree"
     MANUAL = "manual"
+
+
+class OrderChannel:
+    """Known order-channel/source classifications, for the "which channel
+    did this order come from" Shopify tag (review-meeting Requirement 2 —
+    see `app.services.shopify_fulfillment_service.resolve_order_channel`).
+
+    Deliberately plain strings, not a DB enum or a new `Order` column —
+    mirrors `SourceSystem`'s own "add a value without a migration"
+    convention exactly. `Order` has no dedicated channel field today (an
+    order is only ever `source_system` `"shopify"` or `"manual"` — see
+    that mixin above); this class is a normalized TAG vocabulary derived
+    from existing data (`Order.source_system` + `Order.shopify_tags`,
+    Shopify's own already-synced tags), never a new fact stored on the
+    order itself. `DISTRIBUTOR`/`INFLUENCER_SAMPLE`/`AMAZON`/`FLIPKART`/
+    `BLINKIT`/`MEESHO` are only ever detected via a keyword already
+    present in `Order.shopify_tags` (i.e. Shopify's own store/app-side
+    tagging already says so) — the OMS never invents/guesses which of
+    these an order belongs to.
+    """
+
+    SHOPIFY = "shopify"
+    MANUAL = "manual"
+    DISTRIBUTOR = "distributor"
+    INFLUENCER_SAMPLE = "influencer_sample"
+    AMAZON = "amazon"
+    FLIPKART = "flipkart"
+    BLINKIT = "blinkit"
+    MEESHO = "meesho"
+
+    LABELS: dict[str, str] = {
+        SHOPIFY: "Shopify Order",
+        MANUAL: "Manual Order",
+        DISTRIBUTOR: "Distributor Order",
+        INFLUENCER_SAMPLE: "Influencer Sample",
+        AMAZON: "Amazon Order",
+        FLIPKART: "Flipkart Order",
+        BLINKIT: "Blinkit Order",
+        MEESHO: "Meesho Order",
+    }

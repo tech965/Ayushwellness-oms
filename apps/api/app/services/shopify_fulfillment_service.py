@@ -61,8 +61,9 @@ from app.core.logging import get_logger
 from app.integrations.registry import get_adapter
 from app.integrations.shopify.adapter import ShopifyAdapter
 from app.models.auth import User
-from app.models.enums import ShopifySyncStatus
+from app.models.enums import ShopifySyncStatus, TelecallingStatus
 from app.models.integration import IntegrationCode
+from app.models.mixins import OrderChannel, SourceSystem
 from app.models.order import Order
 from app.models.shipment import Shipment
 from app.repositories.auth import UserRepository
@@ -110,6 +111,83 @@ def _confirmation_tags(telecaller_name: str | None) -> list[str]:
     if telecaller_name and telecaller_name.strip():
         tags.append(_telecaller_confirmation_tag(telecaller_name))
     return tags
+
+
+# ----------------------------------------------------------------------
+# Call-outcome tagging (review-meeting Requirement 1) -- a normalized
+# Shopify tag for a Telecaller's CURRENT call outcome on an order. Reuses
+# the existing `TelecallingStatus` enum verbatim (never a second/invented
+# outcome vocabulary) and the exact labels already shown in the Log Call
+# UI (`apps/web/types/telecalling.ts::CALL_OUTCOME_OPTIONS`), so the tag
+# a telecaller sees on Shopify always matches the outcome they picked.
+#
+# `CONFIRMED` is deliberately NOT in this table -- it already has its own
+# dedicated, richer tag ("OMS Confirmed" + "<name> confirmed by OMS", see
+# `CONFIRMATION_TAG`/`_confirmation_tags` above), pushed via
+# `OrderService.confirm_order` -> `sync_confirmation_tag`. Never double-
+# tag confirmation; `sync_call_tags` below still runs for a CONFIRMED
+# outcome (to clear any stale prior-outcome tag and refresh the channel
+# tag), it just adds no outcome tag of its own for that one case.
+OUTCOME_TAGS: dict[TelecallingStatus, str] = {
+    TelecallingStatus.CALL_ATTEMPTED: "Call Attempted",
+    TelecallingStatus.CONNECTED: "Connected",
+    TelecallingStatus.NOT_RECEIVED: "Not Received",
+    TelecallingStatus.BUSY: "Busy",
+    TelecallingStatus.SWITCHED_OFF: "Switched Off",
+    TelecallingStatus.INVALID_NUMBER: "Invalid Number",
+    TelecallingStatus.CALL_BACK_REQUESTED: "Call Back Requested",
+    TelecallingStatus.INTERESTED: "Interested",
+    TelecallingStatus.NOT_INTERESTED: "Not Interested",
+    TelecallingStatus.FOLLOW_UP_REQUIRED: "Follow-up Required",
+    TelecallingStatus.CANCELLED: "Cancelled",
+}
+
+
+# ----------------------------------------------------------------------
+# Order channel/source tagging (review-meeting Requirement 2).
+# ----------------------------------------------------------------------
+
+# A channel is only ever inferred from a keyword ALREADY present in
+# `Order.shopify_tags` -- the existing, tested, inbound-only mirror of
+# Shopify's own current tags (`ShopifyOrderNormalizer.normalize_tags`,
+# populated on every pull-sync/webhook). Never guessed, never hardcoded
+# per-order -- if the Shopify store/an app hasn't already tagged an order
+# as (e.g.) "Amazon", the OMS has no way to know that and correctly
+# falls back to the generic `SHOPIFY`/`MANUAL` classification below.
+_SHOPIFY_TAG_CHANNEL_KEYWORDS: dict[str, str] = {
+    "distributor": OrderChannel.DISTRIBUTOR,
+    "influencer": OrderChannel.INFLUENCER_SAMPLE,
+    "amazon": OrderChannel.AMAZON,
+    "flipkart": OrderChannel.FLIPKART,
+    "blinkit": OrderChannel.BLINKIT,
+    "meesho": OrderChannel.MEESHO,
+}
+
+
+def resolve_order_channel(order: Order) -> str:
+    """One `OrderChannel` value for `order` -- the PERMANENT
+    classification half of Requirement 3 ("one current call-outcome
+    classification plus the permanent channel/source classification").
+
+    `Order.source_system` (`app.models.mixins.SourceSystem`) is the only
+    existing, reliable "where did this row come from" signal --
+    `"manual"` for a staff-created OMS order, `"shopify"` for anything
+    synced from the store. A Shopify-sourced order is further refined by
+    scanning its own already-synced `shopify_tags` for a recognized
+    channel keyword (case-insensitive substring match) -- e.g. a
+    marketplace-integration app that tags incoming Amazon orders
+    "Amazon" on the Shopify side. The first matching keyword wins; an
+    order with no recognized keyword (the common case today) stays
+    classified as the generic `SHOPIFY` channel.
+    """
+    if order.source_system == SourceSystem.MANUAL:
+        return OrderChannel.MANUAL
+    for tag in order.shopify_tags or []:
+        lowered = tag.lower()
+        for keyword, channel in _SHOPIFY_TAG_CHANNEL_KEYWORDS.items():
+            if keyword in lowered:
+                return channel
+    return OrderChannel.SHOPIFY
 
 
 def _to_shopify_address_input(address: dict) -> dict[str, str | None]:
@@ -440,6 +518,103 @@ class ShopifyFulfillmentService:
         )
         await self.session.commit()
         logger.info("shopify_confirmation_tag_removed", order_id=str(order_id), tags=tags)
+
+    async def sync_call_tags(
+        self, order_id: uuid.UUID, *, outcome: TelecallingStatus, actor: User
+    ) -> None:
+        """Best-effort push of the order's CURRENT call-outcome tag
+        (`OUTCOME_TAGS`) and its permanent channel tag
+        (`resolve_order_channel`/`OrderChannel.LABELS`) -- review-meeting
+        Requirements 1-3. Called from `TelecallingService.log_call` for
+        every logged outcome (including CONFIRMED), strictly AFTER the
+        call log itself has already committed -- same "never block/fail
+        the OMS operation" placement as `_confirm_order_from_call_log`.
+
+        ADDITIVE AND SAFE (Requirement 3): only ever touches this order's
+        own outcome/channel tags via `tagsAdd`/`tagsRemove` -- every OTHER
+        existing Shopify tag (a distributor marker, "VIP", anything a
+        human or another system added) is left completely untouched,
+        since Shopify's tag mutations only ever add/remove the specific
+        tags passed in, never replace the whole array (see
+        `ShopifyAdapter.add_order_tags`/`remove_order_tags`).
+
+        Never leaves the order with more than one CURRENT outcome tag:
+        the new outcome's tag is added and every OTHER possible outcome
+        tag is removed in the same push, so e.g. Busy -> Confirmed always
+        ends with "Confirmed"'s own tagging (handled separately by
+        `sync_confirmation_tag`) and no lingering "Busy". Same replace-
+        not-append treatment for the channel tag, in case a resync ever
+        changes which channel an order resolves to.
+
+        Exactly two Shopify calls (one `tagsAdd`, one `tagsRemove`)
+        regardless of how many tags are involved -- never one call per
+        tag. Each is independently best-effort: a failure in either half
+        is logged and never raised, and never blocks or rolls back the
+        other half or the OMS call log that already committed.
+        """
+        order = await self.orders.get_by_id(order_id)
+        if order is None or not order.shopify_order_id:
+            return
+
+        channel = resolve_order_channel(order)
+        channel_tag = OrderChannel.LABELS[channel]
+        tags_to_add = [channel_tag]
+        tags_to_remove = [label for key, label in OrderChannel.LABELS.items() if key != channel]
+
+        outcome_tag = OUTCOME_TAGS.get(outcome)
+        if outcome_tag is not None:
+            tags_to_add.append(outcome_tag)
+        tags_to_remove.extend(
+            label for key, label in OUTCOME_TAGS.items() if key != outcome
+        )
+
+        adapter = self._get_adapter()
+        order_gid = f"gid://shopify/Order/{order.shopify_order_id}"
+
+        add_succeeded = False
+        try:
+            await adapter.add_order_tags(order_gid, tags_to_add)
+            add_succeeded = True
+        except IntegrationError as exc:
+            logger.warning(
+                "shopify_call_tags_add_failed", order_id=str(order_id), error=exc.message
+            )
+        except Exception as exc:  # noqa: BLE001 - never let an unexpected error block a call log
+            logger.warning("shopify_call_tags_add_failed", order_id=str(order_id), error=str(exc))
+
+        remove_succeeded = False
+        try:
+            await adapter.remove_order_tags(order_gid, tags_to_remove)
+            remove_succeeded = True
+        except IntegrationError as exc:
+            logger.warning(
+                "shopify_call_tags_remove_failed", order_id=str(order_id), error=exc.message
+            )
+        except Exception as exc:  # noqa: BLE001 - never let an unexpected error block a call log
+            logger.warning(
+                "shopify_call_tags_remove_failed", order_id=str(order_id), error=str(exc)
+            )
+
+        if not (add_succeeded or remove_succeeded):
+            return
+
+        await self.audit.record(
+            user=actor,
+            action="order.shopify_call_tags_synced",
+            entity_type="order",
+            entity_id=str(order_id),
+            new_value={
+                "added": tags_to_add if add_succeeded else [],
+                "removed": tags_to_remove if remove_succeeded else [],
+            },
+        )
+        await self.session.commit()
+        logger.info(
+            "shopify_call_tags_synced",
+            order_id=str(order_id),
+            added=tags_to_add if add_succeeded else [],
+            removed=tags_to_remove if remove_succeeded else [],
+        )
 
     async def sync_confirmation_fulfillment(
         self, order_id: uuid.UUID, *, actor: User | None

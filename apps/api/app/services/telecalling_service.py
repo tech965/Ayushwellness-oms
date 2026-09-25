@@ -867,6 +867,19 @@ class TelecallingService:
         if outcome == TelecallingStatus.CONFIRMED:
             await self._confirm_order_from_call_log(order_id, actor=actor)
 
+        # Review-meeting Requirements 1-3: sync the order's current call-
+        # outcome tag + permanent channel tag to Shopify. Runs for EVERY
+        # logged outcome (including CONFIRMED, to clear a stale prior-
+        # outcome tag and refresh the channel tag) -- best-effort, after
+        # the commit above, same placement/failure-isolation contract as
+        # `_confirm_order_from_call_log`. See `ShopifyFulfillmentService.
+        # sync_call_tags`.
+        from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
+
+        await ShopifyFulfillmentService(self.session).sync_call_tags(
+            order_id, outcome=outcome, actor=actor
+        )
+
         return attempt
 
     async def _confirm_order_from_call_log(self, order_id: uuid.UUID, *, actor: User) -> None:

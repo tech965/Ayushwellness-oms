@@ -311,6 +311,12 @@ async def test_log_call_confirmed_succeeds_even_when_the_shopify_push_fails(
     -- OMS confirmation (via the Log Call save path) must still succeed;
     the Shopify failure is logged only, exactly like the direct `/confirm`
     endpoint's own existing contract.
+
+    A CONFIRMED log now makes THREE independent, best-effort Shopify
+    calls (confirmation tag `tagsAdd`, then the call-outcome/channel
+    `sync_call_tags`'s own `tagsAdd` + `tagsRemove` -- see
+    `ShopifyFulfillmentService.sync_call_tags`) -- every one of them can
+    fail independently without affecting the others or the OMS state.
     """
     from app.integrations.registry import clear_adapters, register_adapter
     from app.integrations.shopify.adapter import ShopifyAdapter
@@ -326,7 +332,13 @@ async def test_log_call_confirmed_succeeds_even_when_the_shopify_push_fails(
     async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
         await _assign(leader_client, str(order.id), str(telecaller.id))
 
-    client = _StubShopifyClient([IntegrationError("Shopify is down.", details={})])
+    client = _StubShopifyClient(
+        [
+            IntegrationError("Shopify is down.", details={}),
+            IntegrationError("Shopify is down.", details={}),
+            IntegrationError("Shopify is down.", details={}),
+        ]
+    )
     register_adapter(ShopifyAdapter(client=client))
     try:
         async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
@@ -337,8 +349,10 @@ async def test_log_call_confirmed_succeeds_even_when_the_shopify_push_fails(
             order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
 
         assert order_view.json()["data"]["status"] == "confirmed"
-        assert len(client.calls) == 1
-        assert "tagsAdd" in client.calls[0][0]
+        assert len(client.calls) == 3
+        assert "tagsAdd" in client.calls[0][0]  # confirmation tag
+        assert "tagsAdd" in client.calls[1][0]  # call-outcome/channel tags
+        assert "tagsRemove" in client.calls[2][0]  # stale outcome/channel tags cleared
     finally:
         clear_adapters()
 
