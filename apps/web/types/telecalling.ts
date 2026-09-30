@@ -4,32 +4,26 @@ import type { AddressValidationStatus, OrderStatus } from "./order"
 
 export type TelecallingStatus =
   | "not_called"
-  | "call_attempted"
-  | "connected"
-  | "not_received"
+  | "not_answering"
   | "busy"
   | "switched_off"
-  | "invalid_number"
-  | "call_back_requested"
+  | "call_back_later"
   | "interested"
   | "not_interested"
-  | "follow_up_required"
   | "confirmed"
   | "cancelled"
+  | "other"
 
 export const CALL_OUTCOME_OPTIONS: { label: string; value: TelecallingStatus }[] = [
-  { label: "Call Attempted", value: "call_attempted" },
-  { label: "Connected", value: "connected" },
-  { label: "Not Received", value: "not_received" },
+  { label: "Not Answering", value: "not_answering" },
   { label: "Busy", value: "busy" },
   { label: "Switched Off", value: "switched_off" },
-  { label: "Invalid Number", value: "invalid_number" },
-  { label: "Call Back Requested", value: "call_back_requested" },
+  { label: "Call Back Later", value: "call_back_later" },
   { label: "Interested", value: "interested" },
   { label: "Not Interested", value: "not_interested" },
-  { label: "Follow-up Required", value: "follow_up_required" },
   { label: "Confirmed", value: "confirmed" },
   { label: "Cancelled", value: "cancelled" },
+  { label: "Other", value: "other" },
 ]
 
 /** Mirrors app.models.enums.LeadCategory. */
@@ -78,6 +72,29 @@ export interface AssignedOrderItem {
   quantity: number
   unit_price: string
   total_amount: string
+}
+
+/** One selectable option for the "Change Flavour" dropdown. */
+export interface AvailableVariant {
+  id: string
+  sku: string
+  title: string | null
+  price: string
+}
+
+/** One row of an order's Activity History — mirrors
+ * apps/api/app/schemas/order.py::OrderEventResponse.
+ */
+export interface OrderActivityEvent {
+  id: string
+  order_id: string
+  event_type: string
+  status: string | null
+  description: string | null
+  source: string
+  actor_user_id: string | null
+  event_metadata: Record<string, unknown> | null
+  created_at: string
 }
 
 export interface AssignedOrder {

@@ -36,6 +36,30 @@ class OrderAddressUpdateRequest(BaseModel):
     country: str = Field(min_length=1, max_length=120, default="India")
 
 
+class OrderItemVariantUpdateRequest(BaseModel):
+    """Review-meeting Requirement 3: the new flavour/variant to switch an
+    order item to. Always a `ProductVariant.id` -- never a client-supplied
+    SKU/title string -- `OrderService.update_item_variant` resolves and
+    validates the real row server-side.
+    """
+
+    product_variant_id: uuid.UUID
+
+
+class AvailableVariantResponse(BaseModel):
+    """One selectable option for the "change flavour" dropdown -- the
+    order item's product's other variants (`ProductVariantRepository.
+    list_for_product`), never a second product-catalog read path.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    sku: str
+    title: str | None
+    price: Decimal
+
+
 class AssignOrdersRequest(BaseModel):
     order_ids: list[uuid.UUID] = Field(min_length=1)
     mode: Literal["manual", "equal"]
@@ -87,6 +111,17 @@ class LogCallRequest(BaseModel):
     def _reject_not_called(self) -> LogCallRequest:
         if self.outcome == TelecallingStatus.NOT_CALLED:
             raise ValueError("NOT_CALLED is not a loggable call outcome.")
+        return self
+
+    @model_validator(mode="after")
+    def _other_requires_notes(self) -> LogCallRequest:
+        """"Other" is the escape hatch for a situation none of the fixed
+        statuses cover -- worthless without the telecaller's own
+        explanation, so (unlike every other outcome) `notes` is mandatory
+        here, never optional.
+        """
+        if self.outcome == TelecallingStatus.OTHER and not (self.notes and self.notes.strip()):
+            raise ValueError("notes is required when outcome is 'other'.")
         return self
 
 

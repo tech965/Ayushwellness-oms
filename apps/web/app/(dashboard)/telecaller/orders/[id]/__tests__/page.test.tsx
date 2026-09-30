@@ -10,11 +10,14 @@ import {
   useConfirmOrder,
   useDeleteCallAttempt,
   useEditCallAttempt,
+  useItemVariants,
   useLogCall,
   useMyOrder,
+  useOrderActivity,
   usePreviousOrders,
   useScheduleFollowUp,
   useUnconfirmOrder,
+  useUpdateItemVariant,
   useUpdateOrderAddress,
 } from "@/services/telecaller"
 import { toast } from "sonner"
@@ -41,6 +44,9 @@ vi.mock("@/services/telecaller", () => ({
   useConfirmOrder: vi.fn(),
   useUnconfirmOrder: vi.fn(),
   useUpdateOrderAddress: vi.fn(),
+  useItemVariants: vi.fn(),
+  useUpdateItemVariant: vi.fn(),
+  useOrderActivity: vi.fn(),
   fetchMyOrders: vi.fn(),
 }))
 
@@ -54,6 +60,9 @@ const mockedUseDeleteCallAttempt = vi.mocked(useDeleteCallAttempt)
 const mockedUseConfirmOrder = vi.mocked(useConfirmOrder)
 const mockedUseUnconfirmOrder = vi.mocked(useUnconfirmOrder)
 const mockedUseUpdateOrderAddress = vi.mocked(useUpdateOrderAddress)
+const mockedUseItemVariants = vi.mocked(useItemVariants)
+const mockedUseUpdateItemVariant = vi.mocked(useUpdateItemVariant)
+const mockedUseOrderActivity = vi.mocked(useOrderActivity)
 
 const ORDER = {
   order_id: "order-1",
@@ -156,6 +165,24 @@ function mockCommonHooks() {
     mutate: vi.fn(),
     isPending: false,
   } as unknown as ReturnType<typeof useUpdateOrderAddress>)
+  mockedUseItemVariants.mockReturnValue({
+    isLoading: false,
+    isError: false,
+    error: null,
+    data: [],
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useItemVariants>)
+  mockedUseUpdateItemVariant.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useUpdateItemVariant>)
+  mockedUseOrderActivity.mockReturnValue({
+    isLoading: false,
+    isError: false,
+    error: null,
+    data: [],
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useOrderActivity>)
 }
 
 afterEach(() => {
@@ -192,7 +219,7 @@ describe("TelecallerOrderDetailPage", () => {
     await user.click(screen.getByRole("button", { name: /^Save$/i }))
 
     expect(mutate).toHaveBeenCalledWith(
-      { outcome: "connected", notes: "Customer answered.", next_follow_up_at: undefined },
+      { outcome: "not_answering", notes: "Customer answered.", next_follow_up_at: undefined },
       expect.anything()
     )
   }, 15000)
@@ -208,6 +235,75 @@ describe("TelecallerOrderDetailPage", () => {
 
     expect(screen.getByText("Order Channel")).toBeInTheDocument()
     expect(screen.getByText("Amazon Order")).toBeInTheDocument()
+  })
+
+  it("changes an order item's flavour and saves the new variant", async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseItemVariants.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: [
+        { id: "variant-orange", sku: "AW-HM-OR", title: "Orange", price: "199.00" },
+        { id: "variant-mango", sku: "AW-HM-MG", title: "Mango", price: "199.00" },
+      ],
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useItemVariants>)
+    mockedUseUpdateItemVariant.mockReturnValue({
+      mutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateItemVariant>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Change Flavour$/i }))
+    await user.click(screen.getByRole("combobox"))
+    await user.click(screen.getByRole("option", { name: "Mango" }))
+    await user.click(screen.getByRole("button", { name: /^Save$/i }))
+
+    expect(mutate).toHaveBeenCalledWith(
+      { itemId: "item-1", productVariantId: "variant-mango" },
+      expect.anything()
+    )
+  })
+
+  it("shows Activity History entries returned by useOrderActivity", () => {
+    mockCommonHooks()
+    mockedUseLogCall.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useLogCall>)
+    mockedUseOrderActivity.mockReturnValue({
+      isLoading: false,
+      isError: false,
+      error: null,
+      data: [
+        {
+          id: "event-1",
+          order_id: "order-1",
+          event_type: "address_updated",
+          status: null,
+          description: "Shipping address updated.",
+          source: "user",
+          actor_user_id: "tc-1",
+          event_metadata: null,
+          created_at: "2026-09-30T10:00:00Z",
+        },
+      ],
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useOrderActivity>)
+
+    renderWithProviders(<TelecallerOrderDetailPage />)
+
+    expect(screen.getByText("Activity History")).toBeInTheDocument()
+    expect(screen.getByText("Shipping address updated.")).toBeInTheDocument()
   })
 
   it("CRITICAL REVIEW FIX: selecting Confirmed in the Log Call dialog and saving calls the same existing log-call API (no second 'Confirm Order' action)", async () => {

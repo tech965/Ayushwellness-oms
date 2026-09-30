@@ -95,7 +95,7 @@ describe("TelecallerCheckoutDetailPage", () => {
 
     expect(mutate).toHaveBeenCalledWith(
       {
-        outcome: "connected",
+        outcome: "not_answering",
         notes: "Asked for a callback tomorrow.",
         next_follow_up_at: undefined,
       },

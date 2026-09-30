@@ -149,7 +149,7 @@ function TelecallerOrdersContent() {
   const bulkConfirm = useBulkConfirmOrders()
 
   const [logCallTarget, setLogCallTarget] = React.useState<AssignedOrder | null>(null)
-  const [outcome, setOutcome] = React.useState<TelecallingStatus>("connected")
+  const [outcome, setOutcome] = React.useState<TelecallingStatus>("not_answering")
   const [notes, setNotes] = React.useState("")
   const logCall = useLogCall(logCallTarget?.order_id ?? "")
 
@@ -324,7 +324,7 @@ function TelecallerOrdersContent() {
               <DropdownMenuItem
                 onSelect={() => {
                   setLogCallTarget(o)
-                  setOutcome((o.call_status ?? "connected") as TelecallingStatus)
+                  setOutcome((o.call_status ?? "not_answering") as TelecallingStatus)
                   setNotes("")
                 }}
               >
@@ -487,7 +487,11 @@ function TelecallerOrdersContent() {
               </SelectContent>
             </Select>
             <Textarea
-              placeholder="Notes (optional)"
+              placeholder={
+                outcome === "other"
+                  ? "Describe the reason (required for Other)"
+                  : "Notes (optional)"
+              }
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
             />
@@ -496,7 +500,10 @@ function TelecallerOrdersContent() {
             <Button variant="outline" onClick={() => setLogCallTarget(null)}>
               Cancel
             </Button>
-            <Button onClick={handleLogCall} disabled={logCall.isPending}>
+            <Button
+              onClick={handleLogCall}
+              disabled={logCall.isPending || (outcome === "other" && !notes.trim())}
+            >
               {logCall.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>

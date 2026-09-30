@@ -129,17 +129,14 @@ def _confirmation_tags(telecaller_name: str | None) -> list[str]:
 # outcome (to clear any stale prior-outcome tag and refresh the channel
 # tag), it just adds no outcome tag of its own for that one case.
 OUTCOME_TAGS: dict[TelecallingStatus, str] = {
-    TelecallingStatus.CALL_ATTEMPTED: "Call Attempted",
-    TelecallingStatus.CONNECTED: "Connected",
-    TelecallingStatus.NOT_RECEIVED: "Not Received",
+    TelecallingStatus.NOT_ANSWERING: "Not Answering",
     TelecallingStatus.BUSY: "Busy",
     TelecallingStatus.SWITCHED_OFF: "Switched Off",
-    TelecallingStatus.INVALID_NUMBER: "Invalid Number",
-    TelecallingStatus.CALL_BACK_REQUESTED: "Call Back Requested",
+    TelecallingStatus.CALL_BACK_LATER: "Call Back Later",
     TelecallingStatus.INTERESTED: "Interested",
     TelecallingStatus.NOT_INTERESTED: "Not Interested",
-    TelecallingStatus.FOLLOW_UP_REQUIRED: "Follow-up Required",
     TelecallingStatus.CANCELLED: "Cancelled",
+    TelecallingStatus.OTHER: "Other",
 }
 
 

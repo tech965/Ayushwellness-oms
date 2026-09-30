@@ -5,6 +5,7 @@ import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
   AssignedCheckout,
   AssignedOrder,
+  AvailableVariant,
   BulkConfirmOrdersResponse,
   CallAttempt,
   CallHistoryEntry,
@@ -12,6 +13,7 @@ import type {
   CheckoutCallAttempt,
   EditCallAttemptInput,
   LogCallInput,
+  OrderActivityEvent,
   OrderAssignment,
   PreviousOrder,
   TelecallingSummary,
@@ -267,6 +269,62 @@ export function useUpdateOrderAddress(orderId: string) {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
     },
+  })
+}
+
+async function fetchItemVariants(orderId: string, itemId: string): Promise<AvailableVariant[]> {
+  const response = await apiClient.get<ApiResponse<AvailableVariant[]>>(
+    `/telecaller/orders/${orderId}/items/${itemId}/variants`
+  )
+  return response.data.data ?? []
+}
+
+/** Options for the "Change Flavour" dropdown -- every other variant of
+ * this line item's own product.
+ */
+export function useItemVariants(orderId: string, itemId: string | null) {
+  return useQuery({
+    queryKey: ["telecaller", "orders", orderId, "items", itemId, "variants"],
+    queryFn: () => fetchItemVariants(orderId, itemId as string),
+    enabled: Boolean(orderId) && Boolean(itemId),
+  })
+}
+
+/** Changes an order item's product flavour/variant. Quantity/pricing are
+ * deliberately untouched -- this is a flavour correction, never a
+ * re-pricing. Recorded on the order's Activity History.
+ */
+export function useUpdateItemVariant(orderId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: { itemId: string; productVariantId: string }) => {
+      const response = await apiClient.patch<ApiResponse<AssignedOrder>>(
+        `/telecaller/orders/${orderId}/items/${input.itemId}/variant`,
+        { product_variant_id: input.productVariantId }
+      )
+      return response.data.data
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["telecaller", "orders"] })
+    },
+  })
+}
+
+async function fetchOrderActivity(orderId: string): Promise<OrderActivityEvent[]> {
+  const response = await apiClient.get<ApiResponse<OrderActivityEvent[]>>(
+    `/telecaller/orders/${orderId}/activity`
+  )
+  return response.data.data ?? []
+}
+
+/** The order-detail page's "Activity History" panel -- address/flavour
+ * changes, status transitions, etc., newest first.
+ */
+export function useOrderActivity(orderId: string) {
+  return useQuery({
+    queryKey: ["telecaller", "orders", orderId, "activity"],
+    queryFn: () => fetchOrderActivity(orderId),
+    enabled: Boolean(orderId),
   })
 }
 

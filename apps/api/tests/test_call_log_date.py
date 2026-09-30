@@ -74,7 +74,7 @@ async def test_a_new_call_log_defaults_attempted_at_to_now_without_a_client_supp
         # enters one, and the API doesn't accept one.
         response = await tc_client.post(
             f"/api/v1/telecaller/orders/{order.id}/calls",
-            json={"outcome": "connected", "notes": "Answered."},
+            json={"outcome": "interested", "notes": "Answered."},
         )
     after = datetime.now(UTC)
 
@@ -93,7 +93,7 @@ async def test_editing_an_old_call_record_never_overwrites_its_historical_date(
     async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
         logged = await tc_client.post(
             f"/api/v1/telecaller/orders/{order.id}/calls",
-            json={"outcome": "not_received", "notes": "No answer."},
+            json={"outcome": "not_answering", "notes": "No answer."},
         )
         assert logged.status_code == 201
         original_attempted_at = logged.json()["data"]["attempted_at"]
@@ -104,11 +104,11 @@ async def test_editing_an_old_call_record_never_overwrites_its_historical_date(
         # differ from the original.
         edited = await tc_client.patch(
             f"/api/v1/telecaller/orders/{order.id}/calls/{attempt_id}",
-            json={"outcome": "connected", "notes": "Actually reached them on redial."},
+            json={"outcome": "interested", "notes": "Actually reached them on redial."},
         )
 
     assert edited.status_code == 200
     data = edited.json()["data"]
     assert data["attempted_at"] == original_attempted_at
     assert data["is_edited"] is True
-    assert data["outcome"] == "connected"
+    assert data["outcome"] == "interested"

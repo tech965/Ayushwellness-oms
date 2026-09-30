@@ -59,7 +59,7 @@ export default function TelecallerCheckoutDetailPage() {
 
   const [logCallOpen, setLogCallOpen] = React.useState(false)
   const [followUpOpen, setFollowUpOpen] = React.useState(false)
-  const [outcome, setOutcome] = React.useState<TelecallingStatus>("connected")
+  const [outcome, setOutcome] = React.useState<TelecallingStatus>("not_answering")
   const [notes, setNotes] = React.useState("")
   const [nextFollowUp, setNextFollowUp] = React.useState("")
   const [followUpOnly, setFollowUpOnly] = React.useState("")
@@ -288,7 +288,11 @@ export default function TelecallerCheckoutDetailPage() {
               </SelectContent>
             </Select>
             <Textarea
-              placeholder="Notes (optional)"
+              placeholder={
+                outcome === "other"
+                  ? "Describe the reason (required for Other)"
+                  : "Notes (optional)"
+              }
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
             />
@@ -307,7 +311,10 @@ export default function TelecallerCheckoutDetailPage() {
             <Button variant="outline" onClick={() => setLogCallOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleLogCall} disabled={logCall.isPending}>
+            <Button
+              onClick={handleLogCall}
+              disabled={logCall.isPending || (outcome === "other" && !notes.trim())}
+            >
               {logCall.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>

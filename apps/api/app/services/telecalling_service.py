@@ -22,11 +22,12 @@ from app.core.logging import get_logger
 from app.core.timezone import ist_day_bounds, to_ist
 from app.models.auth import User
 from app.models.enums import AssignmentStatus, LeadCategory, TelecallingStatus
-from app.models.order import Order
+from app.models.order import Order, OrderEvent
+from app.models.product import ProductVariant
 from app.models.telecalling import CallAttempt, CheckoutAssignment, OrderAssignment
 from app.repositories.abandoned_checkout import AbandonedCheckoutRepository
 from app.repositories.auth import UserRepository
-from app.repositories.order import OrderRepository
+from app.repositories.order import OrderEventRepository, OrderRepository
 from app.repositories.telecalling import (
     CallAttemptRepository,
     CheckoutAssignmentRepository,
@@ -38,6 +39,23 @@ from app.services.audit_service import AuditService
 from app.services.order_service import OrderService
 
 logger = get_logger(__name__)
+
+# "Connected" isn't a `TelecallingStatus` value of its own any more (the
+# 2026-09-30 status simplification removed the old literal CONNECTED
+# outcome) -- it's now a computed metric: any logged outcome that implies
+# the telecaller actually reached/spoke with the customer, i.e. everything
+# except "never called"/"didn't pick up"/"line busy"/"phone off". Used by
+# both `_performance_from_counts` and `_summary_from_counts` below, and the
+# daily-performance bucket loop, so the "Connected" figure on the Team
+# Leader dashboards keeps meaning the same real-world thing it always did.
+_NOT_CONNECTED_OUTCOMES = frozenset(
+    {
+        TelecallingStatus.NOT_CALLED,
+        TelecallingStatus.NOT_ANSWERING,
+        TelecallingStatus.BUSY,
+        TelecallingStatus.SWITCHED_OFF,
+    }
+)
 
 
 class ScopeFilter:
@@ -94,6 +112,7 @@ class TelecallingService:
         self.checkout_assignments = CheckoutAssignmentRepository(session)
         self.checkout_call_attempts = CheckoutCallAttemptRepository(session)
         self.checkouts = AbandonedCheckoutRepository(session)
+        self.order_events = OrderEventRepository(session)
 
     # ------------------------------------------------------------------
     # Listing / detail (read paths — every one takes a `scope`, never a
@@ -511,9 +530,14 @@ class TelecallingService:
                 },
             )
             bucket["attempts"] += 1
-            if attempt.outcome == TelecallingStatus.CONNECTED:
+            # "Connected" is a computed superset (see `_NOT_CONNECTED_
+            # OUTCOMES`'s docstring) that overlaps confirmed/not_interested/
+            # cancelled -- each of these is checked independently, never as
+            # an elif chain, so a CONFIRMED attempt counts in *both* its own
+            # bucket and the broader "connected" one.
+            if attempt.outcome not in _NOT_CONNECTED_OUTCOMES:
                 bucket["connected"] += 1
-            elif attempt.outcome == TelecallingStatus.CONFIRMED:
+            if attempt.outcome == TelecallingStatus.CONFIRMED:
                 bucket["confirmed"] += 1
             elif attempt.outcome == TelecallingStatus.NOT_INTERESTED:
                 bucket["not_interested"] += 1
@@ -1150,6 +1174,72 @@ class TelecallingService:
             order_id, actor=actor, address=address
         )
 
+    async def update_assigned_order_item_variant(
+        self,
+        order_id: uuid.UUID,
+        item_id: uuid.UUID,
+        *,
+        actor: User,
+        new_variant_id: uuid.UUID,
+    ) -> Order:
+        """Telecaller-scoped product flavour/variant edit. Same ownership
+        check as `update_assigned_order_address` (`assigned_to == actor.id`
+        unless superuser) -- a Telecaller can only change the flavour of an
+        item on an order actually assigned to them. The actual OMS write
+        + audit/history recording is `OrderService.update_item_variant`'s
+        job.
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+        return await self.order_service.update_item_variant(
+            order_id, item_id, actor=actor, new_variant_id=new_variant_id
+        )
+
+    async def list_available_variants_for_item(
+        self, order_id: uuid.UUID, item_id: uuid.UUID, *, actor: User
+    ) -> list[ProductVariant]:
+        """Options for the "change flavour" dropdown -- every variant of
+        the item's own product (`ProductVariantRepository.list_for_product`
+        via the already-wired `OrderService.variants`), never a second
+        product-catalog read path. Same ownership check as every other
+        `/telecaller/orders/{id}/*` method.
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+
+        item = await self.order_service.order_items.get_by_id(item_id)
+        if item is None or item.order_id != order_id:
+            raise NotFoundError("Order item not found.")
+        if item.product_variant_id is None:
+            return []
+        current_variant = await self.order_service.variants.get_by_id(item.product_variant_id)
+        if current_variant is None:
+            return []
+        return await self.order_service.variants.list_for_product(current_variant.product_id)
+
+    async def get_activity_for_assigned_order(
+        self, order_id: uuid.UUID, *, actor: User
+    ) -> list[OrderEvent]:
+        """The order-detail page's "Activity History" panel -- the append-
+        only `OrderEvent` timeline for this order (address/flavour changes,
+        status transitions, ...), newest first. Same ownership check as
+        every other `/telecaller/orders/{id}/*` method (`assigned_to ==
+        actor.id` unless superuser).
+        """
+        assignment = await self.assignments.get_active_for_order(order_id)
+        if assignment is None:
+            raise NotFoundError("Order is not currently assigned.")
+        if not actor.is_superuser and assignment.assigned_to != actor.id:
+            raise AuthorizationError("This order is not assigned to you.")
+        events = await self.order_events.list_for_order(order_id)
+        return list(reversed(events))
+
     async def get_previous_orders_for_assigned_order(
         self, order_id: uuid.UUID, *, actor: User, limit: int = 20
     ) -> list[Order]:
@@ -1291,11 +1381,13 @@ def _performance_from_counts(counts: dict[str, int]) -> dict[str, int | float]:
     not_called = counts.get(TelecallingStatus.NOT_CALLED.value, 0)
     called = assigned - not_called
     confirmed = counts.get(TelecallingStatus.CONFIRMED.value, 0)
+    not_connected_values = {status.value for status in _NOT_CONNECTED_OUTCOMES}
+    connected = sum(count for status, count in counts.items() if status not in not_connected_values)
     return {
         "assigned": assigned,
         "called": called,
         "pending": not_called,
-        "connected": counts.get(TelecallingStatus.CONNECTED.value, 0),
+        "connected": connected,
         "interested": counts.get(TelecallingStatus.INTERESTED.value, 0),
         "follow_ups": follow_ups,
         "confirmed": confirmed,
@@ -1307,11 +1399,13 @@ def _performance_from_counts(counts: dict[str, int]) -> dict[str, int | float]:
 def _summary_from_counts(counts: dict[str, int], follow_ups_today: int) -> dict[str, int]:
     assigned = sum(counts.values())
     not_called = counts.get(TelecallingStatus.NOT_CALLED.value, 0)
+    not_connected_values = {status.value for status in _NOT_CONNECTED_OUTCOMES}
+    connected = sum(count for status, count in counts.items() if status not in not_connected_values)
     return {
         "assigned": assigned,
         "pending": not_called,
         "called": assigned - not_called,
-        "connected": counts.get(TelecallingStatus.CONNECTED.value, 0),
+        "connected": connected,
         "follow_ups_today": follow_ups_today,
         "confirmed": counts.get(TelecallingStatus.CONFIRMED.value, 0),
         "not_interested": counts.get(TelecallingStatus.NOT_INTERESTED.value, 0),

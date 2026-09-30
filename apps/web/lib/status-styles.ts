@@ -199,18 +199,15 @@ const RECONCILIATION_RUN_STATUS_TONES: Record<string, StatusTone> = {
 
 const TELECALLING_STATUS_TONES: Record<string, StatusTone> = {
   not_called: "neutral",
-  call_attempted: "info",
-  connected: "info",
-  not_received: "warning",
+  not_answering: "warning",
   busy: "warning",
   switched_off: "warning",
-  invalid_number: "warning",
-  call_back_requested: "warning",
+  call_back_later: "warning",
   interested: "info",
   not_interested: "danger",
-  follow_up_required: "warning",
   confirmed: "success",
   cancelled: "danger",
+  other: "neutral",
 }
 
 // `app.models.enums.LeadPriority` — computed, never stored (see

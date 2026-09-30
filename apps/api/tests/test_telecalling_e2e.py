@@ -106,7 +106,7 @@ async def test_full_team_leader_telecaller_workflow(db_session: AsyncSession) ->
         # --- Log Attempt #1: NOT_RECEIVED ---
         attempt_1 = await tc1_client.post(
             f"/api/v1/telecaller/orders/{target_order_id}/calls",
-            json={"outcome": "not_received", "notes": "No answer."},
+            json={"outcome": "not_answering", "notes": "No answer."},
         )
         assert attempt_1.status_code == 201
         assert attempt_1.json()["data"]["attempt_number"] == 1
@@ -114,7 +114,7 @@ async def test_full_team_leader_telecaller_workflow(db_session: AsyncSession) ->
         # --- Log Attempt #2: CONNECTED ---
         attempt_2 = await tc1_client.post(
             f"/api/v1/telecaller/orders/{target_order_id}/calls",
-            json={"outcome": "connected", "notes": "Spoke to customer."},
+            json={"outcome": "interested", "notes": "Spoke to customer."},
         )
         assert attempt_2.status_code == 201
         assert attempt_2.json()["data"]["attempt_number"] == 2
@@ -145,7 +145,7 @@ async def test_full_team_leader_telecaller_workflow(db_session: AsyncSession) ->
         assert forbidden.json()["error"]["code"] == "authorization_error"
 
         forbidden_call = await tc1_client.post(
-            f"/api/v1/telecaller/orders/{tc2_order_id}/calls", json={"outcome": "connected"}
+            f"/api/v1/telecaller/orders/{tc2_order_id}/calls", json={"outcome": "interested"}
         )
         assert forbidden_call.status_code in (403, 404)
 
@@ -159,12 +159,12 @@ async def test_full_team_leader_telecaller_workflow(db_session: AsyncSession) ->
             if row["telecaller_id"] == str(telecaller_1.id)
         )
         assert tc1_row["called"] == 1  # one order has moved past NOT_CALLED
-        assert tc1_row["connected"] == 1
+        assert tc1_row["interested"] == 1
 
         team_order_detail = await leader_client.get(f"/api/v1/team/orders/{target_order_id}")
         assert team_order_detail.status_code == 200
         assert team_order_detail.json()["data"]["attempt_count"] == 2
-        assert team_order_detail.json()["data"]["call_status"] == "connected"
+        assert team_order_detail.json()["data"]["call_status"] == "interested"
 
     # --- Admin sees everything too ---
     async with bearer_client(app, get_db, db_session, admin.id) as admin_client:

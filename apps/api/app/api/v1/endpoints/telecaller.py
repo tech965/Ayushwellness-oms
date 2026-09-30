@@ -22,11 +22,12 @@ from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
-from app.schemas.order import OrderDetailResponse
+from app.schemas.order import OrderDetailResponse, OrderEventResponse
 from app.schemas.response import ApiResponse, PaginatedResponse
 from app.schemas.telecalling import (
     AssignedCheckoutResponse,
     AssignedOrderResponse,
+    AvailableVariantResponse,
     BulkConfirmOrderResult,
     BulkConfirmOrdersRequest,
     BulkConfirmOrdersResponse,
@@ -36,6 +37,7 @@ from app.schemas.telecalling import (
     LogCallRequest,
     OrderAddressUpdateRequest,
     OrderAssignmentResponse,
+    OrderItemVariantUpdateRequest,
     PreviousOrderResponse,
     ScheduleFollowUpRequest,
     TelecallingSummaryResponse,
@@ -259,6 +261,72 @@ async def update_order_address(
         data=to_assigned_order_response(assignment.order, assignment, include_items=True),
         message="Address updated.",
     )
+
+
+@router.get(
+    "/orders/{order_id}/items/{item_id}/variants",
+    response_model=ApiResponse[list[AvailableVariantResponse]],
+)
+async def list_item_variants(
+    order_id: uuid.UUID,
+    item_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("calls.manage")),
+) -> ApiResponse[list[AvailableVariantResponse]]:
+    """Options for the "change flavour" dropdown on the order-detail page
+    -- every other variant of this item's own product. Same ownership
+    scoping as every other `/telecaller/orders/{id}/*` route.
+    """
+    variants = await TelecallingService(session).list_available_variants_for_item(
+        order_id, item_id, actor=current_user
+    )
+    return ApiResponse(data=[AvailableVariantResponse.model_validate(v) for v in variants])
+
+
+@router.patch(
+    "/orders/{order_id}/items/{item_id}/variant",
+    response_model=ApiResponse[AssignedOrderResponse],
+)
+async def update_item_variant(
+    order_id: uuid.UUID,
+    item_id: uuid.UUID,
+    payload: OrderItemVariantUpdateRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("orders.confirm")),
+) -> ApiResponse[AssignedOrderResponse]:
+    """Review-meeting Requirement 3: changes an order item's product
+    flavour/variant. Same `orders.confirm` permission + `assigned_to ==
+    current_user.id` ownership check as address edit/confirm above.
+    Records before/after on the order's Activity History
+    (`OrderService.update_item_variant`) -- never a silent overwrite.
+    """
+    service = TelecallingService(session)
+    await service.update_assigned_order_item_variant(
+        order_id, item_id, actor=current_user, new_variant_id=payload.product_variant_id
+    )
+    assignment = await service.get_scoped_assignment(
+        order_id, scope=ScopeFilter(assigned_to=None, team_leader_id=None)
+    )
+    return ApiResponse(
+        data=to_assigned_order_response(assignment.order, assignment, include_items=True),
+        message="Flavour updated.",
+    )
+
+
+@router.get("/orders/{order_id}/activity", response_model=ApiResponse[list[OrderEventResponse]])
+async def get_order_activity(
+    order_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("calls.manage")),
+) -> ApiResponse[list[OrderEventResponse]]:
+    """The order-detail page's "Activity History" panel -- address/flavour
+    changes, status transitions, etc., newest first. Same ownership
+    scoping as every other `/telecaller/orders/{id}/*` route.
+    """
+    events = await TelecallingService(session).get_activity_for_assigned_order(
+        order_id, actor=current_user
+    )
+    return ApiResponse(data=[OrderEventResponse.model_validate(e) for e in events])
 
 
 @router.get(

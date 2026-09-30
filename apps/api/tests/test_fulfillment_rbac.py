@@ -140,7 +140,7 @@ async def test_fulfillment_cannot_log_a_call(db_session: AsyncSession) -> None:
     )
     async with bearer_client(app, get_db, db_session, user.id) as client:
         response = await client.post(
-            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "connected"}
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "interested"}
         )
         assert response.status_code == 403
 

@@ -554,6 +554,94 @@ class OrderService:
         await ShopifyFulfillmentService(self.session).sync_shipping_address(order_id, actor=actor)
         return await self.get_order(order_id)
 
+    async def update_item_variant(
+        self, order_id: uuid.UUID, item_id: uuid.UUID, *, actor: User, new_variant_id: uuid.UUID
+    ) -> Order:
+        """Review-meeting Requirement 3: lets a Telecaller correct an
+        order's product flavour/variant (e.g. Orange -> Mango) before it
+        ships. Only caller is `TelecallingService.
+        update_assigned_order_item_variant`, which does its own ownership
+        check first -- same separation `update_shipping_address` above has
+        from its caller.
+
+        Deliberately narrow, mirroring `update_shipping_address`: only
+        `OrderItem.product_variant_id`/`sku` change. `quantity`/
+        `unit_price`/`total_amount`/`product_name` are left exactly as
+        they were -- this is a flavour correction, not a re-pricing or a
+        product swap, and touching the order's financials here would risk
+        silently desyncing them from what the customer was actually
+        charged/what Shopify/payment records show. Never touches `Order.
+        status`, confirmation attribution, fulfillment, inventory, or
+        Shiprocket. Not pushed to Shopify -- there is no existing
+        outbound "edit an order's line item" integration to reuse (unlike
+        the address case), and building one is out of scope here; the
+        flavour change is OMS-side only.
+
+        Both the new AND previous variant must belong to the SAME
+        `Product` -- this is a flavour/variant correction within one
+        product, never a way to swap the order to an entirely different
+        product through this endpoint.
+
+        Audited (`AuditService.record`, previous/new variant) and written
+        to the append-only `OrderEvent` timeline (`event_type=
+        "item_variant_updated"`) -- the same existing pattern
+        `update_shipping_address` already uses for "what changed and who
+        changed it," reused unchanged rather than inventing a second
+        mechanism.
+        """
+        item = await self.order_items.get_by_id(item_id)
+        if item is None or item.order_id != order_id:
+            raise NotFoundError("Order item not found.")
+
+        new_variant = await self.variants.get_by_id(new_variant_id)
+        if new_variant is None:
+            raise NotFoundError("Product variant not found.")
+
+        current_variant = (
+            await self.variants.get_by_id(item.product_variant_id)
+            if item.product_variant_id
+            else None
+        )
+        if current_variant is not None and current_variant.product_id != new_variant.product_id:
+            raise ConflictError("The new variant must belong to the same product.")
+
+        previous = {
+            "product_variant_id": str(item.product_variant_id) if item.product_variant_id else None,
+            "sku": item.sku,
+            "variant_title": current_variant.title if current_variant else None,
+        }
+        new = {
+            "product_variant_id": str(new_variant.id),
+            "sku": new_variant.sku,
+            "variant_title": new_variant.title,
+        }
+
+        await self.order_items.update(
+            item, product_variant_id=new_variant.id, sku=new_variant.sku
+        )
+        await self.order_events.create(
+            order_id=order_id,
+            event_type="item_variant_updated",
+            status=None,
+            description=(
+                f"Flavour/variant changed from "
+                f"{previous['variant_title'] or previous['sku']} to "
+                f"{new['variant_title'] or new['sku']}."
+            ),
+            source="user",
+            actor_user_id=actor.id,
+        )
+        await self.audit.record(
+            user=actor,
+            action="order.item_variant_updated",
+            entity_type="order",
+            entity_id=str(order_id),
+            previous_value=previous,
+            new_value=new,
+        )
+        await self.session.commit()
+        return await self.get_order(order_id)
+
     async def add_event(
         self,
         order_id: uuid.UUID,

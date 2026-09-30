@@ -279,21 +279,33 @@ class TelecallingStatus(StrEnum):
     and `CallAttempt.outcome` (what happened on one specific call) — the
     API layer never accepts NOT_CALLED as a loggable call outcome, it's
     only ever a default/initial state.
+
+    Trimmed to the practical set a telecaller actually needs (review
+    meeting, 2026-09-30) — replaces the previous, larger vocabulary
+    (CALL_ATTEMPTED/CONNECTED/NOT_RECEIVED/INVALID_NUMBER/
+    CALL_BACK_REQUESTED/FOLLOW_UP_REQUIRED). See migration
+    `f3a7c9e1b6d2_simplify_telecalling_status.py` for the exact
+    old-value -> new-value mapping applied to existing rows:
+    CALL_ATTEMPTED/NOT_RECEIVED -> NOT_ANSWERING, CONNECTED -> OTHER
+    (with a "(migrated from: Connected)" note), INVALID_NUMBER -> OTHER
+    (with a "(migrated from: Invalid Number)" note),
+    CALL_BACK_REQUESTED/FOLLOW_UP_REQUIRED -> CALL_BACK_LATER.
+
+    OTHER is the escape hatch for anything not covered by a specific
+    status -- the API requires a non-empty `notes` value whenever OTHER
+    is logged (see `LogCallRequest`), so the reason is always captured.
     """
 
     NOT_CALLED = "not_called"
-    CALL_ATTEMPTED = "call_attempted"
-    CONNECTED = "connected"
-    NOT_RECEIVED = "not_received"
+    NOT_ANSWERING = "not_answering"
     BUSY = "busy"
     SWITCHED_OFF = "switched_off"
-    INVALID_NUMBER = "invalid_number"
-    CALL_BACK_REQUESTED = "call_back_requested"
+    CALL_BACK_LATER = "call_back_later"
     INTERESTED = "interested"
     NOT_INTERESTED = "not_interested"
-    FOLLOW_UP_REQUIRED = "follow_up_required"
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
+    OTHER = "other"
 
 
 class LeadCategory(StrEnum):

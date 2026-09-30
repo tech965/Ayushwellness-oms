@@ -147,13 +147,13 @@ describe("telecaller call-log cache invalidation", () => {
     // After logging, the list endpoint should be hit again with fresh data.
     mockedGet.mockImplementation((url: string) => {
       if (url === "/telecaller/orders") {
-        return Promise.resolve(listPage({ call_status: "connected", attempt_count: 1 }))
+        return Promise.resolve(listPage({ call_status: "interested", attempt_count: 1 }))
       }
       throw new Error(`unexpected GET ${url}`)
     })
 
     await act(async () => {
-      await mutationResult.current.mutateAsync({ outcome: "connected", notes: "Reached customer." })
+      await mutationResult.current.mutateAsync({ outcome: "interested", notes: "Reached customer." })
     })
 
     // The core assertion: the list query's own cache entry was actually
@@ -163,7 +163,7 @@ describe("telecaller call-log cache invalidation", () => {
     // matched this list query's key, `["telecaller","orders",params]`).
     await waitFor(() => {
       const cached = queryClient.getQueryData<ListCache>(listQueryKey)
-      expect(cached?.data[0].call_status).toBe("connected")
+      expect(cached?.data[0].call_status).toBe("interested")
       expect(cached?.data[0].attempt_count).toBe(1)
     })
   })
@@ -260,18 +260,18 @@ describe("telecaller call-log cache invalidation", () => {
 
     mockedGet.mockImplementation((url: string) => {
       if (url === "/telecaller/checkouts") {
-        return Promise.resolve(checkoutPage({ call_status: "connected", attempt_count: 1 }))
+        return Promise.resolve(checkoutPage({ call_status: "interested", attempt_count: 1 }))
       }
       throw new Error(`unexpected GET ${url}`)
     })
 
     await act(async () => {
-      await mutationResult.current.mutateAsync({ outcome: "connected" })
+      await mutationResult.current.mutateAsync({ outcome: "interested" })
     })
 
     await waitFor(() => {
       const cached = queryClient.getQueryData<ListCache>(listQueryKey)
-      expect(cached?.data[0].call_status).toBe("connected")
+      expect(cached?.data[0].call_status).toBe("interested")
       expect(cached?.data[0].attempt_count).toBe(1)
     })
   })

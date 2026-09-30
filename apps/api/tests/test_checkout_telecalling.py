@@ -128,7 +128,7 @@ async def test_full_checkout_assign_call_followup_workflow(db_session: AsyncSess
 
         log_call = await tc_client.post(
             f"/api/v1/telecaller/checkouts/{checkout.id}/calls",
-            json={"outcome": "call_back_requested", "notes": "Wants a callback tomorrow."},
+            json={"outcome": "call_back_later", "notes": "Wants a callback tomorrow."},
         )
         assert log_call.status_code == 201
         assert log_call.json()["data"]["attempt_number"] == 1
@@ -138,7 +138,7 @@ async def test_full_checkout_assign_call_followup_workflow(db_session: AsyncSess
             json={"next_follow_up_at": "2099-01-01T10:00:00Z"},
         )
         assert follow_up.status_code == 200
-        assert follow_up.json()["data"]["call_status"] == "call_back_requested"
+        assert follow_up.json()["data"]["call_status"] == "call_back_later"
 
         history = await tc_client.get(f"/api/v1/telecaller/checkouts/{checkout.id}/calls")
         assert history.status_code == 200

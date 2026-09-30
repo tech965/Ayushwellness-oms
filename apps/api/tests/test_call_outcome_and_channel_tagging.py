@@ -8,19 +8,17 @@ real `POST /telecaller/orders/{id}/calls` save path
 `Order.status` for a non-CONFIRMED outcome (Requirement 4) or failing the
 OMS operation when Shopify is unavailable (Requirement 5).
 
-Terminology note on the requirement doc's example outcome names: the real,
-only `TelecallingStatus` enum (`app/models/enums.py`) has no "Hold" or
-"Not Answering" value -- those were illustrative examples, not literal
-enum members (per the requirement doc's own "these are examples, inspect
-the actual existing call-outcome enum" instruction). The closest real
-equivalents actually exercised below are `FOLLOW_UP_REQUIRED` ("Follow-up
-Required", standing in for "Hold" -- a call that needs revisiting later)
-and `NOT_RECEIVED` ("Not Received", standing in for "Not Answering" -- the
-customer didn't pick up). Every other real outcome (`CALL_ATTEMPTED`,
-`CONNECTED`, `SWITCHED_OFF`, `INVALID_NUMBER`, `CALL_BACK_REQUESTED`,
-`INTERESTED`, `NOT_INTERESTED`, `CANCELLED`, plus `BUSY`) is covered too,
-so all 12 loggable outcomes (everything except `NOT_CALLED`, which the API
-never accepts as a logged outcome) end up tagged.
+Updated 2026-09-30 for the simplified `TelecallingStatus` vocabulary (review
+meeting: "Simplify Telecaller Call Status") -- NOT_ANSWERING/BUSY/
+SWITCHED_OFF/CALL_BACK_LATER/INTERESTED/NOT_INTERESTED/CONFIRMED/CANCELLED/
+OTHER, replacing the old CALL_ATTEMPTED/CONNECTED/NOT_RECEIVED/
+INVALID_NUMBER/CALL_BACK_REQUESTED/FOLLOW_UP_REQUIRED set (see
+`app/models/enums.py::TelecallingStatus` and migration
+`f3a7c9e1b6d2_simplify_telecalling_status.py`). All 9 loggable outcomes
+(everything except `NOT_CALLED`, never a logged outcome) end up tagged;
+`OTHER` requires a non-empty `notes` value (`LogCallRequest`'s
+`_other_requires_notes` validator) and is tagged just like any other
+outcome.
 
 Numbered comments below (TEST 1..16) map 1:1 to Requirement 7's 16
 scenarios.
@@ -110,9 +108,12 @@ def _tags_remove_success(order_gid: str) -> dict:
     return {"tagsRemove": {"node": {"id": order_gid}, "userErrors": []}}
 
 
-async def _log_call(tc_client, order_id: str, outcome: str) -> None:
+async def _log_call(tc_client, order_id: str, outcome: str, *, notes: str | None = None) -> None:
+    payload: dict[str, str] = {"outcome": outcome}
+    if notes is not None:
+        payload["notes"] = notes
     response = await tc_client.post(
-        f"/api/v1/telecaller/orders/{order_id}/calls", json={"outcome": outcome}
+        f"/api/v1/telecaller/orders/{order_id}/calls", json=payload
     )
     assert response.status_code == 201
 
@@ -179,9 +180,9 @@ async def test_confirmed_outcome_sets_status_and_pushes_tags(db_session: AsyncSe
 
 
 # ---------------------------------------------------------------------
-# TEST 2: "Hold" (closest real equivalent: FOLLOW_UP_REQUIRED) -> its tag.
+# TEST 2: Call Back Later -> its tag.
 # ---------------------------------------------------------------------
-async def test_follow_up_required_outcome_gets_its_tag(db_session: AsyncSession) -> None:
+async def test_call_back_later_outcome_gets_its_tag(db_session: AsyncSession) -> None:
     leader, telecaller, _other, customer = await _setup(db_session)
     order = await _make_tagged_order(
         db_session, order_number="TAG-002", customer=customer, shopify_order_id="910002"
@@ -194,11 +195,11 @@ async def test_follow_up_required_outcome_gets_its_tag(db_session: AsyncSession)
     register_adapter(ShopifyAdapter(client=client))
     try:
         async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
-            await _log_call(tc_client, str(order.id), "follow_up_required")
+            await _log_call(tc_client, str(order.id), "call_back_later")
 
         add_tags = client.calls[0][1]["tags"]
-        assert OUTCOME_TAGS[TelecallingStatus.FOLLOW_UP_REQUIRED] in add_tags
-        assert add_tags.count(OUTCOME_TAGS[TelecallingStatus.FOLLOW_UP_REQUIRED]) == 1
+        assert OUTCOME_TAGS[TelecallingStatus.CALL_BACK_LATER] in add_tags
+        assert add_tags.count(OUTCOME_TAGS[TelecallingStatus.CALL_BACK_LATER]) == 1
     finally:
         clear_adapters()
 
@@ -228,9 +229,9 @@ async def test_busy_outcome_gets_busy_tag(db_session: AsyncSession) -> None:
 
 
 # ---------------------------------------------------------------------
-# TEST 4: "Not Answering" (closest real equivalent: NOT_RECEIVED) -> tag.
+# TEST 4: Not Answering -> its tag.
 # ---------------------------------------------------------------------
-async def test_not_received_outcome_gets_its_tag(db_session: AsyncSession) -> None:
+async def test_not_answering_outcome_gets_its_tag(db_session: AsyncSession) -> None:
     leader, telecaller, _other, customer = await _setup(db_session)
     order = await _make_tagged_order(
         db_session, order_number="TAG-004", customer=customer, shopify_order_id="910004"
@@ -243,9 +244,43 @@ async def test_not_received_outcome_gets_its_tag(db_session: AsyncSession) -> No
     register_adapter(ShopifyAdapter(client=client))
     try:
         async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
-            await _log_call(tc_client, str(order.id), "not_received")
+            await _log_call(tc_client, str(order.id), "not_answering")
 
-        assert "Not Received" in client.calls[0][1]["tags"]
+        assert "Not Answering" in client.calls[0][1]["tags"]
+    finally:
+        clear_adapters()
+
+
+# ---------------------------------------------------------------------
+# TEST 4b: Other (with its required custom reason) -> "Other" tag.
+# ---------------------------------------------------------------------
+async def test_other_outcome_requires_notes_and_gets_its_tag(db_session: AsyncSession) -> None:
+    leader, telecaller, _other, customer = await _setup(db_session)
+    order = await _make_tagged_order(
+        db_session, order_number="TAG-004B", customer=customer, shopify_order_id="910004"
+    )
+    async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
+        await _assign(leader_client, str(order.id), str(telecaller.id))
+
+    async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+        rejected = await tc_client.post(
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "other"}
+        )
+        assert rejected.status_code == 422
+
+    gid = "gid://shopify/Order/910004"
+    client = _StubShopifyClient([_tags_add_success(gid), _tags_remove_success(gid)])
+    register_adapter(ShopifyAdapter(client=client))
+    try:
+        async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
+            await _log_call(
+                tc_client,
+                str(order.id),
+                "other",
+                notes="Customer asked to call tomorrow evening.",
+            )
+
+        assert "Other" in client.calls[0][1]["tags"]
     finally:
         clear_adapters()
 
@@ -256,11 +291,7 @@ async def test_not_received_outcome_gets_its_tag(db_session: AsyncSession) -> No
 @pytest.mark.parametrize(
     "outcome_value,expected_tag",
     [
-        ("call_attempted", "Call Attempted"),
-        ("connected", "Connected"),
         ("switched_off", "Switched Off"),
-        ("invalid_number", "Invalid Number"),
-        ("call_back_requested", "Call Back Requested"),
         ("interested", "Interested"),
         ("not_interested", "Not Interested"),
         ("cancelled", "Cancelled"),

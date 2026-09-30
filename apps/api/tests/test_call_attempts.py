@@ -60,7 +60,7 @@ async def test_sequential_attempts_and_history(db_session: AsyncSession) -> None
     async with bearer_client(app, get_db, db_session, telecaller.id) as client:
         first = await client.post(
             f"/api/v1/telecaller/orders/{order.id}/calls",
-            json={"outcome": "not_received", "notes": "No answer."},
+            json={"outcome": "not_answering", "notes": "No answer."},
         )
         assert first.status_code == 201
         assert first.json()["data"]["attempt_number"] == 1
@@ -68,7 +68,7 @@ async def test_sequential_attempts_and_history(db_session: AsyncSession) -> None
         second = await client.post(
             f"/api/v1/telecaller/orders/{order.id}/calls",
             json={
-                "outcome": "connected",
+                "outcome": "interested",
                 "notes": "Customer requested callback tomorrow.",
                 "next_follow_up_at": "2026-08-28T10:00:00Z",
             },
@@ -82,14 +82,14 @@ async def test_sequential_attempts_and_history(db_session: AsyncSession) -> None
         # Append-only, both attempts still present — most recent first.
         assert len(history) == 2
         assert history[0]["attempt_number"] == 2
-        assert history[0]["outcome"] == "connected"
+        assert history[0]["outcome"] == "interested"
         assert history[1]["attempt_number"] == 1
-        assert history[1]["outcome"] == "not_received"
+        assert history[1]["outcome"] == "not_answering"
         assert history[1]["notes"] == "No answer."
 
         order_detail = await client.get(f"/api/v1/telecaller/orders/{order.id}")
         detail = order_detail.json()["data"]
-        assert detail["call_status"] == "connected"
+        assert detail["call_status"] == "interested"
         assert detail["attempt_count"] == 2
         assert detail["next_follow_up_at"] is not None
 
@@ -122,7 +122,7 @@ async def test_call_log_data_survives_reload_and_a_later_call_without_a_follow_u
         first = await client.post(
             f"/api/v1/telecaller/orders/{order.id}/calls",
             json={
-                "outcome": "call_back_requested",
+                "outcome": "call_back_later",
                 "notes": "Asked to call back tomorrow morning.",
                 "next_follow_up_at": "2099-01-01T10:00:00Z",
             },
@@ -133,7 +133,7 @@ async def test_call_log_data_survives_reload_and_a_later_call_without_a_follow_u
         # or a page refresh) must show exactly what was just saved.
         reload_after_first = await client.get(f"/api/v1/telecaller/orders/{order.id}")
         detail = reload_after_first.json()["data"]
-        assert detail["call_status"] == "call_back_requested"
+        assert detail["call_status"] == "call_back_later"
         assert detail["attempt_count"] == 1
         assert detail["next_follow_up_at"] == "2099-01-01T10:00:00Z"
 

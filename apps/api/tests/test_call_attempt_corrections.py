@@ -105,7 +105,7 @@ async def test_delete_removes_attempt_from_history_and_recomputes_status(
 
     async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
         first = await tc_client.post(
-            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "connected"}
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "interested"}
         )
         second = await tc_client.post(
             f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "confirmed"}
@@ -122,7 +122,7 @@ async def test_delete_removes_attempt_from_history_and_recomputes_status(
 
         order_view = await tc_client.get(f"/api/v1/telecaller/orders/{order.id}")
         # Falls back to attempt #1's outcome, not stuck on the deleted one.
-        assert order_view.json()["data"]["call_status"] == "connected"
+        assert order_view.json()["data"]["call_status"] == "interested"
         assert order_view.json()["data"]["attempt_count"] == 1
 
 
@@ -155,7 +155,7 @@ async def test_edit_and_delete_reject_another_telecallers_attempt(db_session: As
 
     async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
         logged = await tc_client.post(
-            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "connected"}
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "interested"}
         )
         attempt_id = logged.json()["data"]["id"]
 
@@ -198,7 +198,7 @@ async def test_editing_an_already_deleted_attempt_returns_404_not_500(
 
     async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
         logged = await tc_client.post(
-            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "connected"}
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "interested"}
         )
         attempt_id = logged.json()["data"]["id"]
         first_delete = await tc_client.delete(
@@ -225,7 +225,7 @@ async def test_edit_invalid_outcome_returns_422_not_500(db_session: AsyncSession
 
     async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
         logged = await tc_client.post(
-            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "connected"}
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "interested"}
         )
         attempt_id = logged.json()["data"]["id"]
 
@@ -271,7 +271,7 @@ async def test_average_call_attempts_excludes_orders_never_called(
 
     async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
         await tc_client.post(
-            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "not_received"}
+            f"/api/v1/telecaller/orders/{order.id}/calls", json={"outcome": "not_answering"}
         )
 
     async with bearer_client(app, get_db, db_session, leader.id) as leader_client:
@@ -297,7 +297,7 @@ async def test_average_call_attempts_real_calculation_across_multiple_orders(
         await _assign(leader_client, str(order_b.id), str(telecaller.id))
 
     async with bearer_client(app, get_db, db_session, telecaller.id) as tc_client:
-        for outcome in ("not_received", "not_received", "connected"):
+        for outcome in ("not_answering", "not_answering", "interested"):
             response = await tc_client.post(
                 f"/api/v1/telecaller/orders/{order_a.id}/calls", json={"outcome": outcome}
             )

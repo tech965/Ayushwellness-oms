@@ -160,16 +160,12 @@ async def test_log_call_confirmed_order_enters_the_shipment_queue(
 @pytest.mark.parametrize(
     "outcome",
     [
-        "call_attempted",
-        "connected",
-        "not_received",
+        "not_answering",
         "busy",
         "switched_off",
-        "invalid_number",
-        "call_back_requested",
+        "call_back_later",
         "interested",
         "not_interested",
-        "follow_up_required",
         "cancelled",
     ],
 )

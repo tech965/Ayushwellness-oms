@@ -57,17 +57,21 @@ import {
   useConfirmOrder,
   useDeleteCallAttempt,
   useEditCallAttempt,
+  useItemVariants,
   useLogCall,
   useMyOrder,
+  useOrderActivity,
   usePreviousOrders,
   useScheduleFollowUp,
   useUnconfirmOrder,
+  useUpdateItemVariant,
   useUpdateOrderAddress,
   type UpdateOrderAddressInput,
 } from "@/services/telecaller"
 import {
   CALL_OUTCOME_OPTIONS,
   type AssignedOrderAddress,
+  type AssignedOrderItem,
   type CallAttempt,
   type TelecallingStatus,
 } from "@/types/telecalling"
@@ -108,9 +112,34 @@ export default function TelecallerOrderDetailPage() {
   const confirmOrder = useConfirmOrder(orderId)
   const unconfirmOrder = useUnconfirmOrder(orderId)
   const updateAddress = useUpdateOrderAddress(orderId)
+  const activityQuery = useOrderActivity(orderId)
+  const updateItemVariant = useUpdateItemVariant(orderId)
 
   const [confirmOrderOpen, setConfirmOrderOpen] = React.useState(false)
   const [unconfirmOrderOpen, setUnconfirmOrderOpen] = React.useState(false)
+
+  const [flavourItem, setFlavourItem] = React.useState<AssignedOrderItem | null>(null)
+  const [selectedVariantId, setSelectedVariantId] = React.useState<string>("")
+  const variantsQuery = useItemVariants(orderId, flavourItem?.id ?? null)
+
+  function openFlavourDialog(item: AssignedOrderItem) {
+    setFlavourItem(item)
+    setSelectedVariantId("")
+  }
+
+  function handleSaveFlavour() {
+    if (!flavourItem || !selectedVariantId) return
+    updateItemVariant.mutate(
+      { itemId: flavourItem.id, productVariantId: selectedVariantId },
+      {
+        onSuccess: () => {
+          toast.success("Flavour updated.")
+          setFlavourItem(null)
+        },
+        onError: (error) => toast.error(getApiErrorMessage(error)),
+      }
+    )
+  }
 
   const [addressDialogOpen, setAddressDialogOpen] = React.useState(false)
   const [addressForm, setAddressForm] = React.useState<UpdateOrderAddressInput>({
@@ -184,13 +213,13 @@ export default function TelecallerOrderDetailPage() {
 
   const [logCallOpen, setLogCallOpen] = React.useState(false)
   const [followUpOpen, setFollowUpOpen] = React.useState(false)
-  const [outcome, setOutcome] = React.useState<TelecallingStatus>("connected")
+  const [outcome, setOutcome] = React.useState<TelecallingStatus>("not_answering")
   const [notes, setNotes] = React.useState("")
   const [nextFollowUp, setNextFollowUp] = React.useState("")
   const [followUpOnly, setFollowUpOnly] = React.useState("")
 
   const [editTarget, setEditTarget] = React.useState<CallAttempt | null>(null)
-  const [editOutcome, setEditOutcome] = React.useState<TelecallingStatus>("connected")
+  const [editOutcome, setEditOutcome] = React.useState<TelecallingStatus>("not_answering")
   const [editNotes, setEditNotes] = React.useState("")
   const [editFollowUp, setEditFollowUp] = React.useState("")
   const [deleteTarget, setDeleteTarget] = React.useState<CallAttempt | null>(null)
@@ -206,7 +235,8 @@ export default function TelecallerOrderDetailPage() {
     editTarget !== null ||
     deleteTarget !== null ||
     confirmOrderOpen ||
-    unconfirmOrderOpen
+    unconfirmOrderOpen ||
+    flavourItem !== null
   const { goToNext, goToPrevious } = useOrderNavigation(orderId)
   useOrderNavigationHotkeys(goToNext, goToPrevious, anyDialogOpen)
 
@@ -554,6 +584,15 @@ export default function TelecallerOrderDetailPage() {
                             {formatMoney(item.total_amount)}
                           </p>
                         </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 shrink-0 px-1.5 text-xs"
+                          onClick={() => openFlavourDialog(item)}
+                        >
+                          <Pencil className="size-3" />
+                          Change Flavour
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -688,9 +727,99 @@ export default function TelecallerOrderDetailPage() {
                 </QueryStates>
               </CardContent>
             </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Activity History</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <QueryStates
+                  isLoading={activityQuery.isLoading}
+                  isError={activityQuery.isError}
+                  error={activityQuery.error}
+                  data={activityQuery.data}
+                  onRetry={() => void activityQuery.refetch()}
+                  isEmpty={(rows) => rows.length === 0}
+                  emptyTitle="No activity yet"
+                  emptyDescription="Address/flavour changes and other order activity will appear here."
+                >
+                  {(rows) => (
+                    <ol className="flex flex-col gap-3">
+                      {rows.map((event) => (
+                        <li
+                          key={event.id}
+                          className="border-border border-b pb-3 last:border-0 last:pb-0"
+                        >
+                          <p className="text-sm font-medium">
+                            {event.description ?? event.event_type}
+                          </p>
+                          <p className="text-muted-foreground mt-0.5 text-xs">
+                            {formatDateTime(event.created_at)}
+                          </p>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </QueryStates>
+              </CardContent>
+            </Card>
           </div>
         )}
       </QueryStates>
+
+      <Dialog
+        open={flavourItem !== null}
+        onOpenChange={(open) => !open && setFlavourItem(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change Flavour</DialogTitle>
+            <DialogDescription>
+              {flavourItem
+                ? `Current: ${flavourItem.variant_title ?? flavourItem.sku}`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <QueryStates
+              isLoading={variantsQuery.isLoading}
+              isError={variantsQuery.isError}
+              error={variantsQuery.error}
+              data={variantsQuery.data}
+              onRetry={() => void variantsQuery.refetch()}
+              isEmpty={(rows) => rows.length === 0}
+              emptyTitle="No other flavours available"
+              emptyDescription="This product has no other variants to switch to."
+            >
+              {(variants) => (
+                <Select value={selectedVariantId} onValueChange={setSelectedVariantId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a flavour" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {variants.map((variant) => (
+                      <SelectItem key={variant.id} value={variant.id}>
+                        {variant.title ?? variant.sku}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </QueryStates>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setFlavourItem(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveFlavour}
+              disabled={updateItemVariant.isPending || !selectedVariantId}
+            >
+              {updateItemVariant.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={logCallOpen} onOpenChange={setLogCallOpen}>
         <DialogContent>
@@ -717,7 +846,11 @@ export default function TelecallerOrderDetailPage() {
               </SelectContent>
             </Select>
             <Textarea
-              placeholder="Notes (optional)"
+              placeholder={
+                outcome === "other"
+                  ? "Describe the reason (required for Other)"
+                  : "Notes (optional)"
+              }
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
             />
@@ -736,7 +869,10 @@ export default function TelecallerOrderDetailPage() {
             <Button variant="outline" onClick={() => setLogCallOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleLogCall} disabled={logCall.isPending}>
+            <Button
+              onClick={handleLogCall}
+              disabled={logCall.isPending || (outcome === "other" && !notes.trim())}
+            >
               {logCall.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>
@@ -897,7 +1033,11 @@ export default function TelecallerOrderDetailPage() {
               </SelectContent>
             </Select>
             <Textarea
-              placeholder="Notes (optional)"
+              placeholder={
+                editOutcome === "other"
+                  ? "Describe the reason (required for Other)"
+                  : "Notes (optional)"
+              }
               value={editNotes}
               onChange={(e) => setEditNotes(e.target.value)}
             />
@@ -916,7 +1056,10 @@ export default function TelecallerOrderDetailPage() {
             <Button variant="outline" onClick={() => setEditTarget(null)}>
               Cancel
             </Button>
-            <Button onClick={handleEditSave} disabled={editCallAttempt.isPending}>
+            <Button
+              onClick={handleEditSave}
+              disabled={editCallAttempt.isPending || (editOutcome === "other" && !editNotes.trim())}
+            >
               {editCallAttempt.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>
