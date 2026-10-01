@@ -13,6 +13,18 @@ export type TelecallingStatus =
   | "confirmed"
   | "cancelled"
   | "other"
+  // LEGACY (pre-2026-09-30 vocabulary) -- production incident 2026-10-01:
+  // existing call history/order rows can still carry these (the backend's
+  // simplification migration was never applied to production -- see
+  // apps/api/app/models/enums.py::TelecallingStatus's docstring). Kept
+  // here only so existing data renders correctly; deliberately excluded
+  // from CALL_OUTCOME_OPTIONS below -- never offered for a new call log.
+  | "call_attempted"
+  | "connected"
+  | "not_received"
+  | "invalid_number"
+  | "call_back_requested"
+  | "follow_up_required"
 
 export const CALL_OUTCOME_OPTIONS: { label: string; value: TelecallingStatus }[] = [
   { label: "Not Answering", value: "not_answering" },

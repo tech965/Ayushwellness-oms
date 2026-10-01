@@ -280,16 +280,38 @@ class TelecallingStatus(StrEnum):
     API layer never accepts NOT_CALLED as a loggable call outcome, it's
     only ever a default/initial state.
 
-    Trimmed to the practical set a telecaller actually needs (review
-    meeting, 2026-09-30) — replaces the previous, larger vocabulary
-    (CALL_ATTEMPTED/CONNECTED/NOT_RECEIVED/INVALID_NUMBER/
-    CALL_BACK_REQUESTED/FOLLOW_UP_REQUIRED). See migration
-    `f3a7c9e1b6d2_simplify_telecalling_status.py` for the exact
-    old-value -> new-value mapping applied to existing rows:
-    CALL_ATTEMPTED/NOT_RECEIVED -> NOT_ANSWERING, CONNECTED -> OTHER
-    (with a "(migrated from: Connected)" note), INVALID_NUMBER -> OTHER
-    (with a "(migrated from: Invalid Number)" note),
-    CALL_BACK_REQUESTED/FOLLOW_UP_REQUIRED -> CALL_BACK_LATER.
+    Trimmed to the practical set a telecaller actually needs for NEW call
+    logs (review meeting, 2026-09-30) — NOT_ANSWERING/BUSY/SWITCHED_OFF/
+    CALL_BACK_LATER/INTERESTED/NOT_INTERESTED/CONFIRMED/CANCELLED/OTHER.
+
+    PRODUCTION INCIDENT (2026-10-01): the simplification migration
+    (`f3a7c9e1b6d2_simplify_telecalling_status.py`) was written to also
+    retire CALL_ATTEMPTED/CONNECTED/NOT_RECEIVED/INVALID_NUMBER/
+    CALL_BACK_REQUESTED/FOLLOW_UP_REQUIRED, remapping existing rows to
+    the new vocabulary. That migration was never actually applied to
+    production (code deployed ahead of the DB migration) -- production's
+    `telecalling_status` Postgres enum type and its existing
+    `order_assignments.current_status`/`call_attempts.outcome` rows still
+    use the full original 13-value vocabulary. Dropping those 6 values
+    from this Python enum made `GET /telecaller/orders` 500 (`LookupError:
+    'not_received' is not among the defined enum values`) the moment
+    SQLAlchemy tried to deserialize any pre-existing row still carrying
+    one of them.
+
+    Fix: keep deserializing ALL of them (below) -- real, unmigrated
+    production data must never 500 just because it's old. They're marked
+    LEGACY and deliberately excluded from `CALL_OUTCOME_OPTIONS`/`OUTCOME_
+    TAGS`/the Log Call UI and rejected by `LogCallRequest._reject_legacy_
+    outcomes` -- readable (existing rows, call history, dashboards), never
+    writable (a telecaller can't newly log one). `formatStatusLabel`
+    title-cases them automatically ("not_received" -> "Not Received"), so
+    no separate label map entry was needed for correct display.
+
+    If `f3a7c9e1b6d2` is ever actually run against production (migrating
+    every remaining legacy row to its new-vocabulary equivalent), the
+    LEGACY block below should be deleted in the same change -- until then,
+    both this enum and that migration must be read together, not assumed
+    independently accurate.
 
     OTHER is the escape hatch for anything not covered by a specific
     status -- the API requires a non-empty `notes` value whenever OTHER
@@ -306,6 +328,28 @@ class TelecallingStatus(StrEnum):
     CONFIRMED = "confirmed"
     CANCELLED = "cancelled"
     OTHER = "other"
+
+    # --- LEGACY (pre-2026-09-30 vocabulary) -- read-only, see above ----
+    CALL_ATTEMPTED = "call_attempted"
+    CONNECTED = "connected"
+    NOT_RECEIVED = "not_received"
+    INVALID_NUMBER = "invalid_number"
+    CALL_BACK_REQUESTED = "call_back_requested"
+    FOLLOW_UP_REQUIRED = "follow_up_required"
+
+
+# Legacy values a telecaller can never newly log (read-only, existing
+# production data only) -- see `TelecallingStatus`'s docstring.
+LEGACY_TELECALLING_STATUSES = frozenset(
+    {
+        TelecallingStatus.CALL_ATTEMPTED,
+        TelecallingStatus.CONNECTED,
+        TelecallingStatus.NOT_RECEIVED,
+        TelecallingStatus.INVALID_NUMBER,
+        TelecallingStatus.CALL_BACK_REQUESTED,
+        TelecallingStatus.FOLLOW_UP_REQUIRED,
+    }
+)
 
 
 class LeadCategory(StrEnum):

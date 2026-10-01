@@ -48,12 +48,22 @@ logger = get_logger(__name__)
 # both `_performance_from_counts` and `_summary_from_counts` below, and the
 # daily-performance bucket loop, so the "Connected" figure on the Team
 # Leader dashboards keeps meaning the same real-world thing it always did.
+#
+# Includes the matching LEGACY "didn't reach the customer" values too
+# (NOT_RECEIVED/CALL_ATTEMPTED/INVALID_NUMBER -- see `TelecallingStatus`'s
+# docstring for why real production rows can still carry these) so a
+# telecaller's historical performance numbers stay accurate; the legacy
+# CONNECTED/CALL_BACK_REQUESTED/FOLLOW_UP_REQUIRED values clearly DID
+# involve reaching the customer and are deliberately left out of this set.
 _NOT_CONNECTED_OUTCOMES = frozenset(
     {
         TelecallingStatus.NOT_CALLED,
         TelecallingStatus.NOT_ANSWERING,
         TelecallingStatus.BUSY,
         TelecallingStatus.SWITCHED_OFF,
+        TelecallingStatus.NOT_RECEIVED,
+        TelecallingStatus.CALL_ATTEMPTED,
+        TelecallingStatus.INVALID_NUMBER,
     }
 )
 

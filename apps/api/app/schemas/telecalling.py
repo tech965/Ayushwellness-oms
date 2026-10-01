@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import (
+    LEGACY_TELECALLING_STATUSES,
     AddressValidationStatus,
     FulfillmentStatus,
     LeadCategory,
@@ -111,6 +112,20 @@ class LogCallRequest(BaseModel):
     def _reject_not_called(self) -> LogCallRequest:
         if self.outcome == TelecallingStatus.NOT_CALLED:
             raise ValueError("NOT_CALLED is not a loggable call outcome.")
+        return self
+
+    @model_validator(mode="after")
+    def _reject_legacy_outcomes(self) -> LogCallRequest:
+        """The pre-2026-09-30 outcome vocabulary (CALL_ATTEMPTED/CONNECTED/
+        NOT_RECEIVED/INVALID_NUMBER/CALL_BACK_REQUESTED/FOLLOW_UP_REQUIRED)
+        is still a valid `TelecallingStatus` value -- existing production
+        rows use it and must keep deserializing without crashing (see that
+        enum's docstring) -- but it's never a choice for a NEW call log.
+        """
+        if self.outcome in LEGACY_TELECALLING_STATUSES:
+            raise ValueError(
+                f"'{self.outcome.value}' is a legacy outcome and can no longer be logged."
+            )
         return self
 
     @model_validator(mode="after")

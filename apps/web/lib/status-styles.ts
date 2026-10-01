@@ -208,6 +208,14 @@ const TELECALLING_STATUS_TONES: Record<string, StatusTone> = {
   confirmed: "success",
   cancelled: "danger",
   other: "neutral",
+  // LEGACY -- existing data only, never a new-call choice (see
+  // TelecallingStatus's comment in types/telecalling.ts).
+  call_attempted: "info",
+  connected: "info",
+  not_received: "warning",
+  invalid_number: "warning",
+  call_back_requested: "warning",
+  follow_up_required: "warning",
 }
 
 // `app.models.enums.LeadPriority` — computed, never stored (see
