@@ -30,6 +30,14 @@ class ValidationError(OMSError):
     error_code = "validation_error"
 
 
+class LiveModeUnavailableError(OMSError):
+    """A view that depends on locally stored provider data is refused while
+    live-data mode is on (instead of showing stale numbers)."""
+
+    status_code = 422
+    error_code = "live_mode_unavailable"
+
+
 class ConflictError(OMSError):
     status_code = 409
     error_code = "conflict"

@@ -14,7 +14,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError
+from app.core.config import settings
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.timezone import ist_day_bounds
 from app.models.auth import User
 from app.models.enums import ShipmentStatus
@@ -25,6 +26,8 @@ from app.repositories.order import OrderRepository
 from app.repositories.shipment import ShipmentEventRepository, ShipmentRepository
 from app.schemas.common import PageParams, SortParams
 from app.services.audit_service import AuditService
+from app.services.live_shiprocket import LiveShiprocketService, live_ref_for
+from app.services.order_ref import resolve_ref
 
 DEFAULT_ANALYTICS_WINDOW_DAYS = 30
 
@@ -51,6 +54,28 @@ class ShipmentService:
         date_to: datetime | None = None,
         telecaller_ids: list[uuid.UUID] | None = None,
     ) -> tuple[list[Shipment], int]:
+        if settings.SHOPIFY_LIVE_MODE:
+            if courier_id is not None or telecaller_ids is not None:
+                raise ValidationError(
+                    "Courier and staff-scope filters are not available while "
+                    "live-data mode (Shiprocket does not expose them per shipment)."
+                )
+            order_ref = None
+            if order_id is not None:
+                ref = await resolve_ref(self.session, order_id)
+                order_ref = ref.ref_id if ref is not None else order_id
+            live_items, live_total, _estimate = await LiveShiprocketService(
+                self.session
+            ).list_shipments(
+                page=page_params.page,
+                page_size=page_params.page_size,
+                order_ref_id=order_ref,
+                status=status,
+                q=q,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            return live_items, live_total
         query = self.shipments.search_query(
             q=q,
             status=status,
@@ -79,6 +104,22 @@ class ShipmentService:
         date_to: datetime | None = None,
         scope_telecaller_ids: list[uuid.UUID] | None = None,
     ) -> tuple[list[tuple[Order, Shipment | None]], int]:
+        if settings.SHOPIFY_LIVE_MODE:
+            if courier_id is not None or shipment_status is not None:
+                raise ValidationError(
+                    "Courier and shipment-status filters are not available on the shipment "
+                    "queue in live-data mode (queued orders have no shipment yet)."
+                )
+            return await LiveShiprocketService(self.session).queue(
+                page_params=page_params,
+                q=q,
+                payment_type=payment_type,
+                telecaller_id=telecaller_id,
+                sku=sku,
+                date_from=date_from,
+                date_to=date_to,
+                scope_telecaller_ids=scope_telecaller_ids,
+            )
         """Confirmed orders awaiting shipment processing — a distinct,
         narrower view from `list_shipments` above (which is every
         already-processed shipment); see
@@ -202,12 +243,16 @@ class ShipmentService:
         }
 
     async def get_shipment(self, shipment_id: uuid.UUID) -> Shipment:
+        if settings.SHOPIFY_LIVE_MODE and await live_ref_for(self.session, shipment_id):
+            return await LiveShiprocketService(self.session).get_shipment(shipment_id)
         shipment = await self.shipments.get_by_id(shipment_id)
         if shipment is None:
             raise NotFoundError("Shipment not found.")
         return shipment
 
     async def get_timeline(self, shipment_id: uuid.UUID) -> list[ShipmentEvent]:
+        if settings.SHOPIFY_LIVE_MODE and await live_ref_for(self.session, shipment_id):
+            return await LiveShiprocketService(self.session).timeline(shipment_id)
         await self.get_shipment(shipment_id)
         return await self.shipment_events.list_for_shipment(shipment_id)
 

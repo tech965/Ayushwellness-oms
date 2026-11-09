@@ -108,6 +108,49 @@ def _case_sql(column: str, mapping: dict[str, str]) -> str:
     return f"(CASE {column}::text {whens} ELSE {column}::text END)"
 
 
+def _default_literal(bind, table: str, column: str) -> str | None:
+    """The column's current server default as a bare enum label (e.g.
+    `not_called`), or None when it has no default.
+
+    A column default of the OLD enum type cannot be cast automatically by
+    `ALTER COLUMN ... TYPE` ("default for column ... cannot be cast
+    automatically"), which made this migration fail on any database whose
+    `current_status` columns carry a server default -- i.e. every database
+    built from the earlier migrations, including a brand-new one. The
+    default is therefore dropped before the type change and re-applied
+    (remapped) afterwards. Databases that already ran the old version of
+    this migration are unaffected: the revision id is unchanged and it is
+    never re-executed for them.
+    """
+    row = bind.exec_driver_sql(
+        "SELECT column_default FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+        (table, column),
+    ).first()
+    if row is None or row[0] is None:
+        return None
+    text = str(row[0])
+    start = text.find("'")
+    end = text.find("'", start + 1)
+    return text[start + 1 : end] if start != -1 and end > start else None
+
+
+def _retype_column(bind, table: str, column: str, new_type: str, mapping: dict[str, str]) -> None:
+    default = _default_literal(bind, table, column)
+    if default is not None:
+        op.execute(f"ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT")
+    op.execute(
+        f"""
+        ALTER TABLE {table}
+        ALTER COLUMN {column} TYPE {new_type}
+        USING {_case_sql(column, mapping)}::{new_type}
+        """
+    )
+    if default is not None:
+        mapped = mapping.get(default, default)
+        op.execute(f"ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT '{mapped}'")
+
+
 def upgrade() -> None:
     bind = op.get_bind()
 
@@ -140,13 +183,7 @@ def upgrade() -> None:
     # 3) Move every column to the new type, remapping removed values in
     #    the same USING cast that changes the column's type.
     for table, column in _COLUMNS:
-        op.execute(
-            f"""
-            ALTER TABLE {table}
-            ALTER COLUMN {column} TYPE telecalling_status_new
-            USING {_case_sql(column, _UPGRADE_VALUE_MAP)}::telecalling_status_new
-            """
-        )
+        _retype_column(bind, table, column, "telecalling_status_new", _UPGRADE_VALUE_MAP)
 
     # 4) Drop the old type and rename the new one into its place, so the
     #    type name (and therefore every model's `sa_enum(..., "telecalling_
@@ -162,13 +199,7 @@ def downgrade() -> None:
     old_type.create(bind, checkfirst=True)
 
     for table, column in _COLUMNS:
-        op.execute(
-            f"""
-            ALTER TABLE {table}
-            ALTER COLUMN {column} TYPE telecalling_status_old
-            USING {_case_sql(column, _DOWNGRADE_VALUE_MAP)}::telecalling_status_old
-            """
-        )
+        _retype_column(bind, table, column, "telecalling_status_old", _DOWNGRADE_VALUE_MAP)
 
     postgresql.ENUM(name="telecalling_status").drop(bind, checkfirst=True)
     op.execute("ALTER TYPE telecalling_status_old RENAME TO telecalling_status")

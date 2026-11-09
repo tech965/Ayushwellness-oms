@@ -32,6 +32,8 @@ import { useUrlFilters } from "@/lib/use-url-filters"
 import { useRtos, useUpdateRto } from "@/services/rto"
 import { RTO_STATUS_OPTIONS, type RTO, type RTOStatus } from "@/types/rto"
 import { PAYMENT_TYPE_OPTIONS, type PaymentType } from "@/types/order"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
+import { LiveUnavailable } from "@/components/shared/live-unavailable"
 
 const FILTER_DEFAULTS = {
   q: "",
@@ -94,7 +96,7 @@ function RtoSkeleton() {
   )
 }
 
-export default function RtoPage() {
+function StoredDataRtoPage() {
   return (
     <React.Suspense fallback={<RtoSkeleton />}>
       <RtoPageContent />
@@ -322,5 +324,16 @@ function RtoPageContent() {
         )}
       </div>
     </>
+  )
+}
+
+/** While provider data is read live, this page shows its live replacement
+ * (or an explanation); otherwise the stored-data screen is unchanged.
+ */
+export default function Page() {
+  return (
+    <LiveModeGate live={<LiveUnavailable title="RTO" operation="shiprocket_aggregates" fallbackReason="A standalone RTO list has no Shiprocket API in this integration. RTO status is shown on each shipment." />}>
+      <StoredDataRtoPage />
+    </LiveModeGate>
   )
 }

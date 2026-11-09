@@ -44,6 +44,7 @@ import { useLocalStorageState } from "@/lib/use-local-storage-state"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useCouriers } from "@/services/couriers"
 import { useExportOrders, useOrders } from "@/services/orders"
+import { LiveResultNotice } from "@/components/shared/live-result-notice"
 import {
   FULFILLMENT_STATUS_OPTIONS,
   ORDER_STATUS_OPTIONS,
@@ -572,7 +573,9 @@ function OrdersPageContent() {
         title="Orders"
         description={
           query.data
-            ? `${query.data.meta.total_items} orders match the current filters.`
+            ? query.data.meta.total_is_estimate
+              ? `About ${query.data.meta.total_items} orders match the current filters.`
+              : `${query.data.meta.total_items} orders match the current filters.`
             : "Search, filter, and drill into any order."
         }
         backHref="/dashboard"
@@ -785,6 +788,8 @@ function OrdersPageContent() {
             </Button>
           </div>
         )}
+
+        <LiveResultNotice meta={query.data?.meta} />
 
         {/* `useOrders` keeps the PREVIOUS filter's rows on screen
          * (`placeholderData`) while a new filtered request is in flight, so

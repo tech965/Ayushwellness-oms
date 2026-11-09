@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import StreamingResponse
 
 from app.db.session import get_db
 from app.dependencies.auth import require_permission
@@ -44,11 +45,27 @@ from app.schemas.telecalling import (
     TelecallerPerformanceResponse,
     TelecallingSummaryResponse,
 )
+from app.services.export_service import add_incomplete_note
 from app.services.lead_classification import classify_order, classify_priority
+from app.services.live_checkouts import checkouts_to_xlsx
 from app.services.shopify_fulfillment_service import resolve_order_channel_label
 from app.services.telecalling_service import ScopeFilter, TelecallingService, resolve_team_scope
 
 router = APIRouter()
+
+
+POOL_INCOMPLETE_WARNING = (
+    "Only the most recent Shopify records were scanned; this list may be incomplete. "
+    "Narrow the date range to see everything."
+)
+
+
+def _pool_meta(service: TelecallingService, *, total: int, page_params: PageParams):
+    meta = build_pagination_meta(total_items=total, page_params=page_params)
+    if service.last_pool_incomplete:
+        meta.total_is_estimate = True
+        meta.warnings = [POOL_INCOMPLETE_WARNING]
+    return meta
 
 
 def _to_assigned_order_item_response(item: OrderItem) -> AssignedOrderItemResponse:
@@ -238,7 +255,7 @@ async def list_unfulfilled_team_orders(
         ]
 
     return PaginatedResponse(
-        data=data, meta=build_pagination_meta(total_items=total, page_params=page_params)
+        data=data, meta=_pool_meta(service, total=total, page_params=page_params)
     )
 
 
@@ -258,7 +275,8 @@ async def list_lead_pool(
     optionally narrowed to one `category`. Leaves `/orders/unfulfilled`
     above completely untouched.
     """
-    pairs, total = await TelecallingService(session).list_lead_pool(
+    service = TelecallingService(session)
+    pairs, total = await service.list_lead_pool(
         scope=resolve_team_scope(current_user),
         category=category,
         page_params=page_params,
@@ -275,7 +293,7 @@ async def list_lead_pool(
             )
             for order, assignment in pairs
         ],
-        meta=build_pagination_meta(total_items=total, page_params=page_params),
+        meta=_pool_meta(service, total=total, page_params=page_params),
     )
 
 
@@ -367,7 +385,8 @@ async def list_team_checkouts(
     unassigned-or-own-team browsing surface as `/orders/unfulfilled`, for
     contactable open checkouts (see
     `CheckoutAssignmentRepository.list_pool`'s docstring)."""
-    pairs, total = await TelecallingService(session).list_checkout_pool(
+    service = TelecallingService(session)
+    pairs, total = await service.list_checkout_pool(
         scope=resolve_team_scope(current_user),
         page_params=page_params,
         call_status=call_status,
@@ -383,7 +402,39 @@ async def list_team_checkouts(
             )
             for checkout, assignment in pairs
         ],
-        meta=build_pagination_meta(total_items=total, page_params=page_params),
+        meta=_pool_meta(service, total=total, page_params=page_params),
+    )
+
+
+@router.get("/checkouts/export")
+async def export_team_checkouts(
+    call_status: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("telecalling.manage")),
+) -> StreamingResponse:
+    """Excel export of the caller's abandoned-checkout pool. A truncated
+    live crawl is flagged with a visible sheet and an `X-Export-Incomplete`
+    header, never presented as complete."""
+    rows, incomplete = await TelecallingService(session).export_checkout_rows(
+        scope=resolve_team_scope(current_user),
+        call_status=call_status,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    workbook = checkouts_to_xlsx(rows)
+    headers = {"Content-Disposition": "attachment; filename=abandoned-checkouts.xlsx"}
+    if incomplete:
+        workbook = add_incomplete_note(
+            workbook,
+            ["Stopped before reading every Shopify page; narrow the date range."],
+        )
+        headers["X-Export-Incomplete"] = "true"
+    return StreamingResponse(
+        iter([workbook]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
     )
 
 

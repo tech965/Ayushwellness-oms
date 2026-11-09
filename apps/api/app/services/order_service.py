@@ -35,6 +35,8 @@ from app.schemas.order import OrderItemCreateRequest
 from app.services.address_validation_service import AddressValidationService
 from app.services.audit_service import AuditService
 from app.services.export_service import ExportService
+from app.services.live_orders import is_live_transient
+from app.services.order_ref import ensure_workflow
 
 ORDER_STATUS_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.PENDING: {OrderStatus.CONFIRMED, OrderStatus.CANCELLED},
@@ -73,8 +75,7 @@ _SHIPMENT_PROGRESS_BLOCK_MESSAGES: dict[ShipmentStatus, str] = {
         "Cannot revert this order because the shipment has already been delivered."
     ),
     ShipmentStatus.NDR: (
-        "Cannot revert this order because the shipment has an active delivery "
-        "exception (NDR)."
+        "Cannot revert this order because the shipment has an active delivery exception (NDR)."
     ),
     ShipmentStatus.RTO_INITIATED: (
         "Cannot revert this order because the shipment is already in an RTO (return) flow."
@@ -162,8 +163,8 @@ class OrderService:
         return order
 
     async def get_timeline(self, order_id: uuid.UUID) -> list[OrderEvent]:
-        await self.get_order(order_id)
-        return await self.order_events.list_for_order(order_id)
+        order = await self.get_order(order_id)
+        return await self.order_events.list_for_order(order.id)
 
     async def create_order(
         self,
@@ -616,9 +617,7 @@ class OrderService:
             "variant_title": new_variant.title,
         }
 
-        await self.order_items.update(
-            item, product_variant_id=new_variant.id, sku=new_variant.sku
-        )
+        await self.order_items.update(item, product_variant_id=new_variant.id, sku=new_variant.sku)
         await self.order_events.create(
             order_id=order_id,
             event_type="item_variant_updated",
@@ -652,9 +651,11 @@ class OrderService:
         description: str | None,
         event_metadata: dict | None,
     ) -> OrderEvent:
-        await self.get_order(order_id)
+        order = await self.get_order(order_id)
+        if is_live_transient(order):
+            await ensure_workflow(self.session, order._live_external_id)  # type: ignore[attr-defined]  # noqa: SLF001
         event = await self.order_events.create(
-            order_id=order_id,
+            order_id=order.id,
             event_type=event_type,
             status=status,
             description=description,

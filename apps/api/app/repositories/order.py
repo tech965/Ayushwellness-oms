@@ -7,16 +7,33 @@ from decimal import Decimal
 from sqlalchemy import String, and_, case, exists, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
+from app.core.config import settings
 from app.models.customer import Customer
 from app.models.enums import FulfillmentStatus, OrderStatus, ShipmentStatus
 from app.models.order import Order, OrderEvent, OrderItem
 from app.models.shipment import Shipment
 from app.repositories.base import AppendOnlyRepository, BaseRepository
 from app.schemas.common import PageParams
+from app.services.live_orders import apply_live_update, is_live_transient, load_order
 
 
 class OrderRepository(BaseRepository[Order]):
     model = Order
+
+    async def get_by_id(self, id_: uuid.UUID) -> Order | None:
+        # Live mode: Shopify is the source of truth for order content; a
+        # local historical row is only the fallback (e.g. a manual order,
+        # or one Shopify no longer returns).
+        if settings.SHOPIFY_LIVE_MODE:
+            live = await load_order(self.session, id_)
+            if live is not None:
+                return live
+        return await super().get_by_id(id_)
+
+    async def update(self, instance: Order, **fields) -> Order:  # noqa: ANN003
+        if is_live_transient(instance):
+            return await apply_live_update(self.session, instance, fields)
+        return await super().update(instance, **fields)
 
     async def get_by_order_number(self, order_number: str) -> Order | None:
         stmt = select(Order).where(Order.order_number == order_number)
@@ -42,6 +59,10 @@ class OrderRepository(BaseRepository[Order]):
         return result.scalar_one_or_none()
 
     async def get_by_id_with_items_and_customer(self, id_: uuid.UUID) -> Order | None:
+        if settings.SHOPIFY_LIVE_MODE:
+            live = await load_order(self.session, id_)
+            if live is not None:
+                return live
         """Eager-loads `items` (with each item's `product_variant`, for
         the order detail page's per-line "available stock" column),
         `customer`, and `confirmed_by_telecaller` — needed by any caller
@@ -175,9 +196,7 @@ class OrderRepository(BaseRepository[Order]):
             # substring match, same unindexed-ILIKE performance profile
             # as the `sku` filter just above, deliberately not a new
             # indexed/expensive search path (small per-order tag lists).
-            stmt = stmt.where(
-                func.cast(Order.shopify_tags, String).ilike(f'%"{tag}"%')
-            )
+            stmt = stmt.where(func.cast(Order.shopify_tags, String).ilike(f'%"{tag}"%'))
         # Every caller of `search_query` eventually serializes through a
         # response that touches `customer`/`items`/`shipments` (list rows
         # need customer/product/shipment columns; export needs all three;

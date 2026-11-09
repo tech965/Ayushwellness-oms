@@ -53,8 +53,12 @@ class OrderAssignment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ),
     )
 
+    # References `order_workflow.id`, not `orders.id`: in API-first mode
+    # the order lives in Shopify and may have no local `orders` row. Every
+    # historical order has a workflow row with the SAME uuid (backfilled),
+    # so existing values are unchanged and the FK stays enforced.
     order_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("order_workflow.id", ondelete="CASCADE"), nullable=False, index=True
     )
     assigned_to: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -102,7 +106,11 @@ class OrderAssignment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         AwareDateTime(), nullable=True, index=True
     )
 
-    order: Mapped[Order] = relationship()
+    order: Mapped[Order] = relationship(
+        primaryjoin="OrderAssignment.order_id == Order.id",
+        foreign_keys="OrderAssignment.order_id",
+        viewonly=True,
+    )
     telecaller: Mapped[User] = relationship(foreign_keys=[assigned_to])
 
 
@@ -128,7 +136,7 @@ class CallAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "call_attempts"
 
     order_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("order_workflow.id", ondelete="CASCADE"), nullable=False, index=True
     )
     telecaller_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -151,7 +159,11 @@ class CallAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Boolean, nullable=False, default=False, server_default="false"
     )
 
-    order: Mapped[Order] = relationship()
+    order: Mapped[Order] = relationship(
+        primaryjoin="CallAttempt.order_id == Order.id",
+        foreign_keys="CallAttempt.order_id",
+        viewonly=True,
+    )
 
     @property
     def is_edited(self) -> bool:
@@ -190,8 +202,11 @@ class CheckoutAssignment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         ),
     )
 
+    # References `checkout_workflow.id` (same uuid as the legacy
+    # `abandoned_checkouts.id` for historical rows), so live-only checkouts
+    # can be assigned with the foreign key still enforced.
     checkout_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("abandoned_checkouts.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("checkout_workflow.id", ondelete="CASCADE"), nullable=False, index=True
     )
     assigned_to: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
@@ -233,7 +248,11 @@ class CheckoutAssignment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         AwareDateTime(), nullable=True, index=True
     )
 
-    checkout: Mapped[AbandonedCheckout] = relationship()
+    checkout: Mapped[AbandonedCheckout] = relationship(
+        primaryjoin="CheckoutAssignment.checkout_id == AbandonedCheckout.id",
+        foreign_keys="CheckoutAssignment.checkout_id",
+        viewonly=True,
+    )
     telecaller: Mapped[User] = relationship(foreign_keys=[assigned_to])
 
 
@@ -245,7 +264,7 @@ class CheckoutCallAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "checkout_call_attempts"
 
     checkout_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("abandoned_checkouts.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("checkout_workflow.id", ondelete="CASCADE"), nullable=False, index=True
     )
     telecaller_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -258,4 +277,8 @@ class CheckoutCallAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     next_follow_up_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
 
-    checkout: Mapped[AbandonedCheckout] = relationship()
+    checkout: Mapped[AbandonedCheckout] = relationship(
+        primaryjoin="CheckoutCallAttempt.checkout_id == AbandonedCheckout.id",
+        foreign_keys="CheckoutCallAttempt.checkout_id",
+        viewonly=True,
+    )

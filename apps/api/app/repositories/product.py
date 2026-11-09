@@ -29,6 +29,13 @@ class ProductRepository(BaseRepository[Product]):
 class ProductVariantRepository(BaseRepository[ProductVariant]):
     model = ProductVariant
 
+    async def get_for_update(self, id_: uuid.UUID) -> ProductVariant | None:
+        """Row-locked read (`SELECT ... FOR UPDATE`) for read-modify-write of
+        stock, so two concurrent adjustments/dispatches cannot lose an update."""
+        stmt = select(ProductVariant).where(ProductVariant.id == id_).with_for_update()
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_by_sku(self, sku: str) -> ProductVariant | None:
         stmt = select(ProductVariant).where(ProductVariant.sku == sku)
         result = await self.session.execute(stmt)

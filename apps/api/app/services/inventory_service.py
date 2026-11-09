@@ -89,6 +89,7 @@ from app.repositories.product import CatalogVariantRepository, ProductVariantRep
 from app.schemas.common import PageParams, SortParams
 from app.schemas.settings import AppSettingsData
 from app.services.audit_service import AuditService
+from app.services.inventory_reservation_service import InventoryReservationService
 
 logger = get_logger(__name__)
 
@@ -284,7 +285,9 @@ class InventoryService:
         )
         return list(items), total
 
-    async def check_stock_available(self, order_id: uuid.UUID) -> list[dict[str, object]]:
+    async def check_stock_available(
+        self, order_id: uuid.UUID, *, items: list | None = None
+    ) -> list[dict[str, object]]:
         """Pre-flight check before a shipment is created for this order
         (`ShiprocketOperationsService.create_shipment_for_order`) — does
         NOT move any stock (that only ever happens on confirmed dispatch,
@@ -305,7 +308,10 @@ class InventoryService:
         of an actual stock shortage, so it must never block a real
         shipment.
         """
-        items = await self.order_items.list_for_order(order_id)
+        # `items` is supplied for live (Shopify-only) orders, whose line
+        # items are never stored locally.
+        if items is None:
+            items = await self.order_items.list_for_order(order_id)
         shortages: list[dict[str, object]] = []
         for item in items:
             if item.quantity <= 0:
@@ -330,7 +336,9 @@ class InventoryService:
 
     # --- automatic movements (Shiprocket-driven only) --------------------
 
-    async def apply_dispatch(self, *, order_id: uuid.UUID, shipment_id: uuid.UUID) -> None:
+    async def apply_dispatch(
+        self, *, order_id: uuid.UUID, shipment_id: uuid.UUID, items: list | None = None
+    ) -> None:
         """Called once a shipment's courier tracking first reaches a
         dispatched-or-later status (`app.integrations.shiprocket.sync.
         apply_tracking_event`). Decrements every resolvable order line
@@ -339,7 +347,8 @@ class InventoryService:
         tracking advances through later statuses (IN_TRANSIT, DELIVERED,
         ...) or on a pull-sync re-scan; never reads anything from Shopify.
         """
-        items = await self.order_items.list_for_order(order_id)
+        if items is None:
+            items = await self.order_items.list_for_order(order_id)
         for item in items:
             if item.quantity <= 0:
                 continue
@@ -352,6 +361,11 @@ class InventoryService:
                     "inventory_dispatch_unresolved_sku", order_id=str(order_id), sku=item.sku
                 )
                 continue
+            # Row lock before the read-modify-write below (PostgreSQL), so two
+            # concurrent dispatches for different orders cannot lose an update.
+            locked = await self.variants.get_for_update(variant.id)
+            if locked is not None:
+                variant = locked
             # Captured up front: a SAVEPOINT rollback below expires every
             # attribute `begin_nested()` touched, `variant.id` included --
             # under `AsyncSession`, re-reading an expired attribute needs
@@ -393,6 +407,10 @@ class InventoryService:
                         shipment_id=shipment_id,
                         reason="Shiprocket dispatch",
                     )
+                    # The stock has now physically left: the reservation (if
+                    # one was taken at shipment creation) is consumed, so
+                    # available-to-promise does not count it twice.
+                    await InventoryReservationService(self.session).consume(order_id, [variant_id])
             except IntegrityError:
                 logger.info(
                     "inventory_dispatch_lost_race",
@@ -442,6 +460,9 @@ class InventoryService:
                     "inventory_rto_restock_unresolved_sku", order_id=str(order_id), sku=item.sku
                 )
                 continue
+            locked = await self.variants.get_for_update(variant.id)
+            if locked is not None:
+                variant = locked
             # See the matching comment in `apply_dispatch` -- captured up
             # front so the `except` block never touches a possibly-expired
             # `variant`.
@@ -509,7 +530,7 @@ class InventoryService:
         if not reason or not reason.strip():
             raise ValidationError("A reason is required for a manual stock adjustment.")
 
-        variant = await self.variants.get_by_id(variant_id)
+        variant = await self.variants.get_for_update(variant_id)
         if variant is None:
             raise NotFoundError("Product variant not found.")
 

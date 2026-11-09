@@ -1,15 +1,17 @@
-"""Tests for `collapse_duplicate_inventory_movements`, the data-cleanup step
-migration `c9f4a2e6b813` runs before creating the
-`uq_inventory_movements_variant_order_type` unique constraint.
+"""Tests for the duplicate-cleanup step of migration `c9f4a2e6b813`.
 
-The helper lives *inside* the migration module (migrations here never call
-into mutable `app.*` logic), so it is loaded through the Alembic
-ScriptDirectory rather than imported directly.
+The migration (see its module docstring) exposes a pure classifier
+`_classify_duplicate_group` and `_dedupe_inventory_movements(bind)`, which
+deletes only provably-redundant rows (identical `quantity_after` across the
+group), never touches `product_variants.available_quantity`, and raises
+`UnresolvedDuplicateInventoryMovementsError` if any group is ambiguous
+(the surrounding Alembic transaction then rolls everything back).
 
-Uses a throwaway in-memory SQLite table WITHOUT the unique constraint (so
-duplicates can be seeded), mirroring the migration's real "dedup, THEN
-constrain" order. The helper itself is plain dialect-portable SQL, so this
-coverage carries over to production PostgreSQL.
+The delete uses PostgreSQL `= ANY(:ids)`, which SQLite cannot execute, so the
+DB layer is exercised through a small in-memory fake connection that records
+every statement. The migration file itself is loaded through Alembic's
+ScriptDirectory (migrations never import mutable `app.*` logic) and is NOT
+modified by these tests.
 """
 
 from __future__ import annotations
@@ -17,9 +19,9 @@ from __future__ import annotations
 import pathlib
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
-import sqlalchemy as sa
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -33,423 +35,249 @@ def _load_migration():
 
 
 _SCRIPT, _MIGRATION = _load_migration()
-collapse_duplicate_inventory_movements = _MIGRATION.collapse_duplicate_inventory_movements
+classify = _MIGRATION._classify_duplicate_group
+dedupe = _MIGRATION._dedupe_inventory_movements
+MovementRow = _MIGRATION.MovementRow
+Unresolved = _MIGRATION.UnresolvedDuplicateInventoryMovementsError
 
 _T0 = datetime(2026, 9, 7, 20, 8, 21, tzinfo=UTC)
 
 
-@pytest.fixture
-def conn():
-    engine = sa.create_engine("sqlite://")
-    with engine.begin() as c:
-        c.execute(
-            sa.text(
-                """
-                CREATE TABLE product_variants (
-                    id VARCHAR PRIMARY KEY,
-                    available_quantity INTEGER NOT NULL,
-                    packets_per_box INTEGER NOT NULL DEFAULT 1
-                )
-                """
-            )
-        )
-        # Deliberately no UNIQUE (product_variant_id, order_id, movement_type)
-        # here -- that is exactly the constraint the migration adds AFTER
-        # this cleanup runs.
-        c.execute(
-            sa.text(
-                """
-                CREATE TABLE inventory_movements (
-                    id VARCHAR PRIMARY KEY,
-                    product_variant_id VARCHAR NOT NULL,
-                    movement_type VARCHAR NOT NULL,
-                    quantity_delta INTEGER NOT NULL,
-                    quantity_after INTEGER NOT NULL,
-                    order_id VARCHAR,
-                    created_at DATETIME NOT NULL
-                )
-                """
-            )
-        )
-    with engine.connect() as c:
-        yield c
-        c.rollback()
-    engine.dispose()
+def _row(qd: int = -1, qa: int = 298) -> MovementRow:
+    return MovementRow(id=uuid.uuid4(), quantity_delta=qd, quantity_after=qa)
 
 
-def _variant(conn, *, available_quantity: int) -> str:
-    vid = str(uuid.uuid4())
-    conn.execute(
-        sa.text(
-            "INSERT INTO product_variants (id, available_quantity, packets_per_box) "
-            "VALUES (:id, :aq, 1)"
-        ),
-        {"id": vid, "aq": available_quantity},
+class _Result:
+    def __init__(self, rows=None, scalar=None):
+        self._rows, self._scalar = rows or [], scalar
+
+    def fetchall(self):
+        return self._rows
+
+    def scalar_one(self):
+        return self._scalar
+
+
+class FakeBind:
+    """In-memory stand-in for the Alembic connection (dispatches on SQL text)."""
+
+    def __init__(self, movements: list[dict], available: dict[str, int] | None = None):
+        # movement: variant, order, type, id, qd, qa, created_at
+        self.movements = movements
+        self.available = available or {}
+        self.deleted: list[uuid.UUID] = []
+        self.statements: list[str] = []
+
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        self.statements.append(sql)
+        params = params or {}
+        if "GROUP BY" in sql:
+            counts: dict[tuple, int] = {}
+            for m in self.movements:
+                if m["order"] is None:
+                    continue
+                k = (m["variant"], m["order"], m["type"])
+                counts[k] = counts.get(k, 0) + 1
+            return _Result(
+                [
+                    SimpleNamespace(product_variant_id=v, order_id=o, movement_type=t, n=n)
+                    for (v, o, t), n in counts.items()
+                    if n > 1
+                ]
+            )
+        if "ORDER BY created_at" in sql:
+            rows = sorted(
+                (
+                    m
+                    for m in self.movements
+                    if (m["variant"], m["order"], m["type"])
+                    == (params["variant_id"], params["order_id"], params["movement_type"])
+                ),
+                key=lambda m: (m["created_at"], str(m["id"])),
+            )
+            return _Result(
+                [
+                    SimpleNamespace(
+                        id=m["id"],
+                        quantity_delta=m["qd"],
+                        quantity_after=m["qa"],
+                        created_at=m["created_at"],
+                    )
+                    for m in rows
+                ]
+            )
+        if sql.lstrip().startswith("DELETE"):
+            self.deleted.extend(params["ids"])
+            self.movements = [m for m in self.movements if m["id"] not in params["ids"]]
+            return _Result()
+        if "SELECT available_quantity" in sql:
+            return _Result(scalar=self.available[params["variant_id"]])
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+def _m(variant, order, qa, at, *, type_="dispatch", qd=-1):
+    return {
+        "variant": variant,
+        "order": order,
+        "type": type_,
+        "id": uuid.uuid4(),
+        "qd": qd,
+        "qa": qa,
+        "created_at": at,
+    }
+
+
+# --- pure classifier -----------------------------------------------------
+
+
+def test_identical_quantity_after_is_a_provable_race_duplicate() -> None:
+    rows = [_row(qa=298), _row(qa=298), _row(qa=298)]
+    plan = classify(rows)
+    assert plan.action == "delete_duplicates"
+    assert plan.canonical_id == rows[0].id  # earliest row is canonical
+    assert plan.duplicate_ids_to_delete == (rows[1].id, rows[2].id)
+
+
+def test_differing_quantity_after_is_action_required_and_deletes_nothing() -> None:
+    plan = classify([_row(qa=300), _row(qa=299)])
+    assert plan.action == "action_required"
+    assert plan.duplicate_ids_to_delete == ()
+
+
+def test_classifier_requires_two_rows() -> None:
+    with pytest.raises(ValueError):
+        classify([_row()])
+
+
+# --- _dedupe_inventory_movements ----------------------------------------
+
+
+def test_race_duplicates_collapse_to_the_canonical_row_only() -> None:
+    order = str(uuid.uuid4())
+    first = _m("v1", order, 298, _T0)
+    dup = _m("v1", order, 298, _T0 + timedelta(milliseconds=133))
+    bind = FakeBind([first, dup], {"v1": 298})
+
+    dedupe(bind)
+
+    assert bind.deleted == [dup["id"]]
+    assert [m["id"] for m in bind.movements] == [first["id"]]
+
+
+def test_available_quantity_is_never_written() -> None:
+    order = str(uuid.uuid4())
+    bind = FakeBind(
+        [_m("v1", order, 298, _T0), _m("v1", order, 298, _T0 + timedelta(seconds=1))],
+        {"v1": 298},
     )
-    return vid
+    dedupe(bind)
+    assert not any("UPDATE" in s.upper() for s in bind.statements)
+    assert not any("product_variants" in s and "SELECT" not in s for s in bind.statements)
 
 
-def _movement(
-    conn,
-    *,
-    variant_id: str,
-    order_id: str | None,
-    movement_type: str = "dispatch",
-    quantity_delta: int = -1,
-    quantity_after: int = 0,
-    created_at: datetime | None = None,
-) -> str:
-    mid = str(uuid.uuid4())
-    conn.execute(
-        sa.text(
-            """
-            INSERT INTO inventory_movements
-                (id, product_variant_id, movement_type, quantity_delta,
-                 quantity_after, order_id, created_at)
-            VALUES (:id, :pv, :mt, :qd, :qa, :oid, :ca)
-            """
-        ),
-        {
-            "id": mid,
-            "pv": variant_id,
-            "mt": movement_type,
-            "qd": quantity_delta,
-            "qa": quantity_after,
-            "oid": order_id,
-            # ISO string: lexically ordered, and avoids the py3.12 sqlite
-            # datetime-adapter deprecation warning. Only the ordering
-            # matters to the helper under test.
-            "ca": (created_at or datetime.now(UTC)).isoformat(),
-        },
-    )
-    return mid
-
-
-def _movement_rows(conn) -> list[dict]:
-    return [
-        dict(r)
-        for r in conn.execute(
-            sa.text(
-                "SELECT id, product_variant_id, order_id, movement_type, "
-                "quantity_delta, quantity_after FROM inventory_movements "
-                "ORDER BY created_at ASC, id ASC"
-            )
-        ).mappings()
+def test_multiple_groups_across_variants_and_orders() -> None:
+    oa, ob, oc = (str(uuid.uuid4()) for _ in range(3))
+    keepers = [
+        _m("v1", oa, 3571, _T0),
+        _m("v1", ob, 3570, _T0 + timedelta(minutes=1)),
+        _m("v2", oc, 298, _T0 + timedelta(minutes=2)),
     ]
+    dups = [
+        _m("v1", oa, 3571, _T0 + timedelta(milliseconds=133)),
+        _m("v1", ob, 3570, _T0 + timedelta(minutes=1, milliseconds=99)),
+        _m("v2", oc, 298, _T0 + timedelta(minutes=2, milliseconds=1)),
+    ]
+    bind = FakeBind(keepers + dups)
+    dedupe(bind)
+    assert sorted(map(str, bind.deleted)) == sorted(str(d["id"]) for d in dups)
+    assert {m["id"] for m in bind.movements} == {k["id"] for k in keepers}
 
 
-def _available_quantity(conn, variant_id: str) -> int:
-    return conn.execute(
-        sa.text("SELECT available_quantity FROM product_variants WHERE id = :id"),
-        {"id": variant_id},
-    ).scalar_one()
+def test_null_order_manual_adjustments_and_unique_rows_are_untouched() -> None:
+    order = str(uuid.uuid4())
+    movements = [
+        _m("v1", None, 25, _T0, type_="manual_adjustment", qd=5),
+        _m("v1", None, 22, _T0 + timedelta(days=1), type_="manual_adjustment", qd=-3),
+        _m("v1", order, 8, _T0, type_="dispatch", qd=-2),
+        _m("v1", order, 10, _T0 + timedelta(days=1), type_="rto_restock", qd=2),
+    ]
+    bind = FakeBind(list(movements))
+    dedupe(bind)
+    assert bind.deleted == []
+    assert len(bind.movements) == 4
 
 
-# --- identical-quantity_after race duplicates collapse to one row -----------
+def test_rerun_is_a_noop() -> None:
+    order = str(uuid.uuid4())
+    bind = FakeBind([_m("v1", order, 10, _T0), _m("v1", order, 10, _T0 + timedelta(seconds=1))])
+    dedupe(bind)
+    assert len(bind.deleted) == 1
+    dedupe(bind)
+    assert len(bind.deleted) == 1  # second run found nothing
 
 
-def test_identical_quantity_after_race_collapses_to_one(conn) -> None:
-    v = _variant(conn, available_quantity=298)
-    order_id = str(uuid.uuid4())
-    keeper = _movement(
-        conn, variant_id=v, order_id=order_id, quantity_after=298, created_at=_T0
+def test_ambiguous_group_raises_and_deletes_nothing_for_that_group() -> None:
+    order = str(uuid.uuid4())
+    a = _m("v1", order, 300, _T0)
+    b = _m("v1", order, 299, _T0 + timedelta(seconds=5))
+    bind = FakeBind([a, b], {"v1": 299})
+    with pytest.raises(Unresolved, match="require manual"):
+        dedupe(bind)
+    assert bind.deleted == []
+    assert len(bind.movements) == 2
+
+
+def test_one_ambiguous_group_aborts_the_whole_run() -> None:
+    """Clean groups may already have been deleted in-transaction when the
+    ambiguous group is hit; the raise makes Alembic roll the transaction
+    back, so the migration is all-or-nothing."""
+    clean, bad = str(uuid.uuid4()), str(uuid.uuid4())
+    bind = FakeBind(
+        [
+            _m("v1", clean, 10, _T0),
+            _m("v1", clean, 10, _T0 + timedelta(milliseconds=40)),
+            _m("v1", bad, 9, _T0),
+            _m("v1", bad, 8, _T0 + timedelta(milliseconds=40)),
+        ],
+        {"v1": 8},
     )
-    _movement(
-        conn,
-        variant_id=v,
-        order_id=order_id,
-        quantity_after=298,
-        created_at=_T0 + timedelta(milliseconds=133),
-    )
-
-    result = collapse_duplicate_inventory_movements(conn)
-
-    assert (result.groups_found, result.groups_collapsed, result.rows_deleted) == (1, 1, 1)
-    rows = _movement_rows(conn)
-    assert len(rows) == 1
-    assert rows[0]["id"] == keeper  # earliest created_at survives
-    assert rows[0]["quantity_delta"] == -1  # survivor untouched ...
-    assert rows[0]["quantity_after"] == 298  # ... so derived previous_balance stays 299
+    with pytest.raises(Unresolved):
+        dedupe(bind)
+    assert not any("UPDATE" in s.upper() for s in bind.statements)
 
 
-def test_id_tie_break_is_deterministic_when_created_at_is_identical(conn) -> None:
-    v = _variant(conn, available_quantity=298)
-    order_id = str(uuid.uuid4())
-    ids = sorted(str(uuid.uuid4()) for _ in range(3))
-    for mid in ids:
-        conn.execute(
-            sa.text(
-                "INSERT INTO inventory_movements (id, product_variant_id, movement_type, "
-                "quantity_delta, quantity_after, order_id, created_at) "
-                "VALUES (:id, :pv, 'dispatch', -1, 298, :oid, :ca)"
-            ),
-            {"id": mid, "pv": v, "oid": order_id, "ca": _T0.isoformat()},
-        )
-
-    collapse_duplicate_inventory_movements(conn)
-
-    rows = _movement_rows(conn)
-    assert [r["id"] for r in rows] == [ids[0]]  # lowest id wins the tie
-
-
-# --- current available_quantity remains unchanged --------------------------
-
-
-def test_available_quantity_is_never_modified(conn) -> None:
-    v = _variant(conn, available_quantity=298)
-    order_id = str(uuid.uuid4())
-    _movement(conn, variant_id=v, order_id=order_id, quantity_after=298, created_at=_T0)
-    _movement(
-        conn,
-        variant_id=v,
-        order_id=order_id,
-        quantity_after=298,
-        created_at=_T0 + timedelta(milliseconds=100),
-    )
-
-    collapse_duplicate_inventory_movements(conn)
-
-    assert _available_quantity(conn, v) == 298
-
-
-# --- multiple duplicate groups across variants/orders ---------------------
-
-
-def test_multiple_groups_across_variants_and_orders(conn) -> None:
-    """Mirrors the confirmed production shape: two race groups on one
-    variant (two different orders), one on another variant.
-    """
-    v1 = _variant(conn, available_quantity=3379)
-    v2 = _variant(conn, available_quantity=298)
-    order_a, order_b, order_c = (str(uuid.uuid4()) for _ in range(3))
-
-    keep_a = _movement(conn, variant_id=v1, order_id=order_a, quantity_after=3571, created_at=_T0)
-    _movement(
-        conn, variant_id=v1, order_id=order_a, quantity_after=3571,
-        created_at=_T0 + timedelta(milliseconds=133),
-    )
-    keep_b = _movement(
-        conn, variant_id=v1, order_id=order_b, quantity_after=3570,
-        created_at=_T0 + timedelta(minutes=1),
-    )
-    _movement(
-        conn, variant_id=v1, order_id=order_b, quantity_after=3570,
-        created_at=_T0 + timedelta(minutes=1, milliseconds=99),
-    )
-    keep_c = _movement(
-        conn, variant_id=v2, order_id=order_c, quantity_after=298,
-        created_at=_T0 + timedelta(minutes=2),
-    )
-    _movement(
-        conn, variant_id=v2, order_id=order_c, quantity_after=298,
-        created_at=_T0 + timedelta(minutes=2, milliseconds=1),
-    )
-
-    result = collapse_duplicate_inventory_movements(conn)
-
-    assert (result.groups_found, result.groups_collapsed, result.rows_deleted) == (3, 3, 3)
-    surviving_ids = {r["id"] for r in _movement_rows(conn)}
-    assert surviving_ids == {keep_a, keep_b, keep_c}
-    assert _available_quantity(conn, v1) == 3379
-    assert _available_quantity(conn, v2) == 298
-
-
-# --- manual adjustments with NULL order_id are untouched -----------------
-
-
-def test_null_order_id_manual_adjustments_are_never_touched(conn) -> None:
-    v = _variant(conn, available_quantity=22)
-    # Two manual adjustments for the same variant -- both order_id NULL.
-    _movement(
-        conn, variant_id=v, order_id=None, movement_type="manual_adjustment",
-        quantity_delta=5, quantity_after=25, created_at=_T0,
-    )
-    _movement(
-        conn, variant_id=v, order_id=None, movement_type="manual_adjustment",
-        quantity_delta=-3, quantity_after=22, created_at=_T0 + timedelta(days=1),
-    )
-
-    result = collapse_duplicate_inventory_movements(conn)
-
-    assert (result.groups_found, result.rows_deleted) == (0, 0)
-    assert len(_movement_rows(conn)) == 2
-    assert _available_quantity(conn, v) == 22
-
-
-# --- non-duplicate movements are untouched ------------------------------
-
-
-def test_non_duplicate_movements_are_untouched(conn) -> None:
-    v = _variant(conn, available_quantity=10)
-    order_id = str(uuid.uuid4())
-    # One dispatch + one RTO restock for the same order (different
-    # movement_type -> not a duplicate) + one NULL-order manual adjustment.
-    _movement(conn, variant_id=v, order_id=order_id, movement_type="dispatch",
-              quantity_delta=-2, quantity_after=8, created_at=_T0)
-    _movement(conn, variant_id=v, order_id=order_id, movement_type="rto_restock",
-              quantity_delta=2, quantity_after=10, created_at=_T0 + timedelta(days=1))
-    _movement(conn, variant_id=v, order_id=None, movement_type="manual_adjustment",
-              quantity_delta=0, quantity_after=10, created_at=_T0 + timedelta(days=2))
-
-    result = collapse_duplicate_inventory_movements(conn)
-
-    assert (result.groups_found, result.groups_collapsed, result.rows_deleted) == (0, 0, 0)
-    assert len(_movement_rows(conn)) == 3
-
-
-# --- rerunning cleanup is a no-op --------------------------------------
-
-
-def test_rerun_is_a_noop(conn) -> None:
-    v = _variant(conn, available_quantity=10)
-    order_id = str(uuid.uuid4())
-    _movement(conn, variant_id=v, order_id=order_id, quantity_after=10, created_at=_T0)
-    _movement(
-        conn, variant_id=v, order_id=order_id, quantity_after=10,
-        created_at=_T0 + timedelta(milliseconds=50),
-    )
-
-    first = collapse_duplicate_inventory_movements(conn)
-    assert first.rows_deleted == 1
-
-    second = collapse_duplicate_inventory_movements(conn)
-    assert (second.groups_found, second.groups_collapsed, second.rows_deleted) == (0, 0, 0)
-    assert len(_movement_rows(conn)) == 1
-
-
-# --- a duplicate group with different quantity_after aborts, no deletion --
-
-
-def test_ambiguous_group_aborts_before_any_deletion(conn) -> None:
-    v = _variant(conn, available_quantity=299)
-    order_id = str(uuid.uuid4())
-    _movement(conn, variant_id=v, order_id=order_id, quantity_after=300, created_at=_T0)
-    _movement(
-        conn, variant_id=v, order_id=order_id, quantity_after=299,
-        created_at=_T0 + timedelta(seconds=5),
-    )
-
-    with pytest.raises(RuntimeError, match="disagree on quantity_after"):
-        collapse_duplicate_inventory_movements(conn)
-
-    assert len(_movement_rows(conn)) == 2  # nothing deleted
-    assert _available_quantity(conn, v) == 299
-
-
-def test_one_ambiguous_group_blocks_even_the_clean_ones(conn) -> None:
-    v = _variant(conn, available_quantity=10)
-    clean_order = str(uuid.uuid4())
-    bad_order = str(uuid.uuid4())
-    # Clean race group -- would collapse fine on its own.
-    _movement(conn, variant_id=v, order_id=clean_order, quantity_after=10, created_at=_T0)
-    _movement(
-        conn, variant_id=v, order_id=clean_order, quantity_after=10,
-        created_at=_T0 + timedelta(milliseconds=40),
-    )
-    # Ambiguous group -- forces the whole migration to abort.
-    _movement(conn, variant_id=v, order_id=bad_order, quantity_after=9, created_at=_T0)
-    _movement(
-        conn, variant_id=v, order_id=bad_order, quantity_after=8,
-        created_at=_T0 + timedelta(milliseconds=40),
-    )
-
-    with pytest.raises(RuntimeError, match="disagree on quantity_after"):
-        collapse_duplicate_inventory_movements(conn)
-
-    assert len(_movement_rows(conn)) == 4  # NOTHING deleted, not even the clean group
-
-
-# --- migration file guards --------------------------------------------
-
-
-def _migration_module():
-    return _SCRIPT, _MIGRATION
+# --- migration file guards ----------------------------------------------
 
 
 def test_migration_down_revision_is_unchanged() -> None:
-    script, _module = _migration_module()
-
-    rev = script.get_revision("c9f4a2e6b813")
+    rev = _SCRIPT.get_revision("c9f4a2e6b813")
     assert rev.down_revision == "b7d2e5a91c3f"
-
-    b7 = script.get_revision("b7d2e5a91c3f")
-    assert b7.down_revision == "a4e9d3c7f158"
-
-    merge = script.get_revision("d4e5f6a7b8c9")
+    assert _SCRIPT.get_revision("b7d2e5a91c3f").down_revision == "a4e9d3c7f158"
+    merge = _SCRIPT.get_revision("d4e5f6a7b8c9")
     assert set(merge.down_revision) == {"c1d4f8a63b57", "c9f4a2e6b813"}
 
 
-# --- the real migration upgrade() glue, end to end -----------------------
-
-
-def test_upgrade_collapses_duplicates_then_creates_the_constraint(conn, monkeypatch) -> None:
-    """Runs the actual `c9f4a2e6b813.upgrade()` against a live connection.
-
-    `op.create_unique_constraint` is stubbed because SQLite cannot ALTER-add
-    a constraint (a pre-existing repo-wide limitation -- the suite never runs
-    the alembic chain); the assertion is that it is called, with the right
-    columns, only AFTER the row cleanup has run.
-    """
+def test_upgrade_dedupes_then_creates_the_constraint(monkeypatch) -> None:
     from alembic.operations import Operations
-    from alembic.runtime.migration import MigrationContext
 
-    _script, module = _migration_module()
-
-    v = _variant(conn, available_quantity=298)
-    order_id = str(uuid.uuid4())
-    keeper = _movement(
-        conn, variant_id=v, order_id=order_id, quantity_after=298, created_at=_T0
-    )
-    _movement(
-        conn, variant_id=v, order_id=order_id, quantity_after=298,
-        created_at=_T0 + timedelta(milliseconds=90),
-    )
-
-    calls: list[tuple] = []
-
-    def _fake_create_unique_constraint(self, constraint_name, table_name, columns, **kw):  # noqa: ANN001
-        # cleanup must already have happened by the time the constraint goes on
-        assert len(_movement_rows(conn)) == 1
-        calls.append((constraint_name, table_name, list(columns)))
-
+    order_of_calls: list[str] = []
+    monkeypatch.setattr(_MIGRATION.op, "get_bind", lambda: "BIND", raising=False)
     monkeypatch.setattr(
-        Operations, "create_unique_constraint", _fake_create_unique_constraint
+        _MIGRATION,
+        "_dedupe_inventory_movements",
+        lambda bind: order_of_calls.append(f"dedupe:{bind}"),
     )
-
-    ctx = MigrationContext.configure(connection=conn)
-    with Operations.context(ctx):
-        module.upgrade()
-
-    assert calls == [
-        (
-            "uq_inventory_movements_variant_order_type",
-            "inventory_movements",
-            ["product_variant_id", "order_id", "movement_type"],
-        )
+    monkeypatch.setattr(
+        _MIGRATION.op,
+        "create_unique_constraint",
+        lambda name, table, cols, **kw: order_of_calls.append(f"constraint:{name}:{table}:{cols}"),
+        raising=False,
+    )
+    _MIGRATION.upgrade()
+    assert order_of_calls == [
+        "dedupe:BIND",
+        "constraint:uq_inventory_movements_variant_order_type:inventory_movements:"
+        "['product_variant_id', 'order_id', 'movement_type']",
     ]
-    rows = _movement_rows(conn)
-    assert [r["id"] for r in rows] == [keeper]
-    assert _available_quantity(conn, v) == 298
-
-
-def test_upgrade_refuses_to_run_in_offline_sql_mode(conn, monkeypatch) -> None:
-    from alembic.operations import Operations
-    from alembic.runtime.migration import MigrationContext
-
-    _script, module = _migration_module()
-
-    v = _variant(conn, available_quantity=298)
-    order_id = str(uuid.uuid4())
-    _movement(conn, variant_id=v, order_id=order_id, quantity_after=298, created_at=_T0)
-    _movement(
-        conn, variant_id=v, order_id=order_id, quantity_after=298,
-        created_at=_T0 + timedelta(milliseconds=90),
-    )
-
-    ctx = MigrationContext.configure(connection=conn)
-    monkeypatch.setattr(ctx, "as_sql", True)
-
-    with Operations.context(ctx), pytest.raises(RuntimeError, match="must run online"):
-        module.upgrade()
-
-    assert len(_movement_rows(conn)) == 2  # aborted before touching anything
+    assert Operations  # imported to confirm alembic.operations is available

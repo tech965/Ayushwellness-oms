@@ -145,3 +145,19 @@ def _naive(value):  # noqa: ANN001, ANN202
     (`AwareDateTime`), so every one written to a cell needs this.
     """
     return value.replace(tzinfo=None) if value is not None else None
+
+
+def add_incomplete_note(workbook_bytes: bytes, warnings: list[str]) -> bytes:
+    """Adds a visible "Export notes" sheet so a truncated export can never
+    be mistaken for a complete one."""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(workbook_bytes))
+    sheet = workbook.create_sheet("Export notes", 0)
+    sheet.append(["WARNING: this export is INCOMPLETE."])
+    for warning in warnings:
+        sheet.append([warning])
+    sheet.column_dimensions["A"].width = 100
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()

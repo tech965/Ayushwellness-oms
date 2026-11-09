@@ -26,15 +26,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
+from app.integrations.shopify.live_webhooks import process_live_webhook
 from app.integrations.shopify.webhooks import content_length_matches_body, webhook_hmac_debug_info
 from app.models.integration import IntegrationCode
 from app.repositories.integration import IntegrationRepository
 from app.services.audit_service import AuditService
+from app.services.live_workflow_handlers import register_default_live_handlers
 from app.services.webhook_service import WebhookService
 from app.tasks.webhook_processing import process_webhook_event_task
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+register_default_live_handlers()
 
 
 @router.post("", status_code=200)
@@ -120,6 +124,20 @@ async def receive_shopify_webhook(
         payload = json.loads(raw_body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+
+    if settings.SHOPIFY_LIVE_MODE:
+        # API-first mode: handle transiently. No webhook_events row, no
+        # Celery payload; the payload is never stored. Only OMS-owned
+        # order_workflow state (keyed by external id) may be written.
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+        await process_live_webhook(
+            session=session,
+            topic=x_shopify_topic,
+            delivery_id=x_shopify_webhook_id,
+            payload=payload,
+        )
+        return {"success": True}
 
     integration = await IntegrationRepository(session).get_by_code(IntegrationCode.SHOPIFY)
     if integration is None:

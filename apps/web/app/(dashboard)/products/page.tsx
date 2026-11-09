@@ -12,8 +12,10 @@ import { formatDate } from "@/lib/format"
 import { usePaginationState } from "@/lib/use-pagination"
 import { useProducts } from "@/services/products"
 import { PRODUCT_STATUS_OPTIONS, type Product, type ProductStatus } from "@/types/product"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
+import { LiveCatalog } from "@/components/inventory/live-catalog"
 
-export default function ProductsPage() {
+function StoredDataProductsPage() {
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const [search, setSearch] = React.useState("")
   const [status, setStatus] = React.useState<ProductStatus | undefined>(undefined)
@@ -89,5 +91,15 @@ export default function ProductsPage() {
         </QueryStates>
       </div>
     </>
+  )
+}
+
+/** While provider data is read live, this page shows its live replacement;
+ * otherwise the stored-data screen is unchanged. */
+export default function Page() {
+  return (
+    <LiveModeGate live={<LiveCatalog />}>
+      <StoredDataProductsPage />
+    </LiveModeGate>
   )
 }

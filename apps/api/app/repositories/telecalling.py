@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import Select, and_, case, exists, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
+from app.core.config import settings
 from app.models.abandoned_checkout import AbandonedCheckout
 from app.models.customer import Customer
 from app.models.enums import AssignmentStatus, FulfillmentStatus, LeadCategory, PaymentType
@@ -252,6 +253,16 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
     def _base_scope_query(self) -> Select:
         from app.models.product import ProductVariant
 
+        if settings.SHOPIFY_LIVE_MODE:
+            # Live-only orders have no local `orders` row: outer join, and
+            # no order eager-loading (the order is attached from Shopify
+            # by `TelecallingService`, never read from this table).
+            return (
+                select(OrderAssignment)
+                .outerjoin(Order, Order.id == OrderAssignment.order_id)
+                .where(OrderAssignment.assignment_status == AssignmentStatus.ACTIVE)
+                .options(selectinload(OrderAssignment.telecaller))
+            )
         return (
             select(OrderAssignment)
             .join(Order, Order.id == OrderAssignment.order_id)
@@ -301,6 +312,17 @@ class OrderAssignmentRepository(BaseRepository[OrderAssignment]):
             stmt = stmt.where(OrderAssignment.assigned_to == assigned_to)
         if team_leader_id is not None:
             stmt = stmt.where(OrderAssignment.team_leader_id == team_leader_id)
+        if settings.SHOPIFY_LIVE_MODE:
+            # Only assignment-owned filters run in SQL; `q`, `unfulfilled_only`
+            # and the order-date range depend on Shopify data and are applied
+            # in memory by `TelecallingService` after the live fetch.
+            if call_status:
+                stmt = stmt.where(OrderAssignment.current_status == call_status)
+            if follow_up_from is not None:
+                stmt = stmt.where(OrderAssignment.next_follow_up_at >= follow_up_from)
+            if follow_up_to is not None:
+                stmt = stmt.where(OrderAssignment.next_follow_up_at < follow_up_to)
+            return stmt.order_by(OrderAssignment.assigned_at.desc())
         if q:
             like = f"%{q}%"
             # Mirrors `OrderRepository.search_query`'s own `customer_match`
@@ -608,13 +630,10 @@ class CallAttemptRepository(AppendOnlyRepository[CallAttempt]):
         rare, and not a permission or crash risk, just a display lag for
         that one edge case.
         """
-        stmt = (
-            select(CallAttempt)
-            .where(
-                CallAttempt.telecaller_id == telecaller_id,
-                CallAttempt.attempted_at >= date_from,
-                CallAttempt.attempted_at <= date_to,
-            )
+        stmt = select(CallAttempt).where(
+            CallAttempt.telecaller_id == telecaller_id,
+            CallAttempt.attempted_at >= date_from,
+            CallAttempt.attempted_at <= date_to,
         )
         rows = list((await self.session.execute(stmt)).scalars().all())
         corrected_ids = {r.corrects_attempt_id for r in rows if r.corrects_attempt_id}
@@ -639,6 +658,17 @@ class CheckoutAssignmentRepository(BaseRepository[CheckoutAssignment]):
         return result.scalar_one_or_none()
 
     def _base_scope_query(self) -> Select:
+        if settings.SHOPIFY_LIVE_MODE:
+            # Live-only checkouts have no local row: outer join, and no
+            # checkout eager-loading (attached from Shopify by the service).
+            return (
+                select(CheckoutAssignment)
+                .outerjoin(
+                    AbandonedCheckout, AbandonedCheckout.id == CheckoutAssignment.checkout_id
+                )
+                .where(CheckoutAssignment.assignment_status == AssignmentStatus.ACTIVE)
+                .options(selectinload(CheckoutAssignment.telecaller))
+            )
         return (
             select(CheckoutAssignment)
             .join(AbandonedCheckout, AbandonedCheckout.id == CheckoutAssignment.checkout_id)
@@ -671,6 +701,10 @@ class CheckoutAssignmentRepository(BaseRepository[CheckoutAssignment]):
             stmt = stmt.where(CheckoutAssignment.next_follow_up_at >= follow_up_from)
         if follow_up_to is not None:
             stmt = stmt.where(CheckoutAssignment.next_follow_up_at < follow_up_to)
+        if settings.SHOPIFY_LIVE_MODE:
+            # The created-date range depends on Shopify data: applied in
+            # memory by `TelecallingService` after the live fetch.
+            return stmt.order_by(CheckoutAssignment.assigned_at.desc())
         if date_from is not None:
             stmt = stmt.where(AbandonedCheckout.checkout_created_at >= date_from)
         if date_to is not None:

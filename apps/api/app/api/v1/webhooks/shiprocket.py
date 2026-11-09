@@ -27,6 +27,7 @@ behaviour can recover it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -37,8 +38,10 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_db
 from app.integrations.shiprocket.webhooks import extract_body_token, verify_webhook_token
+from app.integrations.shopify.live_webhooks import process_live_webhook
 from app.models.integration import IntegrationCode
 from app.repositories.integration import IntegrationRepository
+from app.services.live_shiprocket import handle_tracking_webhook
 from app.services.shiprocket_webhook_service import ShiprocketWebhookService
 from app.services.webhook_service import WebhookService
 
@@ -98,6 +101,22 @@ async def receive_shiprocket_tracking_webhook(
     if payload is None:
         logger.warning("shiprocket_webhook_malformed_payload", reason="invalid_or_non_object_json")
         raise HTTPException(status_code=400, detail="Expected a JSON object payload.")
+
+    if settings.SHOPIFY_LIVE_MODE:
+        # API-first: the token is verified above; the payload is handled in
+        # memory and discarded (no webhook_events row, no shipment/tracking
+        # write). The only effect is OMS-owned inventory bookkeeping.
+        await process_live_webhook(
+            session=session,
+            provider="shiprocket",
+            topic="shipment.tracking_update",
+            delivery_id=hashlib.sha256(
+                json.dumps(payload, sort_keys=True, default=str).encode()
+            ).hexdigest(),
+            payload=payload,
+            handler=handle_tracking_webhook,
+        )
+        return {"success": True}
 
     integration = await IntegrationRepository(session).get_by_code(IntegrationCode.SHIPROCKET)
     if integration is None:

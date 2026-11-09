@@ -15,10 +15,12 @@ import { formatMoney } from "@/lib/format"
 import { istEndOfDay, istStartOfDay } from "@/lib/ist-date"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useOperationsCommandCenter } from "@/services/operations-command-center"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
+import { LiveUnavailable } from "@/components/shared/live-unavailable"
 
 const FILTER_DEFAULTS = { date_from: "", date_to: "" }
 
-export default function OperationsCommandCenterPage() {
+function StoredDataOperationsCommandCenterPage() {
   return (
     <React.Suspense fallback={<Skeleton className="h-[600px] w-full" />}>
       <OperationsCommandCenterContent />
@@ -108,5 +110,16 @@ function OperationsCommandCenterContent() {
         </div>
       )}
     </>
+  )
+}
+
+/** While provider data is read live, this page shows its live replacement
+ * (or an explanation); otherwise the stored-data screen is unchanged.
+ */
+export default function Page() {
+  return (
+    <LiveModeGate live={<LiveUnavailable title="Operations command center" operation="shiprocket_aggregates" fallbackReason="This view aggregates stored shipment and order data, which is not kept in live mode." />}>
+      <StoredDataOperationsCommandCenterPage />
+    </LiveModeGate>
   )
 }

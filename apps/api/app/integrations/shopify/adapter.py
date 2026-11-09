@@ -20,12 +20,18 @@ from app.integrations.shopify.mutations import (
     FULFILLMENT_CREATE_MUTATION,
     FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
     OPEN_FULFILLMENT_ORDERS_QUERY,
+    ORDER_CANCEL_MUTATION,
     ORDER_UPDATE_SHIPPING_ADDRESS_MUTATION,
     TAGS_ADD_MUTATION,
     TAGS_REMOVE_MUTATION,
 )
 from app.integrations.shopify.normalizer import ENTITY_NORMALIZERS
-from app.integrations.shopify.queries import ENTITY_QUERIES, SHOP_PING_QUERY, updated_since_filter
+from app.integrations.shopify.queries import (
+    ENTITY_QUERIES,
+    ORDER_REFUNDS_QUERY,
+    SHOP_PING_QUERY,
+    updated_since_filter,
+)
 from app.integrations.shopify.webhook_shapes import WEBHOOK_SHAPE_TRANSLATORS
 from app.models.integration import IntegrationCode
 
@@ -415,6 +421,100 @@ class ShopifyAdapter(IntegrationAdapter):
                 details={"error_type": "validation_error"},
             )
         return order
+
+    CANCEL_REASONS = ("CUSTOMER", "DECLINED", "FRAUD", "INVENTORY", "OTHER", "STAFF")
+
+    async def get_order_refunds(self, shopify_order_gid: str) -> dict[str, Any] | None:
+        """Refunds and cancellation state for one order, read live. `None`
+        when Shopify has no such order."""
+        client = self._get_client()
+        try:
+            data = await client.execute(ORDER_REFUNDS_QUERY, {"id": shopify_order_gid})
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+        order = data.get("order")
+        if order is None:
+            return None
+
+        def amount(bag: dict | None) -> str | None:
+            money = ((bag or {}).get("shopMoney")) or {}
+            return money.get("amount")
+
+        return {
+            "cancelled_at": order.get("cancelledAt"),
+            "cancel_reason": order.get("cancelReason"),
+            "total_refunded": amount(order.get("totalRefundedSet")),
+            "currency": (((order.get("totalRefundedSet") or {}).get("shopMoney")) or {}).get(
+                "currencyCode"
+            ),
+            "refunds": [
+                {
+                    "id": r.get("id"),
+                    "created_at": r.get("createdAt"),
+                    "processed_at": r.get("processedAt"),
+                    "note": r.get("note"),
+                    "amount": amount(r.get("totalRefundedSet")),
+                }
+                for r in (order.get("refunds") or [])
+            ],
+        }
+
+    async def cancel_order(
+        self,
+        shopify_order_gid: str,
+        *,
+        reason: str,
+        restock: bool,
+        notify_customer: bool = False,
+        staff_note: str | None = None,
+    ) -> dict[str, Any]:
+        """Submits Shopify's asynchronous `orderCancel`. Returns the job
+        (`id`, `done`); the cancellation is only CONFIRMED once the order's
+        `cancelledAt` is set (read it with `get_order_refunds`). Raises
+        `IntegrationError` for transport failures and for any
+        `orderCancelUserErrors`."""
+        if reason not in self.CANCEL_REASONS:
+            raise IntegrationError(
+                f"Unsupported cancel reason '{reason}'.",
+                details={"error_type": "validation_error"},
+            )
+        if staff_note is not None and len(staff_note) > 255:
+            raise IntegrationError(
+                "Staff note is limited to 255 characters.",
+                details={"error_type": "validation_error"},
+            )
+        client = self._get_client()
+        try:
+            data = await client.execute(
+                ORDER_CANCEL_MUTATION,
+                {
+                    "orderId": shopify_order_gid,
+                    "reason": reason,
+                    "restock": restock,
+                    "notifyCustomer": notify_customer,
+                    "staffNote": staff_note,
+                },
+            )
+        except ShopifyApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+        result = data.get("orderCancel") or {}
+        errors = result.get("orderCancelUserErrors") or []
+        if errors:
+            message = "; ".join(
+                f"{','.join(e.get('field') or [])}: {e.get('message')}" for e in errors
+            )
+            raise IntegrationError(
+                f"Shopify rejected the cancellation: {message}",
+                details={"error_type": "validation_error"},
+            )
+        job = result.get("job")
+        if job is None:
+            raise IntegrationError(
+                "Shopify orderCancel response had no job and no errors.",
+                details={"error_type": "validation_error"},
+            )
+        return job
 
     def normalize(self, entity_type: str, raw: dict[str, Any]) -> dict[str, Any]:
         normalizer = ENTITY_NORMALIZERS.get(entity_type)

@@ -27,6 +27,11 @@ class PaginationMeta(BaseModel):
     page_size: int
     total_items: int
     total_pages: int
+    # Set only by live (API-first) listings, where the provider cannot
+    # give an exact total. Absent/None everywhere else.
+    has_more: bool | None = None
+    total_is_estimate: bool | None = None
+    warnings: list[str] | None = None
 
 
 class PaginatedResponse[T](BaseModel):

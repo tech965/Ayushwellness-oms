@@ -54,16 +54,19 @@ class InventoryMovement(Base, UUIDPrimaryKeyMixin):
     quantity_after: Mapped[int] = mapped_column(Integer, nullable=False)
 
     order_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("order_workflow.id", ondelete="SET NULL"), nullable=True, index=True
     )
     shipment_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("shipments.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("shipment_refs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     rto_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("rtos.id", ondelete="SET NULL"), nullable=True, index=True
     )
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    warehouse_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("warehouses.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)

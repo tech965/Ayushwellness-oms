@@ -186,3 +186,36 @@ mutation OrderUpdateShippingAddress($input: OrderInput!) {
   }
 }
 """
+
+
+# `orderCancel`, verified against shopify.dev (Admin GraphQL, version 2026-10
+# docs). Scope: write_orders. Required args: orderId (ID!), reason
+# (OrderCancelReason! = CUSTOMER|DECLINED|FRAUD|INVENTORY|OTHER|STAFF),
+# restock (Boolean!). Optional: notifyCustomer (default false), staffNote
+# (max 255 chars). The deprecated `refund` argument is deliberately NOT
+# sent. Cancellation is ASYNCHRONOUS: the payload carries a `job`; the
+# order's `cancelledAt` (see ORDER_REFUNDS_QUERY) is what confirms it. Error
+# list: `orderCancelUserErrors` (the old `userErrors` is deprecated).
+# NOT yet run against a real store; on API versions older than 2026-10 the
+# argument set may differ -- set SHOPIFY_API_VERSION to a version whose docs
+# match, and confirm in a development store first.
+ORDER_CANCEL_MUTATION = """
+mutation OrderCancel(
+  $orderId: ID!
+  $reason: OrderCancelReason!
+  $restock: Boolean!
+  $notifyCustomer: Boolean
+  $staffNote: String
+) {
+  orderCancel(
+    orderId: $orderId
+    reason: $reason
+    restock: $restock
+    notifyCustomer: $notifyCustomer
+    staffNote: $staffNote
+  ) {
+    job { id done }
+    orderCancelUserErrors { field message code }
+  }
+}
+"""

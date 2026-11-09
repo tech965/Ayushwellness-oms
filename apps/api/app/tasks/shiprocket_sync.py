@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from app.core.config import settings
 from app.core.exceptions import IntegrationError
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal, run_with_cleanup
@@ -32,6 +33,10 @@ logger = get_logger(__name__)
 
 
 async def _execute_tracking_refresh(sync_job_id: str) -> None:
+    if settings.SHOPIFY_LIVE_MODE:
+        # Live mode reads tracking from Shiprocket on demand and never stores it.
+        logger.info("shiprocket_tracking_refresh_skipped_live_mode", sync_job_id=sync_job_id)
+        return
     async with AsyncSessionLocal() as session:
         job_uuid = uuid.UUID(sync_job_id)
         job = await SyncJobRepository(session).get_by_id(job_uuid)

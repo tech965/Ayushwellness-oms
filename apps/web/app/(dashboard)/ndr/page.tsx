@@ -41,6 +41,8 @@ import { useUrlFilters } from "@/lib/use-url-filters"
 import { useNdrReattempt, useNdrs, useUpdateNdr } from "@/services/ndr"
 import { NDR_STATUS_OPTIONS, type NDR, type NDRStatus } from "@/types/ndr"
 import { PAYMENT_TYPE_OPTIONS, type PaymentType } from "@/types/order"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
+import { LiveNdr } from "@/components/ndr/live-ndr"
 
 const FILTER_DEFAULTS = {
   q: "",
@@ -176,7 +178,7 @@ function NdrSkeleton() {
   )
 }
 
-export default function NdrPage() {
+function StoredDataNdrPage() {
   return (
     <React.Suspense fallback={<NdrSkeleton />}>
       <NdrPageContent />
@@ -403,5 +405,16 @@ function NdrPageContent() {
         )}
       </div>
     </>
+  )
+}
+
+/** While provider data is read live, this page shows its live replacement
+ * (or an explanation); otherwise the stored-data screen is unchanged.
+ */
+export default function Page() {
+  return (
+    <LiveModeGate live={<LiveNdr />}>
+      <StoredDataNdrPage />
+    </LiveModeGate>
   )
 }

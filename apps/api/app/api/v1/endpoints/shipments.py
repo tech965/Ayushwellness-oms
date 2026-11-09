@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.dependencies.auth import require_permission
+from app.dependencies.live_mode import unavailable_in_live_mode_for
 from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
@@ -42,6 +43,10 @@ from app.services.shiprocket_service import (
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 router = APIRouter()
+
+_TOTALS_UNAVAILABLE = (
+    "Shipment totals need a bulk Shiprocket status API that this integration does not have."
+)
 
 
 def _to_shipment_queue_row(order: Order, shipment: Shipment | None) -> ShipmentQueueRowResponse:
@@ -112,7 +117,11 @@ async def get_shipment_queue(
     )
 
 
-@router.get("/summary", response_model=ApiResponse[ShipmentSummaryResponse])
+@router.get(
+    "/summary",
+    response_model=ApiResponse[ShipmentSummaryResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
 async def get_shipment_summary(
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("shipments.read")),
@@ -121,7 +130,11 @@ async def get_shipment_summary(
     return ApiResponse(data=ShipmentSummaryResponse(**summary))
 
 
-@router.get("/analytics", response_model=ApiResponse[ShipmentAnalyticsResponse])
+@router.get(
+    "/analytics",
+    response_model=ApiResponse[ShipmentAnalyticsResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
 async def get_shipment_analytics(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
@@ -140,9 +153,7 @@ def _to_shipment_list_response(shipment: Shipment) -> ShipmentListResponse:
         customer_name=order.customer.full_name if order and order.customer else None,
         payment_type=order.payment_type if order else None,
         confirmed_by_telecaller_name=(
-            order.confirmed_by_telecaller.name
-            if order and order.confirmed_by_telecaller
-            else None
+            order.confirmed_by_telecaller.name if order and order.confirmed_by_telecaller else None
         ),
         courier_name=shipment.courier.name if shipment.courier else None,
     )

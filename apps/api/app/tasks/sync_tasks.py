@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal, run_with_cleanup
 from app.integrations.registry import get_adapter
@@ -134,6 +135,12 @@ async def _run_scheduled_sync() -> list[tuple[str, str]]:
             # queue of guaranteed-FAILED jobs every cycle.
             if not entity_types or get_adapter(integration.code) is None:
                 continue
+            if settings.SHOPIFY_LIVE_MODE and integration.code in (
+                IntegrationCode.SHOPIFY,
+                IntegrationCode.SHIPROCKET,
+                IntegrationCode.CASHFREE,
+            ):
+                continue
             for entity_type in entity_types:
                 last_successful = await sync_jobs.get_last_successful_for_entity(
                     integration_id=integration.id, entity_type=entity_type
@@ -145,9 +152,7 @@ async def _run_scheduled_sync() -> list[tuple[str, str]]:
                 backlog_done = SyncService.backlog_known_complete_for(
                     integration, entity_type=entity_type, since=since, resume_cursor=resume_cursor
                 )
-                sync_type = (
-                    SyncType.INCREMENTAL.value if backlog_done else SyncType.FULL.value
-                )
+                sync_type = SyncType.INCREMENTAL.value if backlog_done else SyncType.FULL.value
                 run_sync_task.delay(str(integration.id), sync_type, entity_type)
                 enqueued.append((integration.code, entity_type))
     return enqueued

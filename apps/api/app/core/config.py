@@ -90,6 +90,18 @@ class Settings(BaseSettings):
     # replay into a follow-up request — capped server-side regardless.
     CHAT_HISTORY_MAX_MESSAGES: int = 20
 
+    # --- Amazon SP-API (optional, read-only sales analytics; the API never
+    # fails to start without them) ---
+    AMAZON_SP_API_APP_ID: str | None = None
+    AMAZON_SP_API_CLIENT_ID: str | None = None
+    AMAZON_SP_API_CLIENT_SECRET: str | None = None
+    AMAZON_SP_API_REFRESH_TOKEN: str | None = None
+    AMAZON_SP_API_SELLING_PARTNER_ID: str | None = None
+    AMAZON_SP_API_MARKETPLACE_ID: str | None = None
+    AMAZON_SP_API_REGION: str | None = None  # na | eu | fe
+    AMAZON_SP_API_TIMEZONE: str = "Asia/Kolkata"
+    AMAZON_SP_API_MAX_RANGE_DAYS: int = 90
+
     # --- Shopify (optional — connected starting Phase 2.2 when credentials
     # are present; the API never fails to start without them) ---
     SHOPIFY_API_KEY: str | None = None
@@ -123,6 +135,13 @@ class Settings(BaseSettings):
     # this environment and not a stale one (a previous deploy's URL, or a
     # developer's local tunnel).
     SHOPIFY_WEBHOOK_CALLBACK_URL: str | None = None
+    # API-first mode (no external data persistence): when True, Shopify is
+    # read live and the OMS never writes Shopify-sourced records or raw
+    # Shopify webhook payloads to PostgreSQL. Pull-sync and the scheduled
+    # backstop are refused. Defaults to False so production keeps working
+    # until every live read path (orders list, telecalling, dashboard,
+    # exports) has been cut over; flip only when that is done.
+    SHOPIFY_LIVE_MODE: bool = False
 
     # --- Shiprocket (optional — connected starting Phase 2.3 when
     # credentials are present; the API never fails to start without them) ---

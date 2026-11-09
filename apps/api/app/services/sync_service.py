@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import ConflictError, IntegrationError, NotFoundError, OMSError
 from app.core.logging import get_logger
 from app.integrations.base import IntegrationAdapter
@@ -21,7 +22,7 @@ from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS, UpsertHandler
 from app.integrations.registry import get_adapter, registered_codes
 from app.models.auth import User
 from app.models.enums import IntegrationStatus, SyncJobStatus, SyncType
-from app.models.integration import Integration, SyncError, SyncJob
+from app.models.integration import Integration, IntegrationCode, SyncError, SyncJob
 from app.repositories.integration import IntegrationRepository
 from app.repositories.sync_error import SyncErrorRepository
 from app.repositories.sync_job import SyncJobRepository
@@ -201,7 +202,7 @@ class SyncService:
             # a time; see `run_sync` for how the scheduler path treats
             # this as "nothing to do" rather than an error.
             raise ConflictError(
-                f"A {entity_type} sync is already {existing.status.value} for this " "integration.",
+                f"A {entity_type} sync is already {existing.status.value} for this integration.",
                 details={"sync_job_id": str(existing.id), "status": existing.status.value},
             )
 
@@ -236,7 +237,7 @@ class SyncService:
             if existing is None:
                 raise
             raise ConflictError(
-                f"A {entity_type} sync is already {existing.status.value} for this " "integration.",
+                f"A {entity_type} sync is already {existing.status.value} for this integration.",
                 details={"sync_job_id": str(existing.id), "status": existing.status.value},
             ) from exc
         await self.audit.record(
@@ -418,6 +419,24 @@ class SyncService:
         integration = await self.integrations.get_by_id(job.integration_id)
         adapter = get_adapter(integration.code) if integration else None
         integration_code = integration.code if integration else str(job.integration_id)
+
+        if settings.SHOPIFY_LIVE_MODE and integration_code in (
+            IntegrationCode.SHOPIFY,
+            IntegrationCode.SHIPROCKET,
+            IntegrationCode.CASHFREE,
+        ):
+            # API-first mode: Shopify data is read live, never pulled into
+            # PostgreSQL. Refuse before any fetch/upsert can run.
+            await self.record_error(
+                job_id,
+                entity_type=entity_type,
+                error_type="integration_error",
+                error_message=(
+                    f"{integration_code} pull-sync is disabled: live-data mode is on "
+                    "(external data is not persisted)."
+                ),
+            )
+            return await self.complete_sync(job_id, success=False)
 
         # Temporary diagnostic (see the "No adapter registered" production
         # incident this is investigating): if `adapter` is ever `None` here

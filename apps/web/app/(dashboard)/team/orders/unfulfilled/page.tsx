@@ -9,6 +9,7 @@ import {
   DateRangePicker,
   type DateRangeValue,
 } from "@/components/shared/date-range-picker"
+import { LiveResultNotice } from "@/components/shared/live-result-notice"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
@@ -258,6 +259,9 @@ function UnfulfilledTeamOrdersContent() {
             Clear
           </Button>
         </div>
+
+        <LiveResultNotice meta={query.data?.meta} />
+
 
         <QueryStates
           isLoading={query.isLoading}

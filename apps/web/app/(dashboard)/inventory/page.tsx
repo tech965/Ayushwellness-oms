@@ -27,6 +27,8 @@ import {
   STOCK_STATUS_LABELS,
   type InventoryProductSummary,
 } from "@/types/inventory"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
+import { LiveInventory } from "@/components/inventory/live-inventory"
 
 /** Low-stock threshold is org-wide config (`AppSettings.values.inventory`,
  * `PUT /settings` behind `settings.manage`) -- reuses the existing
@@ -107,7 +109,7 @@ function LowStockThresholdControl() {
   )
 }
 
-export default function InventoryPage() {
+function StoredDataInventoryPage() {
   const router = useRouter()
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const [search, setSearch] = React.useState("")
@@ -222,5 +224,15 @@ export default function InventoryPage() {
         </QueryStates>
       </div>
     </>
+  )
+}
+
+/** While provider data is read live, this page shows its live replacement;
+ * otherwise the stored-data screen is unchanged. */
+export default function Page() {
+  return (
+    <LiveModeGate live={<LiveInventory />}>
+      <StoredDataInventoryPage />
+    </LiveModeGate>
   )
 }

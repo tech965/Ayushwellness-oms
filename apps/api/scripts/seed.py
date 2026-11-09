@@ -85,11 +85,9 @@ PERMISSIONS: dict[str, str] = {
     ),
     "calls.manage": "Telecaller: view own assigned orders, log calls, manage own follow-ups",
     "shipment_staff.manage": (
-        "Shipment Staff: view/process shipments for orders confirmed by the Telecallers "
-        "assigned to them (User.shipment_staff_id) — read confirmed orders/shipments/NDR/RTO "
-        "in that scope, create shipments, assign AWB, request pickup, refresh tracking, "
-        "retry Shopify sync. Never grants unscoped orders.read/shipments.read/ndr.*/rto.* — "
-        "those would let a Shipment Staff user bypass their scope via the general endpoints."
+        "Shipment Staff: process shipments (create, AWB, pickup, tracking, Shopify retry) "
+        "for orders confirmed by their assigned Telecallers. Scoped; never grants "
+        "unscoped orders/shipments/ndr/rto access."
     ),
     "chat.use": (
         "Use the OMS AI Assistant (natural-language questions). Each answer "

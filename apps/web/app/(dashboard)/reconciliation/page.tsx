@@ -26,6 +26,8 @@ import {
   type ReconciliationResultStatus,
   type ReconciliationRun,
 } from "@/types/reconciliation"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
+import { LiveUnavailable } from "@/components/shared/live-unavailable"
 
 function TriggerRunButton() {
   const { hasPermission } = useAuth()
@@ -214,7 +216,7 @@ function ResultsSection({ runId }: { runId: string | null }) {
   )
 }
 
-export default function ReconciliationPage() {
+function StoredDataReconciliationPage() {
   const [selectedRunId, setSelectedRunId] = React.useState<string | null>(null)
 
   return (
@@ -249,5 +251,16 @@ export default function ReconciliationPage() {
         </section>
       </div>
     </>
+  )
+}
+
+/** While provider data is read live, this page shows its live replacement
+ * (or an explanation); otherwise the stored-data screen is unchanged.
+ */
+export default function Page() {
+  return (
+    <LiveModeGate live={<LiveUnavailable title="Reconciliation" operation="cashfree_per_order_refunds" fallbackReason="Reconciliation compares stored records with the providers. Use the live payment verification on each order instead." />}>
+      <StoredDataReconciliationPage />
+    </LiveModeGate>
   )
 }

@@ -25,6 +25,8 @@ import { istEndOfDay, istStartOfDay } from "@/lib/ist-date"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useSupplyIntelligence } from "@/services/supply-intelligence"
 import type { MapMetric } from "@/types/supply-intelligence"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
+import { LiveUnavailable } from "@/components/shared/live-unavailable"
 
 const FILTER_DEFAULTS = { date_from: "", date_to: "", state: "" }
 
@@ -70,7 +72,7 @@ function downloadStatesCsv(states: { state: string; orders: number; revenue: str
   window.URL.revokeObjectURL(url)
 }
 
-export default function SupplyIntelligencePage() {
+function StoredDataSupplyIntelligencePage() {
   return (
     <React.Suspense fallback={<Skeleton className="h-[600px] w-full" />}>
       <SupplyIntelligenceContent />
@@ -222,5 +224,16 @@ function SupplyIntelligenceContent() {
         </div>
       )}
     </>
+  )
+}
+
+/** While provider data is read live, this page shows its live replacement
+ * (or an explanation); otherwise the stored-data screen is unchanged.
+ */
+export default function Page() {
+  return (
+    <LiveModeGate live={<LiveUnavailable title="Supply intelligence" operation="shiprocket_aggregates" fallbackReason="This report is built from stored shipment and order history, which is not kept in live mode." />}>
+      <StoredDataSupplyIntelligencePage />
+    </LiveModeGate>
   )
 }

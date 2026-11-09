@@ -33,6 +33,7 @@ payment webhook, which still requires its order id.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from decimal import Decimal
 from typing import Any
@@ -53,6 +54,7 @@ from app.integrations.cashfree.normalizer import (
     parse_iso_datetime,
 )
 from app.integrations.cashfree.webhooks import resolve_webhook_secret, verify_webhook_signature
+from app.integrations.shopify.live_webhooks import process_live_webhook
 from app.models.integration import IntegrationCode
 from app.repositories.integration import IntegrationRepository
 from app.services.cashfree_payment_service import CashfreePaymentService
@@ -137,6 +139,25 @@ async def receive_cashfree_payment_webhook(
         logger.warning("cashfree_webhook_malformed_payload", reason="missing_order_id")
         raise HTTPException(status_code=400, detail="Payload is missing data.order.order_id.")
 
+    if settings.SHOPIFY_LIVE_MODE:
+        # API-first: signature already verified above. Payment state is read
+        # live from Cashfree, so this event needs no OMS-side effect; it is
+        # acknowledged and de-duplicated by (type, cf_payment_id) only. The
+        # payload is neither stored nor processed.
+        live_payment_id = payment_data.get("cf_payment_id")
+        await process_live_webhook(
+            session=session,
+            provider="cashfree",
+            topic=str(event_type) if event_type else "unknown",
+            delivery_id=(
+                f"{event_type}:{live_payment_id}"
+                if live_payment_id is not None
+                else hashlib.sha256(raw_body).hexdigest()
+            ),
+            payload=payload,
+        )
+        return {"success": True}
+
     integration = await IntegrationRepository(session).get_by_code(IntegrationCode.CASHFREE)
     if integration is None:
         raise HTTPException(status_code=404, detail="Cashfree integration is not configured.")
@@ -168,9 +189,7 @@ async def receive_cashfree_payment_webhook(
         return {"success": True}
 
     if event_type not in RECOGNIZED_WEBHOOK_TYPES:
-        await webhook_service.mark_ignored(
-            event_id, reason=f"unrecognized_event_type:{event_type}"
-        )
+        await webhook_service.mark_ignored(event_id, reason=f"unrecognized_event_type:{event_type}")
         logger.warning("cashfree_webhook_unrecognized_type", event_type=event_type)
         return {"success": True}
 

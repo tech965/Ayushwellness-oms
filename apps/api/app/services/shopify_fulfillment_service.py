@@ -247,6 +247,13 @@ class ShopifyFulfillmentService:
     async def sync_fulfillment_for_shipment(
         self, shipment_id: uuid.UUID, *, actor: User | None
     ) -> Shipment:
+        from app.core.config import settings as _settings
+
+        if _settings.SHOPIFY_LIVE_MODE:
+            from app.services.live_shiprocket import LiveShiprocketService, live_ref_for
+
+            if await live_ref_for(self.session, shipment_id) is not None:
+                return await LiveShiprocketService(self.session).retry_shopify_sync(shipment_id)
         """Pushes this shipment to Shopify as a real `Fulfillment`, or
         determines it doesn't need to be (not a Shopify order, no AWB
         yet). Safe to call more than once for the same shipment:
@@ -438,7 +445,7 @@ class ShopifyFulfillmentService:
         confirm/resync (`POST /orders/{id}/shopify/retry-confirmation-sync`)
         naturally retries it.
         """
-        order = await self.orders.get_by_id(order_id)
+        order = await self.orders.get_by_id(order_id)  # live-aware (OrderRepository)
         if order is None or not order.shopify_order_id:
             return
 
@@ -494,7 +501,7 @@ class ShopifyFulfillmentService:
         failure. A failure here is logged only; the next successful
         unconfirm naturally retries it.
         """
-        order = await self.orders.get_by_id(order_id)
+        order = await self.orders.get_by_id(order_id)  # live-aware (OrderRepository)
         if order is None or not order.shopify_order_id:
             return
 
@@ -559,7 +566,7 @@ class ShopifyFulfillmentService:
         is logged and never raised, and never blocks or rolls back the
         other half or the OMS call log that already committed.
         """
-        order = await self.orders.get_by_id(order_id)
+        order = await self.orders.get_by_id(order_id)  # live-aware (OrderRepository)
         if order is None or not order.shopify_order_id:
             return
 
@@ -571,9 +578,7 @@ class ShopifyFulfillmentService:
         outcome_tag = OUTCOME_TAGS.get(outcome)
         if outcome_tag is not None:
             tags_to_add.append(outcome_tag)
-        tags_to_remove.extend(
-            label for key, label in OUTCOME_TAGS.items() if key != outcome
-        )
+        tags_to_remove.extend(label for key, label in OUTCOME_TAGS.items() if key != outcome)
 
         adapter = self._get_adapter()
         order_gid = f"gid://shopify/Order/{order.shopify_order_id}"

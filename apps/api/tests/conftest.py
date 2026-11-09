@@ -8,6 +8,7 @@ against both.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -24,11 +25,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-_engine = create_async_engine(
-    "sqlite+aiosqlite://",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
+# By default tests run on in-memory SQLite. Set OMS_TEST_DATABASE_URL to a
+# DISPOSABLE PostgreSQL (e.g. postgresql+asyncpg://postgres@127.0.0.1:5432/oms_test)
+# to run the same suite against real PostgreSQL transactions, foreign keys and
+# row locks. The schema is created/dropped per test; never point this at a
+# shared or production database.
+_PG_URL = os.environ.get("OMS_TEST_DATABASE_URL")
+
+if _PG_URL:
+    from sqlalchemy.pool import NullPool
+
+    _engine = create_async_engine(_PG_URL, poolclass=NullPool)
+else:
+    _engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
 _TestSessionLocal = async_sessionmaker(bind=_engine, class_=AsyncSession, expire_on_commit=False)
 
 

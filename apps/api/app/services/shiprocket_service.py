@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import ConflictError, IntegrationError, NotFoundError
 from app.core.logging import get_logger
 from app.integrations.entity_sync import ENTITY_UPSERT_HANDLERS
@@ -39,6 +40,7 @@ from app.repositories.shipment import ShipmentRepository
 from app.services.audit_service import AuditService
 from app.services.courier_service import CourierService
 from app.services.inventory_service import InventoryService
+from app.services.live_shiprocket import LiveShiprocketService, live_ref_for
 from app.services.ndr_service import NDRService
 from app.services.shipment_service import ShipmentService
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
@@ -58,6 +60,10 @@ logger = get_logger(__name__)
 # handlers (`ShipmentActionCell` et al.), which open this URL and copy
 # the id to the clipboard together.
 SHIPROCKET_READY_TO_SHIP_URL = "https://app.shiprocket.in/seller/orders/readytoship"
+
+
+async def _is_live_ref(session: AsyncSession, shipment_id: uuid.UUID) -> bool:
+    return await live_ref_for(session, shipment_id) is not None
 
 
 def shiprocket_order_id(shipment: Shipment | None) -> str | None:
@@ -342,6 +348,18 @@ class ShiprocketOperationsService:
         if order is None:
             raise NotFoundError("Order not found.")
 
+        if settings.SHOPIFY_LIVE_MODE:
+            # API-first: shipment state lives in Shiprocket; only a
+            # reference is stored (see `LiveShiprocketService`).
+            return await LiveShiprocketService(self.session).create_for_order(
+                order_id,
+                actor=actor,
+                length_cm=length_cm,
+                breadth_cm=breadth_cm,
+                height_cm=height_cm,
+                weight_kg=weight_kg,
+            )
+
         await self._check_shippable(order)
 
         config = ShiprocketConfig.from_settings()
@@ -452,6 +470,10 @@ class ShiprocketOperationsService:
     async def assign_awb(
         self, shipment_id: uuid.UUID, *, actor: User | None, courier_id: str | None
     ) -> Shipment:
+        if settings.SHOPIFY_LIVE_MODE and await _is_live_ref(self.session, shipment_id):
+            return await LiveShiprocketService(self.session).assign_awb(
+                shipment_id, actor=actor, courier_id=courier_id
+            )
         shipment = await self._get_shipment(shipment_id)
         if not shipment.shiprocket_shipment_id:
             raise ConflictError(
@@ -673,6 +695,8 @@ class ShiprocketOperationsService:
         ]
 
     async def cancel_shipment(self, shipment_id: uuid.UUID, *, actor: User | None) -> Shipment:
+        if settings.SHOPIFY_LIVE_MODE and await _is_live_ref(self.session, shipment_id):
+            return await LiveShiprocketService(self.session).cancel(shipment_id, actor=actor)
         shipment = await self._get_shipment(shipment_id)
         if not shipment.shiprocket_shipment_id:
             raise ConflictError(
@@ -697,6 +721,10 @@ class ShiprocketOperationsService:
         return shipment
 
     async def request_pickup(self, shipment_id: uuid.UUID, *, actor: User | None) -> Shipment:
+        if settings.SHOPIFY_LIVE_MODE and await _is_live_ref(self.session, shipment_id):
+            return await LiveShiprocketService(self.session).request_pickup(
+                shipment_id, actor=actor
+            )
         shipment = await self._get_shipment(shipment_id)
         if not shipment.shiprocket_shipment_id:
             raise ConflictError(
@@ -731,6 +759,8 @@ class ShiprocketOperationsService:
     async def refresh_tracking_for_shipment(
         self, shipment_id: uuid.UUID, *, actor: User | None
     ) -> Shipment:
+        if settings.SHOPIFY_LIVE_MODE and await _is_live_ref(self.session, shipment_id):
+            return await LiveShiprocketService(self.session).refresh(shipment_id, actor=actor)
         shipment = await self._get_shipment(shipment_id)
         if not shipment.awb:
             raise ConflictError("Shipment has no AWB yet — assign one first.")

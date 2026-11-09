@@ -33,7 +33,7 @@ declare global {
 
 let cashfreeSdkPromise: Promise<void> | null = null
 
-function loadCashfreeSdk(): Promise<void> {
+export function loadCashfreeSdk(): Promise<void> {
   if (typeof window === "undefined") return Promise.resolve()
   if (window.Cashfree) return Promise.resolve()
   cashfreeSdkPromise ??= new Promise((resolve, reject) => {

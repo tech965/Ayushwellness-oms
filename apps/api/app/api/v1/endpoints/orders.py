@@ -10,11 +10,14 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
-from app.core.exceptions import AuthorizationError
+from app.core.config import settings
+from app.core.exceptions import AuthorizationError, ValidationError
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user, require_permission
 from app.dependencies.pagination import pagination_params
 from app.dependencies.pagination import sort_params as sort_params_dep
+from app.integrations.registry import get_adapter
+from app.integrations.shopify.live import require_live_reader
 from app.models.auth import User
 from app.models.enums import (
     FulfillmentStatus,
@@ -23,6 +26,7 @@ from app.models.enums import (
     PaymentType,
     ShipmentStatus,
 )
+from app.models.integration import IntegrationCode
 from app.models.order import Order
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.customer import CustomerResponse
@@ -51,11 +55,26 @@ from app.schemas.shiprocket import (
     ShiprocketShipRequest,
 )
 from app.services.address_validation_service import AddressValidationService
+from app.services.export_service import ExportService, add_incomplete_note
+from app.services.live_collect import EXPORT_MAX_PAGES, collect_orders
+from app.services.live_order_service import LiveOrderService
+from app.services.live_orders import get_reader, hydrate_order
 from app.services.order_service import OrderService
 from app.services.shiprocket_service import ShiprocketOperationsService, shiprocket_order_id
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
 router = APIRouter()
+
+LIVE_UNSUPPORTED_FILTERS = ("shipment_status", "courier_id", "customer_id")
+
+
+def _reject_live_unsupported(filters: dict) -> None:
+    used = [name for name in LIVE_UNSUPPORTED_FILTERS if filters.get(name) is not None]
+    if used:
+        raise ValidationError(
+            "These filters are not available in live-data mode "
+            f"(they depend on Shiprocket/local customer data): {', '.join(used)}."
+        )
 
 
 def _order_filters(
@@ -197,6 +216,21 @@ async def list_orders(
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("orders.read")),
 ) -> PaginatedResponse[OrderListResponse]:
+    if settings.SHOPIFY_LIVE_MODE:
+        # API-first: Shopify order content is read live and merged with
+        # OMS workflow state; nothing is read from or written to the
+        # local `orders` tables. `sort_params` is not applied -- Shopify
+        # returns most-recently-updated first.
+        live = await LiveOrderService(
+            session, require_live_reader(get_adapter(IntegrationCode.SHOPIFY))
+        ).list_orders(page_params=page_params, **filters)
+        meta = build_pagination_meta(total_items=live.total_items, page_params=page_params)
+        meta.total_pages = live.total_pages
+        meta.has_more = live.has_more
+        meta.total_is_estimate = live.total_is_estimate
+        meta.warnings = live.warnings or None
+        return PaginatedResponse(data=live.items, meta=meta)
+
     items, total = await OrderService(session).list_orders(
         page_params=page_params, sort_params=sort_params, **filters
     )
@@ -216,6 +250,27 @@ async def export_orders(
     `list_orders`, capped at `ExportService.MAX_ROWS` rows) as a real
     `.xlsx` workbook.
     """
+    if settings.SHOPIFY_LIVE_MODE:
+        _reject_live_unsupported(filters)
+        collected = await collect_orders(
+            session,
+            get_reader(),
+            max_pages=EXPORT_MAX_PAGES,
+            **{k: v for k, v in filters.items() if k not in LIVE_UNSUPPORTED_FILTERS},
+        )
+        orders = [
+            hydrate_order(o, collected.workflows.get(o["external_id"])) for o in collected.orders
+        ][: ExportService.MAX_ROWS]
+        workbook = ExportService().orders_to_xlsx(orders)
+        headers = {"Content-Disposition": "attachment; filename=orders-export.xlsx"}
+        if collected.incomplete:
+            workbook = add_incomplete_note(workbook, collected.warnings)
+            headers["X-Export-Incomplete"] = "true"
+        return StreamingResponse(
+            iter([workbook]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
     workbook = await OrderService(session).export_orders(filters)
     return StreamingResponse(
         iter([workbook]),

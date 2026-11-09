@@ -15,14 +15,27 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
+from app.core.config import settings
 from app.core.exceptions import AuthorizationError, ConflictError, NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.core.timezone import ist_day_bounds, to_ist
+from app.integrations.registry import get_adapter
+from app.integrations.shopify.live import require_live_reader
 from app.models.auth import User
-from app.models.enums import AssignmentStatus, LeadCategory, TelecallingStatus
+from app.models.checkout_workflow import CheckoutWorkflow
+from app.models.enums import (
+    AssignmentStatus,
+    FulfillmentStatus,
+    LeadCategory,
+    TelecallingStatus,
+)
+from app.models.integration import IntegrationCode
 from app.models.order import Order, OrderEvent
+from app.models.order_workflow import OrderWorkflow
 from app.models.product import ProductVariant
 from app.models.telecalling import CallAttempt, CheckoutAssignment, OrderAssignment
 from app.repositories.abandoned_checkout import AbandonedCheckoutRepository
@@ -36,9 +49,26 @@ from app.repositories.telecalling import (
 )
 from app.schemas.common import PageParams, SortParams
 from app.services.audit_service import AuditService
+from app.services.live_checkouts import (
+    collect_checkouts,
+    fetch_checkouts_by_ids,
+    hydrate_checkout,
+)
+from app.services.live_orders import LOCAL_PREFIX, get_reader, hydrate_order
+from app.services.order_ref import (
+    ensure_checkout_workflow,
+    ensure_workflow,
+    resolve_checkout_ref,
+    resolve_ref,
+)
 from app.services.order_service import OrderService
 
 logger = get_logger(__name__)
+
+# Upper bound on one scope's active assignments loaded for a live listing.
+LIVE_ASSIGNMENT_CAP = 1000
+# Shopify pages (100 orders each) crawled to build a live lead pool.
+LIVE_POOL_PAGES = 20
 
 # "Connected" isn't a `TelecallingStatus` value of its own any more (the
 # 2026-09-30 status simplification removed the old literal CONNECTED
@@ -114,6 +144,9 @@ class TelecallingService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.assignments = OrderAssignmentRepository(session)
+        # Set by the live pool builders when their bounded Shopify crawl
+        # stopped early; endpoints surface it as an incomplete-result warning.
+        self.last_pool_incomplete = False
         self.call_attempts = CallAttemptRepository(session)
         self.orders = OrderRepository(session)
         self.users = UserRepository(session)
@@ -143,6 +176,18 @@ class TelecallingService:
         q: str | None = None,
     ) -> tuple[list[OrderAssignment], int]:
         follow_up_from, follow_up_to = _follow_up_window(when)
+        if settings.SHOPIFY_LIVE_MODE:
+            return await self._list_assignments_live(
+                scope=scope,
+                page_params=page_params,
+                unfulfilled_only=unfulfilled_only,
+                call_status=call_status,
+                follow_up_from=follow_up_from,
+                follow_up_to=follow_up_to,
+                date_from=date_from,
+                date_to=date_to,
+                q=q,
+            )
         query = self.assignments.search_query(
             assigned_to=scope.assigned_to,
             team_leader_id=scope.team_leader_id,
@@ -162,6 +207,184 @@ class TelecallingService:
         )
         return list(items), total
 
+    async def attach_live_orders(self, assignments: list[OrderAssignment]) -> list[OrderAssignment]:
+        """Attaches each assignment's CURRENT order, fetched live from
+        Shopify in batched calls, as an in-memory value (never flushed).
+        Assignments whose order Shopify no longer returns (and that have
+        no local historical row) are omitted from the result."""
+        if not assignments:
+            return []
+        workflows = (
+            (
+                await self.session.execute(
+                    select(OrderWorkflow).where(
+                        OrderWorkflow.id.in_({a.order_id for a in assignments})
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_id = {w.id: w for w in workflows}
+        external_ids = [
+            w.external_order_id
+            for w in workflows
+            if not w.external_order_id.startswith(LOCAL_PREFIX)
+        ]
+        live = {}
+        if external_ids:
+            for data in await get_reader().get_orders_by_ids(external_ids):
+                live[data["external_id"]] = data
+        kept: list[OrderAssignment] = []
+        for assignment in assignments:
+            workflow = by_id.get(assignment.order_id)
+            data = live.get(workflow.external_order_id) if workflow else None  # type: ignore[assignment]
+            if data is not None:
+                set_committed_value(assignment, "order", hydrate_order(data, workflow))
+                kept.append(assignment)
+            elif workflow is not None and workflow.external_order_id.startswith(LOCAL_PREFIX):
+                local = await self.orders.get_by_id(assignment.order_id)
+                if local is not None:
+                    set_committed_value(assignment, "order", local)
+                    kept.append(assignment)
+        dropped = len(assignments) - len(kept)
+        if dropped:
+            logger.warning("live_assignments_without_shopify_order", dropped=dropped)
+        return kept
+
+    async def _list_assignments_live(
+        self,
+        *,
+        scope: ScopeFilter,
+        page_params: PageParams,
+        unfulfilled_only: bool,
+        call_status: str | None,
+        follow_up_from: datetime | None,
+        follow_up_to: datetime | None,
+        date_from: datetime | None,
+        date_to: datetime | None,
+        q: str | None,
+    ) -> tuple[list[OrderAssignment], int]:
+        query = self.assignments.search_query(
+            assigned_to=scope.assigned_to,
+            team_leader_id=scope.team_leader_id,
+            call_status=call_status,
+            follow_up_from=follow_up_from,
+            follow_up_to=follow_up_to,
+        ).limit(LIVE_ASSIGNMENT_CAP)
+        rows = list((await self.session.execute(query)).scalars().all())
+        if len(rows) >= LIVE_ASSIGNMENT_CAP:
+            logger.warning("live_assignment_cap_reached", cap=LIVE_ASSIGNMENT_CAP)
+        attached = await self.attach_live_orders(rows)
+
+        needle = q.lower() if q else None
+        matched: list[OrderAssignment] = []
+        for assignment in attached:
+            order = assignment.order
+            if unfulfilled_only and order.fulfillment_status != FulfillmentStatus.UNFULFILLED:
+                continue
+            if date_from is not None and order.order_datetime < date_from:
+                continue
+            if date_to is not None and order.order_datetime > date_to:
+                continue
+            if needle:
+                haystack = " ".join(
+                    filter(
+                        None,
+                        [
+                            order.order_number,
+                            order.customer.full_name if order.customer else None,
+                            order.customer.phone if order.customer else None,
+                        ],
+                    )
+                ).lower()
+                if needle not in haystack:
+                    continue
+            matched.append(assignment)
+        matched.sort(key=lambda a: a.order.order_datetime, reverse=True)
+        start = (page_params.page - 1) * page_params.page_size
+        return matched[start : start + page_params.page_size], len(matched)
+
+    async def _pool_live(
+        self,
+        *,
+        scope: ScopeFilter,
+        page_params: PageParams,
+        call_status: str | None,
+        date_from: datetime | None,
+        date_to: datetime | None,
+        category: LeadCategory | None,
+        unfulfilled_only: bool,
+    ):
+        """Live lead pool: Shopify orders (bounded crawl) that are either
+        unassigned or already on the caller's team, paired with their
+        active assignment. Same membership rules as the stored-data pools."""
+        from sqlalchemy.orm import selectinload
+
+        from app.services.lead_classification import classify_order
+        from app.services.live_collect import collect_orders
+        from app.services.order_ref import ref_id_for
+
+        collected = await collect_orders(
+            self.session,
+            get_reader(),
+            date_from=date_from,
+            date_to=date_to,
+            fulfillment_status=FulfillmentStatus.UNFULFILLED if unfulfilled_only else None,
+            shopify_fulfillment_status="unfulfilled" if unfulfilled_only else None,
+            max_pages=LIVE_POOL_PAGES,
+        )
+        self.last_pool_incomplete = collected.incomplete
+        if collected.incomplete:
+            logger.warning("live_pool_incomplete", pages=LIVE_POOL_PAGES)
+        ref_ids = {
+            o["external_id"]: ref_id_for(
+                o["external_id"], collected.workflows.get(o["external_id"])
+            )
+            for o in collected.orders
+        }
+        assignments: dict = {}
+        ids = list(ref_ids.values())
+        for start in range(0, len(ids), 500):
+            rows = (
+                (
+                    await self.session.execute(
+                        select(OrderAssignment)
+                        .where(
+                            OrderAssignment.order_id.in_(ids[start : start + 500]),
+                            OrderAssignment.assignment_status == AssignmentStatus.ACTIVE,
+                        )
+                        .options(selectinload(OrderAssignment.telecaller))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assignments.update({a.order_id: a for a in rows})
+
+        pairs = []
+        for data in collected.orders:
+            assignment = assignments.get(ref_ids[data["external_id"]])
+            if (
+                assignment is not None
+                and scope.team_leader_id is not None
+                and assignment.team_leader_id != scope.team_leader_id
+            ):
+                continue
+            if call_status and (assignment is None or assignment.current_status != call_status):
+                continue
+            order = hydrate_order(data, collected.workflows.get(data["external_id"]))
+            lead_category = classify_order(
+                payment_type=order.payment_type, fulfillment_status=order.fulfillment_status
+            )
+            if lead_category is None:
+                continue
+            if category is not None and lead_category != category:
+                continue
+            pairs.append((order, assignment))
+        start = (page_params.page - 1) * page_params.page_size
+        return pairs[start : start + page_params.page_size], len(pairs)
+
     async def list_unfulfilled_pool(
         self,
         *,
@@ -171,6 +394,16 @@ class TelecallingService:
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ):
+        if settings.SHOPIFY_LIVE_MODE:
+            return await self._pool_live(
+                scope=scope,
+                page_params=page_params,
+                call_status=call_status,
+                date_from=date_from,
+                date_to=date_to,
+                category=None,
+                unfulfilled_only=True,
+            )
         return await self.assignments.list_unfulfilled_pool(
             team_leader_id=scope.team_leader_id,
             call_status=call_status,
@@ -194,6 +427,16 @@ class TelecallingService:
         `list_unfulfilled_pool` above completely untouched (still backing
         the original all-unfulfilled-regardless-of-payment-type page).
         """
+        if settings.SHOPIFY_LIVE_MODE:
+            return await self._pool_live(
+                scope=scope,
+                page_params=page_params,
+                call_status=call_status,
+                date_from=date_from,
+                date_to=date_to,
+                category=category,
+                unfulfilled_only=False,
+            )
         return await self.assignments.list_category_pool(
             team_leader_id=scope.team_leader_id,
             category=category,
@@ -202,6 +445,219 @@ class TelecallingService:
             date_to=date_to,
             page_params=page_params,
         )
+
+    async def export_checkout_rows(
+        self,
+        *,
+        scope: ScopeFilter,
+        call_status: str | None,
+        date_from: datetime | None,
+        date_to: datetime | None,
+    ) -> tuple[list, bool]:
+        """Every checkout in the caller's pool as (checkout, assignment)
+        pairs, plus whether the result is INCOMPLETE (live crawl bound hit)."""
+        self.last_pool_incomplete = False
+        if settings.SHOPIFY_LIVE_MODE:
+            pairs, _ = await self._list_checkout_pool_live(
+                scope=scope,
+                page_params=PageParams.model_construct(page=1, page_size=1_000_000),
+                call_status=call_status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            return pairs, self.last_pool_incomplete
+        rows: list = []
+        page = 1
+        while True:
+            pairs, total = await self.list_checkout_pool(
+                scope=scope,
+                page_params=PageParams(page=page, page_size=200),
+                call_status=call_status,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            rows.extend(pairs)
+            if not pairs or len(rows) >= total:
+                return rows, False
+            page += 1
+
+    async def attach_live_checkouts(
+        self, assignments: list[CheckoutAssignment]
+    ) -> list[CheckoutAssignment]:
+        """Attaches each assignment's CURRENT checkout (fetched live, in
+        batches) as an in-memory value. Assignments whose checkout Shopify
+        no longer returns (and that have no local historical row) are
+        omitted rather than shown from stale data."""
+        if not assignments:
+            return []
+        workflows = {
+            w.id: w
+            for w in (
+                await self.session.execute(
+                    select(CheckoutWorkflow).where(
+                        CheckoutWorkflow.id.in_({a.checkout_id for a in assignments})
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        }
+        external = [
+            w.external_checkout_id
+            for w in workflows.values()
+            if not w.external_checkout_id.startswith(LOCAL_PREFIX)
+        ]
+        live = (
+            {c["external_id"]: c for c in await fetch_checkouts_by_ids(external)}
+            if external
+            else {}
+        )
+        kept: list[CheckoutAssignment] = []
+        for assignment in assignments:
+            workflow = workflows.get(assignment.checkout_id)
+            data = live.get(workflow.external_checkout_id) if workflow else None
+            if data is not None:
+                set_committed_value(assignment, "checkout", hydrate_checkout(data, workflow))
+                kept.append(assignment)
+            elif workflow is not None and workflow.external_checkout_id.startswith(LOCAL_PREFIX):
+                local = await self.checkouts.get_by_id(assignment.checkout_id)
+                if local is not None:
+                    set_committed_value(assignment, "checkout", local)
+                    kept.append(assignment)
+        if len(kept) != len(assignments):
+            logger.warning(
+                "live_checkout_assignments_without_shopify_checkout",
+                dropped=len(assignments) - len(kept),
+            )
+        return kept
+
+    async def _list_checkout_assignments_live(
+        self,
+        *,
+        scope: ScopeFilter,
+        page_params: PageParams,
+        call_status: str | None,
+        follow_up_from: datetime | None,
+        follow_up_to: datetime | None,
+        date_from: datetime | None,
+        date_to: datetime | None,
+    ) -> tuple[list[CheckoutAssignment], int]:
+        query = self.checkout_assignments.search_query(
+            assigned_to=scope.assigned_to,
+            team_leader_id=scope.team_leader_id,
+            call_status=call_status,
+            follow_up_from=follow_up_from,
+            follow_up_to=follow_up_to,
+        ).limit(LIVE_ASSIGNMENT_CAP)
+        rows = list((await self.session.execute(query)).scalars().all())
+        attached = await self.attach_live_checkouts(rows)
+        kept = [
+            a
+            for a in attached
+            if (date_from is None or (a.checkout.checkout_created_at or date_from) >= date_from)
+            and (date_to is None or (a.checkout.checkout_created_at or date_to) <= date_to)
+        ]
+        kept.sort(key=lambda a: a.checkout.checkout_created_at or a.created_at, reverse=True)
+        start = (page_params.page - 1) * page_params.page_size
+        return kept[start : start + page_params.page_size], len(kept)
+
+    async def _list_checkout_pool_live(
+        self,
+        *,
+        scope: ScopeFilter,
+        page_params: PageParams,
+        call_status: str | None,
+        date_from: datetime | None,
+        date_to: datetime | None,
+    ):
+        from sqlalchemy.orm import selectinload
+
+        from app.services.order_ref import checkout_ref_id_for
+
+        checkouts, workflows, incomplete = await collect_checkouts(
+            self.session, date_from=date_from, date_to=date_to, max_pages=LIVE_POOL_PAGES
+        )
+        self.last_pool_incomplete = incomplete
+        if incomplete:
+            logger.warning("live_checkout_pool_incomplete", pages=LIVE_POOL_PAGES)
+        ref_ids = {
+            c["external_id"]: checkout_ref_id_for(c["external_id"], workflows.get(c["external_id"]))
+            for c in checkouts
+        }
+        assignments: dict = {}
+        ids = list(ref_ids.values())
+        for start in range(0, len(ids), 500):
+            rows = (
+                (
+                    await self.session.execute(
+                        select(CheckoutAssignment)
+                        .where(
+                            CheckoutAssignment.checkout_id.in_(ids[start : start + 500]),
+                            CheckoutAssignment.assignment_status == AssignmentStatus.ACTIVE,
+                        )
+                        .options(selectinload(CheckoutAssignment.telecaller))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assignments.update({a.checkout_id: a for a in rows})
+        pairs = []
+        for data in checkouts:
+            assignment = assignments.get(ref_ids[data["external_id"]])
+            if (
+                assignment is not None
+                and scope.team_leader_id is not None
+                and assignment.team_leader_id != scope.team_leader_id
+            ):
+                continue
+            if call_status and (assignment is None or assignment.current_status != call_status):
+                continue
+            pairs.append((hydrate_checkout(data, workflows.get(data["external_id"])), assignment))
+        start = (page_params.page - 1) * page_params.page_size
+        return pairs[start : start + page_params.page_size], len(pairs)
+
+    async def _resolve_assignable_checkout_ids(
+        self, checkout_ids: list[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        """Live mode: validate each checkout (workflow row, live reference,
+        or historical local row), verify live references against Shopify in
+        one batch, refuse recovered ones, and ensure the workflow row."""
+        resolved: dict[uuid.UUID, uuid.UUID] = {}
+        to_verify: dict[str, uuid.UUID] = {}
+        recovered_check: dict[str, uuid.UUID] = {}
+        for checkout_id in checkout_ids:
+            ref = await resolve_checkout_ref(self.session, checkout_id)
+            if ref is not None:
+                external, workflow = ref
+                if workflow is not None:
+                    resolved[checkout_id] = workflow.id
+                    if not external.startswith(LOCAL_PREFIX):
+                        recovered_check[external] = checkout_id
+                else:
+                    to_verify[external] = checkout_id
+                    recovered_check[external] = checkout_id
+            elif await self.checkouts.get_by_id(checkout_id) is not None:
+                resolved[checkout_id] = checkout_id
+            else:
+                raise NotFoundError(f"Abandoned checkout {checkout_id} not found.")
+
+        if recovered_check:
+            live = {
+                c["external_id"]: c for c in await fetch_checkouts_by_ids(list(recovered_check))
+            }
+            for external, checkout_id in recovered_check.items():
+                data = live.get(external)
+                if data is None:
+                    raise NotFoundError(f"Abandoned checkout {checkout_id} not found in Shopify.")
+                if data.get("is_recovered"):
+                    raise ConflictError(
+                        f"Checkout {checkout_id} has already been recovered (completed as an "
+                        "order) and can no longer be assigned as a lead."
+                    )
+        for external, checkout_id in to_verify.items():
+            resolved[checkout_id] = (await ensure_checkout_workflow(self.session, external)).id
+        return [resolved[c] for c in checkout_ids]
 
     async def list_checkout_pool(
         self,
@@ -212,6 +668,14 @@ class TelecallingService:
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ):
+        if settings.SHOPIFY_LIVE_MODE:
+            return await self._list_checkout_pool_live(
+                scope=scope,
+                page_params=page_params,
+                call_status=call_status,
+                date_from=date_from,
+                date_to=date_to,
+            )
         return await self.checkout_assignments.list_pool(
             team_leader_id=scope.team_leader_id,
             call_status=call_status,
@@ -226,6 +690,12 @@ class TelecallingService:
         assignment = await self.assignments.get_scoped(
             order_id, assigned_to=scope.assigned_to, team_leader_id=scope.team_leader_id
         )
+        if (
+            assignment is not None
+            and settings.SHOPIFY_LIVE_MODE
+            and not await self.attach_live_orders([assignment])
+        ):
+            assignment = None
         if assignment is None:
             # Deliberately the same error whether the order doesn't exist,
             # has no active assignment, or exists but belongs to someone
@@ -270,6 +740,16 @@ class TelecallingService:
         date_to: datetime | None = None,
     ) -> tuple[list[CheckoutAssignment], int]:
         follow_up_from, follow_up_to = _follow_up_window(when)
+        if settings.SHOPIFY_LIVE_MODE:
+            return await self._list_checkout_assignments_live(
+                scope=scope,
+                page_params=page_params,
+                call_status=call_status,
+                follow_up_from=follow_up_from,
+                follow_up_to=follow_up_to,
+                date_from=date_from,
+                date_to=date_to,
+            )
         query = self.checkout_assignments.search_query(
             assigned_to=scope.assigned_to,
             team_leader_id=scope.team_leader_id,
@@ -293,6 +773,12 @@ class TelecallingService:
         assignment = await self.checkout_assignments.get_scoped(
             checkout_id, assigned_to=scope.assigned_to, team_leader_id=scope.team_leader_id
         )
+        if (
+            assignment is not None
+            and settings.SHOPIFY_LIVE_MODE
+            and not await self.attach_live_checkouts([assignment])
+        ):
+            assignment = None
         if assignment is None:
             raise AuthorizationError("Checkout not found or not assigned to you.")
         return assignment
@@ -613,11 +1099,9 @@ class TelecallingService:
         # "assign" call — the caller must use the explicit reassign
         # action instead ("an already assigned order must not silently
         # be assigned again").
+        order_ids = await self._resolve_assignable_order_ids(order_ids)
         conflicts: list[str] = []
         for order_id in order_ids:
-            order = await self.orders.get_by_id(order_id)
-            if order is None:
-                raise NotFoundError(f"Order {order_id} not found.")
             if await self.assignments.get_active_for_order(order_id) is not None:
                 conflicts.append(str(order_id))
         if conflicts:
@@ -656,6 +1140,47 @@ class TelecallingService:
 
         await self.session.commit()
         return created
+
+    async def _resolve_assignable_order_ids(self, order_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+        """Validates every order exists and returns the reference id to
+        store on each assignment.
+
+        Legacy mode: the order must be a local `orders` row (unchanged).
+        Live mode (`SHOPIFY_LIVE_MODE`): an id may be an `order_workflow`
+        row, a reversible live-order reference, or (for historical
+        non-Shopify rows) a local order. Live references are verified
+        against Shopify in ONE batched call, then an `order_workflow` row
+        (external id + default OMS state, no Shopify fields) is ensured
+        -- the only thing persisted for the order.
+        """
+        if not settings.SHOPIFY_LIVE_MODE:
+            for order_id in order_ids:
+                if await self.orders.get_by_id(order_id) is None:
+                    raise NotFoundError(f"Order {order_id} not found.")
+            return order_ids
+
+        resolved: dict[uuid.UUID, uuid.UUID] = {}
+        to_verify: dict[str, uuid.UUID] = {}
+        for order_id in order_ids:
+            ref = await resolve_ref(self.session, order_id)
+            if ref is not None and ref.workflow is not None:
+                resolved[order_id] = ref.workflow.id
+            elif ref is not None:
+                to_verify[ref.external_order_id] = order_id
+            elif await self.orders.get_by_id(order_id) is not None:
+                resolved[order_id] = order_id
+            else:
+                raise NotFoundError(f"Order {order_id} not found.")
+
+        if to_verify:
+            reader = require_live_reader(get_adapter(IntegrationCode.SHOPIFY))
+            live = await reader.get_orders_by_ids(list(to_verify))
+            present = {o["external_id"] for o in live}
+            for external_id, order_id in to_verify.items():
+                if external_id not in present:
+                    raise NotFoundError(f"Order {order_id} not found in Shopify.")
+                resolved[order_id] = (await ensure_workflow(self.session, external_id)).id
+        return [resolved[order_id] for order_id in order_ids]
 
     async def reassign_order(
         self, *, order_id: uuid.UUID, new_telecaller_id: uuid.UUID, reason: str, actor: User
@@ -735,8 +1260,14 @@ class TelecallingService:
             candidate_ids = telecaller_ids or []
         telecallers = await self._resolve_and_validate_telecallers(candidate_ids, actor=actor)
 
+        if settings.SHOPIFY_LIVE_MODE:
+            checkout_ids = await self._resolve_assignable_checkout_ids(checkout_ids)
         conflicts: list[str] = []
         for checkout_id in checkout_ids:
+            if settings.SHOPIFY_LIVE_MODE:
+                if await self.checkout_assignments.get_active_for_checkout(checkout_id) is not None:
+                    conflicts.append(str(checkout_id))
+                continue
             checkout = await self.checkouts.get_by_id(checkout_id)
             if checkout is None:
                 raise NotFoundError(f"Abandoned checkout {checkout_id} not found.")
@@ -1099,6 +1630,8 @@ class TelecallingService:
             new_value={"next_follow_up_at": next_follow_up_at.isoformat()},
         )
         await self.session.commit()
+        if settings.SHOPIFY_LIVE_MODE:
+            await self.attach_live_orders([assignment])
         return assignment
 
     async def confirm_assigned_order(self, order_id: uuid.UUID, *, actor: User) -> Order:
@@ -1135,9 +1668,7 @@ class TelecallingService:
             try:
                 await self.confirm_assigned_order(order_id, actor=actor)
             except (NotFoundError, AuthorizationError, ConflictError, ValidationError) as exc:
-                results.append(
-                    {"order_id": order_id, "success": False, "message": exc.message}
-                )
+                results.append({"order_id": order_id, "success": False, "message": exc.message})
             except Exception:
                 await self.session.rollback()
                 results.append(
@@ -1349,6 +1880,8 @@ class TelecallingService:
             new_value={"next_follow_up_at": next_follow_up_at.isoformat()},
         )
         await self.session.commit()
+        if settings.SHOPIFY_LIVE_MODE:
+            await self.attach_live_checkouts([assignment])
         return assignment
 
 

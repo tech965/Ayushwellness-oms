@@ -38,7 +38,9 @@ import {
 } from "@/components/shared/date-range-picker"
 import { PageHeader } from "@/components/shared/page-header"
 import { Skeleton } from "@/components/ui/skeleton"
+import { LiveDashboard } from "@/components/dashboard/live-dashboard"
 import { useAuth } from "@/lib/auth-context"
+import { useLiveMode } from "@/services/live"
 import { formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
 import { useAppSettings } from "@/lib/settings-context"
@@ -89,7 +91,7 @@ function DashboardSkeleton() {
   )
 }
 
-export default function DashboardPage() {
+function StoredDataDashboardPage() {
   return (
     <React.Suspense fallback={<DashboardSkeleton />}>
       <DashboardContent />
@@ -485,4 +487,14 @@ function DashboardContent() {
       </div>
     </>
   )
+}
+
+/** While the deployment reads provider data live there is no local copy to
+ * aggregate, so the stored-data dashboard is replaced by the live one.
+ * Until the answer arrives (or if it fails) the stored-data screen is kept.
+ */
+export default function DashboardPage() {
+  const liveMode = useLiveMode()
+  if (liveMode.data?.live_mode) return <LiveDashboard />
+  return <StoredDataDashboardPage />
 }

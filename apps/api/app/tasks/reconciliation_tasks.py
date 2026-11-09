@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal, run_with_cleanup
 from app.services.reconciliation_service import ReconciliationService
@@ -22,6 +23,10 @@ logger = get_logger(__name__)
 
 
 async def _execute_reconciliation_run(run_id: str) -> None:
+    if settings.SHOPIFY_LIVE_MODE:
+        # Reconciliation compares locally stored provider rows with the
+        # providers; there are none to compare in live mode.
+        return
     async with AsyncSessionLocal() as session:
         service = ReconciliationService(session)
         run_uuid = uuid.UUID(run_id)

@@ -16,6 +16,11 @@ export interface PaginationMeta {
   page_size: number
   total_items: number
   total_pages: number
+  /** Live (provider-read) lists only: the exact total is unknown. */
+  has_more?: boolean | null
+  total_is_estimate?: boolean | null
+  /** Live lists only: why the result may be incomplete. */
+  warnings?: string[] | null
 }
 
 export interface PaginatedResponse<T> {

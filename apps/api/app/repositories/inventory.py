@@ -20,6 +20,14 @@ from app.repositories.base import AppendOnlyRepository, BaseRepository
 class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
     model = InventoryMovement
 
+    async def create(self, **fields) -> InventoryMovement:  # noqa: ANN003
+        """Every ledger row carries a warehouse; default to the default one."""
+        if fields.get("warehouse_id") is None:
+            from app.services.inventory_reservation_service import default_warehouse_id
+
+            fields["warehouse_id"] = await default_warehouse_id(self.session)
+        return await super().create(**fields)
+
     async def get_by_id_with_relations(self, id_: uuid.UUID) -> InventoryMovement | None:
         stmt = (
             select(InventoryMovement)

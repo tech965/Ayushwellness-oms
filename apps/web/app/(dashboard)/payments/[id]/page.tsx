@@ -6,7 +6,9 @@ import { useParams } from "next/navigation"
 import { ExternalLink } from "lucide-react"
 import { toast } from "sonner"
 
+import { LivePaymentDetail } from "@/components/payments/live-payment-detail"
 import { PaymentStatusFlow } from "@/components/payments/payment-status-flow"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatusBadge } from "@/components/shared/status-badge"
@@ -27,7 +29,7 @@ import { useWebhookEvents } from "@/services/integrations"
 import { usePayment } from "@/services/payments"
 import { useReconcileCashfreePayment } from "@/services/cashfree"
 
-export default function PaymentDetailPage() {
+function StoredDataPaymentDetailPage() {
   const params = useParams<{ id: string }>()
   const paymentId = params.id
   const { hasPermission } = useAuth()
@@ -272,5 +274,16 @@ function Stat({ label, value, mono }: { label: string; value: string; mono?: boo
         {value}
       </p>
     </div>
+  )
+}
+
+/** Live mode stores no payment record, so the route id is an ORDER id and
+ * the page shows Cashfree's current answer for it. */
+export default function Page() {
+  const params = useParams<{ id: string }>()
+  return (
+    <LiveModeGate live={<LivePaymentDetail orderId={params.id} />}>
+      <StoredDataPaymentDetailPage />
+    </LiveModeGate>
   )
 }

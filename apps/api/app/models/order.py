@@ -58,9 +58,7 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     # scan costing ~700ms per query alone -- the dashboard fires roughly
     # eight such queries per navigation, directly explaining the reported
     # multi-second-to-tens-of-seconds dashboard load delay.
-    order_datetime: Mapped[datetime] = mapped_column(
-        AwareDateTime(), nullable=False, index=True
-    )
+    order_datetime: Mapped[datetime] = mapped_column(AwareDateTime(), nullable=False, index=True)
     currency: Mapped[str] = mapped_column(
         String(8), nullable=False, default="INR", server_default="INR"
     )
@@ -170,9 +168,7 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     # A 0-100 confidence score, matching the Shiprocket-style "82%"
     # display this feature is modeled on — always paired with `status`
     # above, never shown alone.
-    shipping_address_validation_score: Mapped[int | None] = mapped_column(
-        Integer, nullable=True
-    )
+    shipping_address_validation_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     shipping_address_validation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     shipping_address_validated_at: Mapped[datetime | None] = mapped_column(
         AwareDateTime(), nullable=True
@@ -184,9 +180,7 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     shipping_address_validation_provider_ref: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
-    shipping_address_validation_hash: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    shipping_address_validation_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Telecaller attribution for the PENDING->CONFIRMED transition (see
     # `OrderService.confirm_order`) — deliberately NOT the same as
@@ -233,8 +227,12 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     items: Mapped[list[OrderItem]] = relationship(
         back_populates="order", cascade="all, delete-orphan", order_by="OrderItem.created_at"
     )
+    # View-only: events reference `order_workflow.id` (same uuid as this
+    # order's id), so they exist for live-only orders too.
     events: Mapped[list[OrderEvent]] = relationship(
-        back_populates="order", cascade="all, delete-orphan", order_by="OrderEvent.created_at"
+        primaryjoin="Order.id == foreign(OrderEvent.order_id)",
+        viewonly=True,
+        order_by="OrderEvent.created_at",
     )
     payments: Mapped[list[Payment]] = relationship(back_populates="order")
     shipments: Mapped[list[Shipment]] = relationship(back_populates="order")
@@ -277,7 +275,7 @@ class OrderEvent(Base, UUIDPrimaryKeyMixin):
     __tablename__ = "order_events"
 
     order_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("order_workflow.id", ondelete="CASCADE"), nullable=False, index=True
     )
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -294,4 +292,6 @@ class OrderEvent(Base, UUIDPrimaryKeyMixin):
         AwareDateTime(), server_default=func.now(), nullable=False, index=True
     )
 
-    order: Mapped[Order] = relationship(back_populates="events")
+    order: Mapped[Order] = relationship(
+        primaryjoin="foreign(OrderEvent.order_id) == Order.id", viewonly=True
+    )

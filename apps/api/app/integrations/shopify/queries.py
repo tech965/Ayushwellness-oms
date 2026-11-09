@@ -111,6 +111,7 @@ query Orders($first: Int!, $after: String, $query: String) {
       node {
         id
         name
+        email
         createdAt
         updatedAt
         cancelledAt
@@ -238,3 +239,28 @@ def updated_since_filter(since_iso: str) -> str:
     separate "changes since" endpoint exists).
     """
     return f"updated_at:>'{since_iso}'"
+
+
+# Refund READ, verified against shopify.dev (Admin GraphQL, version 2026-10
+# docs): `Order.refunds(first: Int)` returns `[Refund!]!`; `Refund` exposes
+# `id`, `createdAt`, `processedAt`, `note` and `totalRefundedSet: MoneyBag!`;
+# `Order.totalRefundedSet`, `cancelledAt` and `cancelReason` exist.
+# Scope: read_orders (orders older than 60 days additionally need
+# read_all_orders). NOT yet run against a real store.
+ORDER_REFUNDS_QUERY = """
+query OrderRefunds($id: ID!) {
+  order(id: $id) {
+    id
+    cancelledAt
+    cancelReason
+    totalRefundedSet { shopMoney { amount currencyCode } }
+    refunds(first: 50) {
+      id
+      createdAt
+      processedAt
+      note
+      totalRefundedSet { shopMoney { amount currencyCode } }
+    }
+  }
+}
+"""

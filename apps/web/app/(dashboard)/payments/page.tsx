@@ -61,6 +61,8 @@ import {
   type Payment,
   type PaymentStatus,
 } from "@/types/payment"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
+import { LivePayments } from "@/components/payments/live-payments"
 
 const FILTER_DEFAULTS = {
   q: "",
@@ -318,7 +320,7 @@ function PaymentsSkeleton() {
   )
 }
 
-export default function PaymentsPage() {
+function StoredDataPaymentsPage() {
   return (
     <React.Suspense fallback={<PaymentsSkeleton />}>
       <PaymentsPageContent />
@@ -603,5 +605,16 @@ function PaymentsPageContent() {
         </QueryStates>
       </div>
     </>
+  )
+}
+
+/** While provider data is read live, this page shows its live replacement
+ * (or an explanation); otherwise the stored-data screen is unchanged.
+ */
+export default function Page() {
+  return (
+    <LiveModeGate live={<LivePayments />}>
+      <StoredDataPaymentsPage />
+    </LiveModeGate>
   )
 }

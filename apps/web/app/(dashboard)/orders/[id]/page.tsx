@@ -7,6 +7,9 @@ import { ExternalLink, Mail, MapPin, Phone, PhoneCall, RefreshCw, Tag, Truck } f
 import { toast } from "sonner"
 
 import { CashfreePaymentCard } from "@/components/orders/cashfree-payment-card"
+import { LivePaymentCard } from "@/components/orders/live-payment-card"
+import { LiveRefundsCard } from "@/components/orders/live-refunds-card"
+import { LiveModeGate } from "@/components/shared/live-mode-gate"
 import { ProcessShipmentDialog } from "@/components/fulfillment/process-shipment-dialog"
 import { AddressValidationBadge } from "@/components/shared/address-validation-badge"
 import { Breadcrumbs } from "@/components/shared/breadcrumbs"
@@ -443,6 +446,7 @@ function OrderDetailContent() {
             </Card>
 
             <div className="grid gap-4 lg:grid-cols-2">
+              <LiveModeGate live={null}>
               <Card>
                 <CardHeader>
                   <CardTitle>Payments</CardTitle>
@@ -478,8 +482,13 @@ function OrderDetailContent() {
                   )}
                 </CardContent>
               </Card>
+              </LiveModeGate>
 
-              <CashfreePaymentCard orderId={orderId} orderPaymentStatus={order.payment_status} />
+              <LiveModeGate
+                live={<LivePaymentCard orderId={orderId} orderPaymentStatus={order.payment_status} />}
+              >
+                <CashfreePaymentCard orderId={orderId} orderPaymentStatus={order.payment_status} />
+              </LiveModeGate>
 
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between gap-2">
@@ -560,6 +569,7 @@ function OrderDetailContent() {
                 </CardContent>
               </Card>
 
+              <LiveModeGate live={<LiveRefundsCard orderId={orderId} />}>
               <Card>
                 <CardHeader>
                   <CardTitle>Refunds</CardTitle>
@@ -580,6 +590,7 @@ function OrderDetailContent() {
                   )}
                 </CardContent>
               </Card>
+              </LiveModeGate>
             </div>
 
             <Card>

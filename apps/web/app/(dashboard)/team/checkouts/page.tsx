@@ -9,6 +9,7 @@ import {
   DateRangePicker,
   type DateRangeValue,
 } from "@/components/shared/date-range-picker"
+import { LiveResultNotice } from "@/components/shared/live-result-notice"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
@@ -33,6 +34,7 @@ import {
 import { getApiErrorMessage } from "@/lib/api-client"
 import { formatDateTime, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
+import { downloadCheckoutExport } from "@/services/live"
 import { useAssignCheckouts, useTeamCheckouts } from "@/services/team"
 import { CALL_OUTCOME_OPTIONS, type AssignedCheckout } from "@/types/telecalling"
 
@@ -77,6 +79,25 @@ function TeamCheckoutsContent() {
 
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set())
   const [assignOpen, setAssignOpen] = React.useState(false)
+  const [exporting, setExporting] = React.useState(false)
+
+  async function handleExport() {
+    setExporting(true)
+    try {
+      const { incomplete } = await downloadCheckoutExport({
+        call_status: filters.call_status || undefined,
+        date_from: filters.date_from || undefined,
+        date_to: filters.date_to || undefined,
+      })
+      if (incomplete) {
+        toast.warning("The export is incomplete: not every Shopify page could be read.")
+      }
+    } catch (error) {
+      toast.error(getApiErrorMessage(error))
+    } finally {
+      setExporting(false)
+    }
+  }
   const [mode, setMode] = React.useState<"manual" | "equal">("equal")
   const [manualTelecallerId, setManualTelecallerId] = React.useState("")
   const [equalTelecallerIds, setEqualTelecallerIds] = React.useState<Set<string>>(
@@ -192,13 +213,23 @@ function TeamCheckoutsContent() {
         title="Abandoned Checkouts"
         description={
           query.data
-            ? `${query.data.meta.total_items} recovery leads from Shopify — real checkout data only, never fabricated.`
+            ? `${query.data.meta.total_items} recovery leads read live from Shopify — never stored or fabricated.`
             : "Customers who started checkout but never completed the purchase."
         }
         actions={
-          <Button size="sm" disabled={!canAssign} onClick={() => setAssignOpen(true)}>
-            Bulk Assign{canAssign ? ` (${selectedIds.size})` : ""}
-          </Button>
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={exporting}
+              onClick={() => void handleExport()}
+            >
+              Export Excel
+            </Button>
+            <Button size="sm" disabled={!canAssign} onClick={() => setAssignOpen(true)}>
+              Bulk Assign{canAssign ? ` (${selectedIds.size})` : ""}
+            </Button>
+          </>
         }
       />
 
@@ -233,6 +264,8 @@ function TeamCheckoutsContent() {
             Clear
           </Button>
         </div>
+
+        <LiveResultNotice meta={query.data?.meta} />
 
         <QueryStates
           isLoading={query.isLoading}

@@ -179,3 +179,9 @@ def downgrade() -> None:
     op.drop_table("reconciliation_results")
     op.drop_index(op.f("ix_reconciliation_runs_status"), table_name="reconciliation_runs")
     op.drop_table("reconciliation_runs")
+    # `sa.Enum(...)` in upgrade() created these Postgres types as a side
+    # effect of create_table; drop_table does not remove them, so a later
+    # re-upgrade failed with "type ... already exists". Dropped only after
+    # the tables that use them are gone.
+    op.execute("DROP TYPE IF EXISTS reconciliation_status")
+    op.execute("DROP TYPE IF EXISTS reconciliation_run_status")

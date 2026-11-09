@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   ListChecks,
   Map,
+  Store,
   MousePointerClick,
   Package,
   PackageX,
@@ -88,6 +89,17 @@ export const navGroups: NavGroup[] = [
         label: "🤖 Operations Command Center",
         href: "/operations-command-center",
         icon: Activity,
+      },
+    ],
+  },
+  {
+    label: "Marketplaces",
+    items: [
+      {
+        label: "Amazon · Sales Analytics",
+        href: "/marketplaces/amazon/sales-analytics",
+        icon: Store,
+        permission: "analytics.read",
       },
     ],
   },

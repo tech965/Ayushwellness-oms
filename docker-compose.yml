@@ -75,7 +75,7 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - apicd apps/api && PYTHONPATH=. alembic upgrade hea
+      - api
 
 volumes:
   postgres_data:
