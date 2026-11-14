@@ -21,6 +21,7 @@ instance — so only use it if there is exactly one worker running.)
 from __future__ import annotations
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import worker_process_init
 
 from app.core.config import settings
@@ -79,6 +80,7 @@ celery_app = Celery(
         "app.tasks.retry_processing",
         "app.tasks.shiprocket_sync",
         "app.tasks.reconciliation_tasks",
+        "app.tasks.whatsapp_tasks",
         # Provider-specific task modules are added here as needed, e.g.:
         # "app.tasks.delay_detection",
     ],
@@ -203,6 +205,30 @@ celery_app.conf.update(
         "reap-stale-sync-jobs": {
             "task": "sync.reap_stale",
             "schedule": 600.0,
+        },
+        # Message-queue processor: sends anything QUEUED whose
+        # scheduled_send_at has arrived. Frequent (60s) because the
+        # user-facing promise is "scheduled execution at the configured
+        # time", not "within 10 minutes of it".
+        "whatsapp-process-queue": {
+            "task": "whatsapp.process_queue",
+            "schedule": 60.0,
+        },
+        # Checks generic recurring schedules against their own
+        # time_of_day/timezone and queues each one once per local day.
+        "whatsapp-enqueue-recurring-schedules": {
+            "task": "whatsapp.enqueue_recurring_schedules",
+            "schedule": 300.0,
+        },
+        # 9:00 Asia/Kolkata == 3:30 UTC. Celery's global `timezone`
+        # config stays UTC (see module docstring/top of this file) --
+        # converting this one schedule's local-time intent into a fixed
+        # UTC crontab here, rather than changing the global timezone,
+        # keeps every other existing beat entry's behavior unchanged.
+        # IST has no DST, so this offset never drifts.
+        "whatsapp-daily-sales-report": {
+            "task": "whatsapp.send_daily_sales_report",
+            "schedule": crontab(hour=3, minute=30),
         },
     },
 )

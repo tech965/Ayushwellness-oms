@@ -91,3 +91,62 @@ class PollResponse(BaseModel):
     state: str  # processing | done
     chunk_statuses: dict[str, str]
     report: SalesReport | None = None
+
+
+class AccountSalesSummary(BaseModel):
+    """Account-level totals (all ASINs combined) -- never product-wise."""
+
+    currency: str | None
+    total_units_ordered: int
+    total_ordered_revenue: Decimal
+
+
+class OrderItemRow(BaseModel):
+    """One line item -- product fields only, never buyer/address data."""
+
+    asin: str
+    sku: str | None = None
+    product_name: str | None = None
+    units_ordered: int
+    item_price: Decimal | None = None  # None when Amazon gave no price (e.g. gift/promo)
+
+
+class OrderSummary(BaseModel):
+    """One order's product + payment-method breakdown -- deliberately has
+    no buyer name, email, phone or address field, even though Amazon's
+    raw order response includes `BuyerInfo`/`ShippingAddress`.
+    """
+
+    order_id: str
+    order_status: str
+    payment_method: str  # "COD" | "Prepaid" | "Unknown" (from Amazon's own PaymentMethod field)
+    items: list[OrderItemRow]
+
+
+class DayOrdersReport(BaseModel):
+    date: date
+    orders: list[OrderSummary]
+    truncated: bool
+    truncated_note: str | None = None
+
+
+class AccountSalesReport(BaseModel):
+    """Account-level ordered units/revenue from the Sales API
+    (`orderMetrics`, no `sku`/`asin` filter). Independent of the Reports
+    API (`GET_SALES_AND_TRAFFIC_REPORT`) -- has no per-product breakdown
+    and is NOT a substitute for it; see `scope_note`.
+    """
+
+    scope_note: str = (
+        "Account-level totals across all products combined. Not product-wise -- "
+        "per-ASIN/SKU figures require the Reports API, which is currently blocked "
+        "pending Amazon authorization (see /status)."
+    )
+    date_from: date
+    date_to: date
+    fetched_at: datetime
+    summary: AccountSalesSummary
+    daily: list[DailyPoint]
+    weekly: list[PeriodPoint]
+    monthly: list[PeriodPoint]
+    definitions: dict[str, str]

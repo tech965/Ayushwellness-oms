@@ -96,6 +96,55 @@ class AmazonReports:
         data = await self.c.request("orderMetrics", "GET", "/sales/v1/orderMetrics", params=params)
         return data.get("payload", [])
 
+    async def list_orders(self, start: date, end: date) -> list[dict]:
+        """All orders created in [start, end], paginated. Only order-level
+        fields needed for product aggregation are used by callers
+        (AmazonOrderId, PurchaseDate, OrderStatus) -- never buyer/address
+        fields, even though Amazon's raw response may include them.
+        """
+        params: dict = {
+            "MarketplaceIds": self.marketplace_id,
+            "CreatedAfter": f"{start.isoformat()}T00:00:00Z",
+            "CreatedBefore": f"{(end + timedelta(days=1)).isoformat()}T00:00:00Z",
+            "MaxResultsPerPage": 100,
+        }
+        orders: list[dict] = []
+        next_token: str | None = None
+        while True:
+            p = (
+                {"MarketplaceIds": self.marketplace_id, "NextToken": next_token}
+                if next_token
+                else params
+            )
+            data = await self.c.request("getOrders", "GET", "/orders/v0/orders", params=p)
+            payload = data.get("payload", {})
+            orders.extend(payload.get("Orders", []))
+            next_token = payload.get("NextToken")
+            if not next_token:
+                break
+        return orders
+
+    async def order_items(self, order_id: str) -> list[dict]:
+        """Line items for one order, paginated. Only ASIN/SellerSKU/Title/
+        QuantityOrdered/ItemPrice are used by callers -- never PII.
+        """
+        items: list[dict] = []
+        next_token: str | None = None
+        while True:
+            params = {"NextToken": next_token} if next_token else None
+            data = await self.c.request(
+                "getOrderItems",
+                "GET",
+                f"/orders/v0/orders/{order_id}/orderItems",
+                params=params,
+            )
+            payload = data.get("payload", {})
+            items.extend(payload.get("OrderItems", []))
+            next_token = payload.get("NextToken")
+            if not next_token:
+                break
+        return items
+
     async def catalog_titles(self, asins: list[str]) -> dict[str, str]:
         """ASIN -> title, 20 per call. Returns what Amazon gave; missing = absent."""
         out: dict[str, str] = {}

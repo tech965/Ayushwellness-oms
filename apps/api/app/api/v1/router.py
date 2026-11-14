@@ -26,8 +26,11 @@ from app.api.v1.endpoints import (
     couriers,
     customers,
     dashboard,
+    flipkart_sales,
     integrations,
+    internal_whatsapp,
     inventory,
+    marketplace,
     ndr,
     operations_command_center,
     orders,
@@ -37,6 +40,7 @@ from app.api.v1.endpoints import (
     products,
     reconciliation,
     refunds,
+    retention,
     returns,
     roles,
     rto,
@@ -53,6 +57,7 @@ from app.api.v1.endpoints import (
     telecaller,
     users,
     webhook_events,
+    whatsapp_automation,
 )
 from app.api.v1.endpoints import (
     settings as settings_endpoints,
@@ -61,6 +66,7 @@ from app.api.v1.webhooks import cashfree as cashfree_webhooks
 from app.api.v1.webhooks import couriers as courier_webhooks
 from app.api.v1.webhooks import shiprocket as shiprocket_webhooks
 from app.api.v1.webhooks import shopify as shopify_webhooks
+from app.api.v1.webhooks import whatsapp as whatsapp_webhooks
 from app.dependencies.live_mode import unavailable_in_live_mode, unavailable_in_live_mode_for
 
 api_router = APIRouter()
@@ -147,7 +153,11 @@ api_router.include_router(
 api_router.include_router(
     amazon_sales.router, prefix="/marketplaces/amazon/sales", tags=["marketplaces:amazon"]
 )
+api_router.include_router(
+    flipkart_sales.router, prefix="/marketplaces/flipkart/sales", tags=["marketplaces:flipkart"]
+)
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
+api_router.include_router(marketplace.router, prefix="/marketplace", tags=["marketplace"])
 api_router.include_router(sync.router, prefix="/sync", tags=["sync"])
 api_router.include_router(sync_jobs.router, prefix="/sync-jobs", tags=["sync-jobs"])
 api_router.include_router(
@@ -163,6 +173,7 @@ api_router.include_router(
         )
     ],
 )
+api_router.include_router(retention.router, prefix="/admin/retention", tags=["admin:retention"])
 api_router.include_router(webhook_events.router, prefix="/webhook-events", tags=["webhook-events"])
 api_router.include_router(automation.router, prefix="/automation", tags=["automation"])
 api_router.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
@@ -206,4 +217,13 @@ api_router.include_router(
 )
 api_router.include_router(
     cashfree_webhooks.router, prefix="/webhooks/cashfree", tags=["webhooks:cashfree"]
+)
+api_router.include_router(
+    whatsapp_webhooks.router, prefix="/webhooks/whatsapp", tags=["webhooks:whatsapp"]
+)
+api_router.include_router(
+    whatsapp_automation.router, prefix="/whatsapp", tags=["whatsapp:automation"]
+)
+api_router.include_router(
+    internal_whatsapp.router, prefix="/internal/whatsapp", tags=["internal:whatsapp"]
 )

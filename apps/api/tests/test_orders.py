@@ -198,6 +198,60 @@ async def test_duplicate_external_order_id_upserts_instead_of_duplicating(
     assert second.total_amount == Decimal("150.00")
 
 
+async def test_order_detail_exposes_last_synced_at(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """API-first/minimal-storage initiative: the order detail page shows
+    a "Last synced" timestamp instead of silently presenting local data
+    as live -- `last_synced_at` (already a `SyncMetadataMixin` column)
+    must round-trip through `GET /orders/{id}`'s `OrderDetailResponse`.
+    """
+    from datetime import UTC, datetime
+
+    repo = OrderRepository(db_session)
+    synced_at = datetime.now(UTC)
+    order, _ = await repo.upsert_by_external_id(
+        source_system="shopify",
+        external_id="order_sync_1",
+        order_number="SHOP-SYNC-1",
+        order_datetime=synced_at,
+        total_amount=Decimal("100.00"),
+        last_synced_at=synced_at,
+    )
+    await db_session.commit()
+
+    async with await make_authenticated_client(
+        db_session, permission_codes=["orders.read"]
+    ) as auth_client:
+        response = await auth_client.get(f"/api/v1/orders/{order.id}")
+        data = response.json()["data"]
+
+    assert data["source_system"] == "shopify"
+    assert data["last_synced_at"] is not None
+
+
+async def test_order_detail_last_synced_at_is_null_for_manual_order(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    async with await make_authenticated_client(
+        db_session, permission_codes=_ORDER_PERMS
+    ) as auth_client:
+        created = await auth_client.post(
+            "/api/v1/orders", json=_order_payload("OMS-MANUAL-SYNC-1")
+        )
+        order_id = created.json()["data"]["id"]
+
+        response = await auth_client.get(f"/api/v1/orders/{order_id}")
+        data = response.json()["data"]
+
+    # A manually created order is tagged `source_system="manual"` (never
+    # `None`), but it was never pulled/webhook-applied from a platform --
+    # `last_synced_at` stays `None`, which is what the "Last synced"/
+    # "Refresh" UI gates on, not `source_system`.
+    assert data["source_system"] == "manual"
+    assert data["last_synced_at"] is None
+
+
 async def test_order_detail_embeds_customer_when_linked(
     db_session: AsyncSession, make_authenticated_client
 ) -> None:

@@ -44,6 +44,15 @@ from app.models.telecalling import (
     OrderAssignment,
 )
 from app.models.webhook_delivery import WebhookDelivery
+from app.models.whatsapp_automation import (
+    WhatsAppContact,
+    WhatsAppCustomerWindow,
+    WhatsAppQueuedMessage,
+    WhatsAppRecipientGroup,
+    WhatsAppRecipientGroupMember,
+    WhatsAppSchedule,
+    WhatsAppScheduleRecipient,
+)
 
 __all__ = [
     "AbandonedCheckout",
@@ -94,4 +103,11 @@ __all__ = [
     "CheckoutWorkflow",
     "ShipmentRef",
     "WebhookDelivery",
+    "WhatsAppContact",
+    "WhatsAppCustomerWindow",
+    "WhatsAppQueuedMessage",
+    "WhatsAppRecipientGroup",
+    "WhatsAppRecipientGroupMember",
+    "WhatsAppSchedule",
+    "WhatsAppScheduleRecipient",
 ]

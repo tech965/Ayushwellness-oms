@@ -97,6 +97,9 @@ def _isolate_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
         "CASHFREE_CLIENT_ID",
         "CASHFREE_CLIENT_SECRET",
         "CASHFREE_WEBHOOK_SECRET",
+        "WHATSAPP_ACCESS_TOKEN",
+        "WHATSAPP_PHONE_NUMBER_ID",
+        "WHATSAPP_BUSINESS_ACCOUNT_ID",
     ):
         monkeypatch.setattr(settings, attr, None)
 

@@ -26,13 +26,16 @@ from app.integrations.amazon.errors import (
 
 # Documented SP-API limits as (requests/second, burst) -- verified against
 # developer-docs.amazon reference pages (createReport/getReportDocument
-# 0.0167 rps, getReport 2 rps, getOrderMetrics 0.5 rps, Catalog 2 rps burst 2).
+# 0.0167 rps, getReport 2 rps, getOrderMetrics 0.5 rps, Catalog 2 rps burst 2,
+# getOrders 0.0167 rps burst 20, getOrderItems 0.5 rps burst 30).
 RATES: dict[str, tuple[float, int]] = {
     "createReport": (0.0167, 15),
     "getReport": (2.0, 15),
     "getReportDocument": (0.0167, 15),
     "orderMetrics": (0.5, 15),
     "catalog": (2.0, 2),
+    "getOrders": (0.0167, 20),
+    "getOrderItems": (0.5, 30),
 }
 # Never block an HTTP request longer than this waiting for a token; fail
 # with a clear rate-limit error instead.

@@ -79,6 +79,14 @@ PERMISSIONS: dict[str, str] = {
     "webhooks.read": "View webhook event log",
     "reconciliation.read": "View reconciliation runs and results",
     "reconciliation.manage": "Trigger a reconciliation run and resolve mismatches",
+    "marketplace.read": (
+        "View the Marketplace Orders workspace (Amazon/Flipkart/Meesho orders, "
+        "marketplace dashboard, marketplace reports)"
+    ),
+    "marketplace.manage": (
+        "Configure marketplace integrations (Amazon/Flipkart/Meesho) and "
+        "trigger a manual marketplace sync"
+    ),
     "telecalling.manage": (
         "Team Leader: view team orders/telecallers, assign/reassign orders, "
         "view team calling activity and performance"
@@ -124,6 +132,7 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "inventory.read",
         "inventory.manage",
         "chat.use",
+        "marketplace.read",
     ],
     "CUSTOMER_SUPPORT": [
         "customers.read",
@@ -227,6 +236,12 @@ INTEGRATIONS = [
     ("WhatsApp", IntegrationCode.WHATSAPP, IntegrationType.MESSAGING),
     ("Meta", IntegrationCode.META, IntegrationType.SOCIAL),
     ("Instagram", IntegrationCode.INSTAGRAM, IntegrationType.SOCIAL),
+    # Marketplace Orders module, Phase 1 — stub adapters (see
+    # app.integrations.amazon/flipkart/meesho), seeded DISCONNECTED/
+    # disabled like every other row here until real credentials exist.
+    ("Amazon", IntegrationCode.AMAZON, IntegrationType.ECOMMERCE),
+    ("Flipkart", IntegrationCode.FLIPKART, IntegrationType.ECOMMERCE),
+    ("Meesho", IntegrationCode.MEESHO, IntegrationType.ECOMMERCE),
 ]
 
 

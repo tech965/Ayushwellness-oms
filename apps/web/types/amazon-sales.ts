@@ -71,3 +71,46 @@ export interface PollResponse {
   chunk_statuses: Record<string, string>
   report: SalesReport | null
 }
+
+/** Order drill-down: product + payment method only -- no buyer/address
+ * fields exist on this type by design. */
+export interface OrderItemRow {
+  asin: string
+  sku: string | null
+  product_name: string | null
+  units_ordered: number
+  item_price: string | null
+}
+
+export interface OrderSummary {
+  order_id: string
+  order_status: string
+  payment_method: "COD" | "Prepaid" | "Unknown"
+  items: OrderItemRow[]
+}
+
+export interface DayOrdersReport {
+  date: string
+  orders: OrderSummary[]
+  truncated: boolean
+  truncated_note: string | null
+}
+
+/** Account-level totals (all products combined) from the Sales API --
+ * independent of the Reports API. No ASIN/SKU breakdown exists here by
+ * design; see `scope_note`. */
+export interface AccountSalesReport {
+  scope_note: string
+  date_from: string
+  date_to: string
+  fetched_at: string
+  summary: {
+    currency: string | null
+    total_units_ordered: number
+    total_ordered_revenue: string
+  }
+  daily: DailyPoint[]
+  weekly: PeriodPoint[]
+  monthly: PeriodPoint[]
+  definitions: Record<string, string>
+}

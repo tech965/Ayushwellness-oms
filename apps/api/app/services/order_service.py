@@ -121,6 +121,7 @@ class OrderService:
         telecaller_id: uuid.UUID | None = None,
         confirmed_date_from: datetime | None = None,
         confirmed_date_to: datetime | None = None,
+        source_systems: list[str] | None = None,
     ) -> tuple[list[Order], int]:
         query = self.orders.search_query(
             q=q,
@@ -141,6 +142,7 @@ class OrderService:
             telecaller_id=telecaller_id,
             confirmed_date_from=confirmed_date_from,
             confirmed_date_to=confirmed_date_to,
+            source_systems=source_systems,
         )
         items, total = await self.orders.list(
             page_params=page_params, sort_params=sort_params, query=query

@@ -101,6 +101,12 @@ export const navGroups: NavGroup[] = [
         icon: Store,
         permission: "analytics.read",
       },
+      {
+        label: "Flipkart · Orders",
+        href: "/marketplaces/flipkart/orders",
+        icon: Store,
+        permission: "analytics.read",
+      },
     ],
   },
   {
@@ -109,9 +115,68 @@ export const navGroups: NavGroup[] = [
       { label: "Integrations", href: "/integrations", icon: Plug },
       { label: "Reconciliation", href: "/reconciliation", icon: Scale },
       { label: "Automation", href: "/automation", icon: Workflow },
+      {
+        label: "WhatsApp Automation",
+        href: "/automation/whatsapp",
+        icon: Phone,
+        permission: "integrations.read",
+      },
       { label: "Alerts", href: "/alerts", icon: Bell },
       { label: "Tasks", href: "/tasks", icon: ClipboardList },
       { label: "Audit Logs", href: "/audit-logs", icon: History },
+    ],
+  },
+  // Marketplace Orders module, Phase 1 (review meeting, 2026-11-05) --
+  // orders ingested directly from Amazon/Flipkart/Meesho's own seller
+  // APIs (via app.integrations.amazon/flipkart/meesho on the backend,
+  // currently stub adapters -- see that module's docstrings). Deliberately
+  // a SEPARATE nav group/workspace from "Commerce" -> "Orders" above
+  // (Shopify-facing), never merged into it, per the explicit requirement.
+  {
+    label: "Marketplace Management",
+    items: [
+      {
+        label: "Marketplace Dashboard",
+        href: "/marketplace/dashboard",
+        icon: Gauge,
+        permission: "marketplace.read",
+      },
+      {
+        label: "All Marketplace Orders",
+        href: "/marketplace/orders",
+        icon: ShoppingCart,
+        permission: "marketplace.read",
+      },
+      {
+        label: "Amazon Orders",
+        href: "/marketplace/orders/amazon",
+        icon: Store,
+        permission: "marketplace.read",
+      },
+      {
+        label: "Flipkart Orders",
+        href: "/marketplace/orders/flipkart",
+        icon: Store,
+        permission: "marketplace.read",
+      },
+      {
+        label: "Meesho Orders",
+        href: "/marketplace/orders/meesho",
+        icon: Store,
+        permission: "marketplace.read",
+      },
+      {
+        label: "Marketplace Integrations",
+        href: "/marketplace/integrations",
+        icon: Plug,
+        permission: "marketplace.read",
+      },
+      {
+        label: "Marketplace Reports",
+        href: "/marketplace/reports",
+        icon: BarChart3,
+        permission: "marketplace.read",
+      },
     ],
   },
   {

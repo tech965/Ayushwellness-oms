@@ -49,6 +49,16 @@ class SourceSystem:
     BLUE_DART = "blue_dart"
     CASHFREE = "cashfree"
     MANUAL = "manual"
+    # Marketplace Orders module (review meeting, 2026-11-05) — a real
+    # `Order` row ingested directly from the marketplace's own seller API
+    # (Amazon SP-API / Flipkart Seller API / Meesho), never to be confused
+    # with `OrderChannel.AMAZON`/`FLIPKART`/`MEESHO` below (a TAG on a
+    # still-`source_system="shopify"` order, inferred from Shopify-side
+    # tags) or `InventoryPlatform` in `app.models.platform_inventory` (a
+    # warehouse stock ledger, not an order source).
+    AMAZON = "amazon"
+    FLIPKART = "flipkart"
+    MEESHO = "meesho"
 
 
 class OrderChannel:

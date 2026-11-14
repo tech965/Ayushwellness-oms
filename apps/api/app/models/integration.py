@@ -42,6 +42,13 @@ class IntegrationCode:
     META = "meta"
     INSTAGRAM = "instagram"
     CASHFREE = "cashfree"
+    # Marketplace Orders module (review meeting, 2026-11-05) — Phase 1
+    # ships these as registered-but-unconfigured stub adapters (see
+    # `app.integrations.amazon`/`flipkart`/`meesho`); real SP-API/Seller
+    # API/Meesho-API sync logic is a later phase, once credentials exist.
+    AMAZON = "amazon"
+    FLIPKART = "flipkart"
+    MEESHO = "meesho"
 
 
 class Integration(Base, UUIDPrimaryKeyMixin, TimestampMixin):

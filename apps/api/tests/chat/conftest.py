@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest_asyncio
@@ -13,8 +13,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.conftest import _create_user_with_permissions
 
-# Fixed reference instant: 2026-09-02 10:00 IST == 2026-09-02 04:30 UTC.
-NOW = datetime(2026, 9, 2, 4, 30, tzinfo=UTC)
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _ist_date_at_utc_time(days_ago: int, utc_hour: int, utc_minute: int) -> datetime:
+    """A UTC instant that falls on the IST calendar date `days_ago` days
+    before today (IST), at the given UTC time-of-day. Relative to the
+    real clock rather than a fixed date so these fixtures don't go stale
+    as wall-clock time passes the date they were written against.
+    """
+    ist_today = (datetime.now(UTC) + _IST_OFFSET).date() - timedelta(days=days_ago)
+    return datetime(ist_today.year, ist_today.month, ist_today.day, utc_hour, utc_minute, tzinfo=UTC)
+
+
+# Reference instant: today 10:00 IST == today 04:30 UTC.
+NOW = _ist_date_at_utc_time(0, 4, 30)
 
 
 async def make_order(
@@ -69,10 +82,10 @@ async def seeded_orders(db_session: AsyncSession, chat_user):
     2 orders yesterday (both prepaid). Times chosen to sit inside the IST
     day regardless of the UTC offset.
     """
-    # "today" = 2026-09-02 IST -> use 11:30 IST (06:00 UTC).
-    today = datetime(2026, 9, 2, 6, 0, tzinfo=UTC)
-    # "yesterday" = 2026-09-01 IST.
-    yesterday = datetime(2026, 9, 1, 6, 0, tzinfo=UTC)
+    # "today" IST -> use 11:30 IST (06:00 UTC).
+    today = _ist_date_at_utc_time(0, 6, 0)
+    # "yesterday" IST.
+    yesterday = _ist_date_at_utc_time(1, 6, 0)
 
     await make_order(
         db_session,

@@ -82,6 +82,11 @@ export interface Order {
   shipping_address_validation_reason?: string | null
   shipping_address_validated_at?: string | null
   source_system: string | null
+  // When this row's platform data was last pulled/webhook-applied. `null`
+  // for an order never synced from an external platform. Drives the
+  // order detail page's "Last synced" + "Refresh" affordance — the OMS
+  // never presents locally-stored platform data as if it were live.
+  last_synced_at?: string | null
   // Telecaller attribution for the PENDING->CONFIRMED transition — `null`
   // for an order confirmed a different way (e.g. auto-confirmed on
   // Shopify sync for an already-paid prepaid order), not a data gap.

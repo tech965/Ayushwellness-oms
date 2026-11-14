@@ -112,6 +112,13 @@ class OrderResponse(BaseModel):
     shipping_address_validation_reason: str | None = None
     shipping_address_validated_at: datetime | None = None
     source_system: str | None
+    # `SyncMetadataMixin.last_synced_at` — when this row's platform data was
+    # last pulled/webhook-applied. `None` for an order never synced from an
+    # external platform (e.g. a manual order, or `source_system is None`).
+    # Surfaced so the order detail page can show a "Last synced" timestamp
+    # instead of silently presenting local data as if it were always live
+    # (API-first/minimal-storage initiative — see `docs/` retention notes).
+    last_synced_at: datetime | None = None
     # Telecaller attribution for the PENDING->CONFIRMED transition — see
     # `Order.confirmed_by_telecaller_id` in app/models/order.py. `None`
     # for an order confirmed a different way (e.g. auto-confirmed on
@@ -178,6 +185,18 @@ class OrderListResponse(OrderResponse):
     # general Orders table and the "Confirmed by Telecaller" page
     # (`GET /orders?confirmed_only=true`).
     confirmed_by_telecaller_name: str | None = None
+
+
+class MarketplaceOrderListResponse(OrderListResponse):
+    """`OrderListResponse` plus the fields the Marketplace Orders
+    workspace's "Marketplace Order ID"/"SKU" columns need. `source_system`
+    ("Marketplace") is already a plain `OrderResponse` field, inherited
+    here unchanged — `external_id`/`sku_summary` are the only additions.
+    Only `GET /marketplace/orders` returns this shape.
+    """
+
+    external_id: str | None = None
+    sku_summary: str | None = None
 
 
 class OrderEventResponse(BaseModel):

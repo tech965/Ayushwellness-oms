@@ -14,6 +14,7 @@ level in this report. Neither is profit.
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -29,9 +30,14 @@ from app.integrations.amazon.errors import (
 )
 from app.integrations.amazon.reports import AmazonReports
 from app.schemas.amazon_sales import (
+    AccountSalesReport,
+    AccountSalesSummary,
     AmazonStatus,
     ChunkRef,
     DailyPoint,
+    DayOrdersReport,
+    OrderItemRow,
+    OrderSummary,
     PeriodPoint,
     PollResponse,
     ProductRow,
@@ -42,6 +48,17 @@ from app.schemas.amazon_sales import (
 CHUNK_DAYS = 30
 # Amazon: dataStartTime must not be more than two years before the request.
 MAX_LOOKBACK_DAYS = 729
+# Orders API product report: getOrderItems is one call per order
+# (0.5 rps) -- cap so a wide range can't turn into an unbounded,
+# multi-minute fan-out. Truncation is reported in `warnings`, never silent.
+MAX_ORDERS_API_ORDERS = 300
+# Hard wall-clock budget for the Orders API fan-out. The backend may run
+# as a Vercel serverless function with a 60s hard limit (see
+# apps/api/vercel.json) that kills the whole request with no graceful
+# response -- stopping early and returning a partial, clearly-labeled
+# report is strictly better than that. Comfortably under 60s to leave
+# room for the surrounding request/response overhead.
+ORDERS_API_TIME_BUDGET_SECONDS = 45.0
 
 DEFINITIONS = {
     "units_ordered": "Units in orders placed in the period (Amazon 'unitsOrdered'). Not reduced "
@@ -95,6 +112,47 @@ def tz_offset(tzname: str) -> str:
     sign = "+" if mins >= 0 else "-"
     mins = abs(mins)
     return f"{sign}{mins // 60:02d}:{mins % 60:02d}"
+
+
+def aggregate_periods(
+    days: list[DailyPoint], keyfn, labelfn
+) -> list[PeriodPoint]:
+    """Sums `DailyPoint`s into weekly/monthly `PeriodPoint`s. Shared by the
+    product-wise report (Reports API) and the account-level report (Sales
+    API) so both use identical week/month bucketing."""
+    buckets: dict[date, list[DailyPoint]] = defaultdict(list)
+    for p in days:
+        buckets[keyfn(p.date)].append(p)
+    out = []
+    for k in sorted(buckets):
+        ps = buckets[k]
+        sh = [p.units_shipped for p in ps]
+        shr = [p.shipped_revenue for p in ps]
+        rf = [p.units_refunded for p in ps]
+        out.append(
+            PeriodPoint(
+                period=k.isoformat(),
+                label=labelfn(k),
+                units_ordered=sum(p.units_ordered for p in ps),
+                ordered_revenue=sum((p.ordered_revenue for p in ps), Decimal(0)),
+                units_shipped=sum(sh) if all(x is not None for x in sh) else None,
+                shipped_revenue=(
+                    sum(shr, Decimal(0)) if all(x is not None for x in shr) else None
+                ),
+                units_refunded=sum(rf) if all(x is not None for x in rf) else None,
+            )
+        )
+    return out
+
+
+def _weekly(days: list[DailyPoint]) -> list[PeriodPoint]:
+    return aggregate_periods(
+        days, lambda d: d - timedelta(days=d.weekday()), lambda k: f"Week of {k.isoformat()}"
+    )
+
+
+def _monthly(days: list[DailyPoint]) -> list[PeriodPoint]:
+    return aggregate_periods(days, lambda d: d.replace(day=1), lambda k: k.strftime("%Y-%m"))
 
 
 def build_report(
@@ -191,33 +249,8 @@ def build_report(
             "(permission or catalog gap)."
         )
 
-    def agg(keyfn, labelfn) -> list[PeriodPoint]:
-        buckets: dict[date, list[DailyPoint]] = defaultdict(list)
-        for p in days:
-            buckets[keyfn(p.date)].append(p)
-        out = []
-        for k in sorted(buckets):
-            ps = buckets[k]
-            sh = [p.units_shipped for p in ps]
-            shr = [p.shipped_revenue for p in ps]
-            rf = [p.units_refunded for p in ps]
-            out.append(
-                PeriodPoint(
-                    period=k.isoformat(),
-                    label=labelfn(k),
-                    units_ordered=sum(p.units_ordered for p in ps),
-                    ordered_revenue=sum((p.ordered_revenue for p in ps), Decimal(0)),
-                    units_shipped=sum(sh) if all(x is not None for x in sh) else None,
-                    shipped_revenue=(
-                        sum(shr, Decimal(0)) if all(x is not None for x in shr) else None
-                    ),
-                    units_refunded=sum(rf) if all(x is not None for x in rf) else None,
-                )
-            )
-        return out
-
-    weekly = agg(lambda d: d - timedelta(days=d.weekday()), lambda k: f"Week of {k.isoformat()}")
-    monthly = agg(lambda d: d.replace(day=1), lambda k: k.strftime("%Y-%m"))
+    weekly = _weekly(days)
+    monthly = _monthly(days)
 
     shipped_ok = has_shipped and all(p.units_shipped is not None for p in days)
     summary = SalesSummary(
@@ -389,6 +422,270 @@ class AmazonSalesService:
         if title_warning:
             report.warnings.append(title_warning)
         return report
+
+    async def orders_api_product_report(self, start: date, end: date) -> SalesReport:
+        """Product-wise sales aggregated from the Orders API
+        (`getOrders` + `getOrderItems`) -- an alternative to the Reports
+        API (`GET_SALES_AND_TRAFFIC_REPORT`), which is currently blocked
+        on Amazon's Brand Analytics authorization. Independent data
+        source: see `warnings` for why its totals are not expected to
+        match the Reports API or the Sales API account-level totals.
+
+        Never reads buyer/address fields from Orders API responses --
+        only AmazonOrderId/PurchaseDate/OrderStatus (orders) and
+        ASIN/SellerSKU/Title/QuantityOrdered/ItemPrice (items) are used.
+        """
+        self.validate_range(start, end)
+        api = self._api()
+        orders = await api.list_orders(start, end)
+        warnings: list[str] = [
+            "Sourced from the Orders API (order-item level), not the Reports API's "
+            "GET_SALES_AND_TRAFFIC_REPORT. Amazon's own definitions differ between the two "
+            "(e.g. cancelled/pending orders, promotions) -- totals here are not expected to "
+            "match the Reports API or the Sales API account-level totals exactly."
+        ]
+        truncated = len(orders) > MAX_ORDERS_API_ORDERS
+        if truncated:
+            warnings.append(
+                f"{len(orders)} orders found in range but only the first "
+                f"{MAX_ORDERS_API_ORDERS} were fetched (getOrderItems is one API call per "
+                "order); narrow the date range for a complete report."
+            )
+            orders = orders[:MAX_ORDERS_API_ORDERS]
+
+        daily: dict[date, DailyPoint] = {}
+        products: dict[tuple[str, str | None], ProductRow] = {}
+        currency: str | None = None
+        missing_price_items = 0
+        started_at = time.monotonic()
+        time_truncated_at: int | None = None
+
+        for idx, order in enumerate(orders):
+            if time.monotonic() - started_at > ORDERS_API_TIME_BUDGET_SECONDS:
+                time_truncated_at = idx
+                break
+            order_id = order.get("AmazonOrderId")
+            purchase_date_raw = order.get("PurchaseDate")
+            if not order_id or not purchase_date_raw:
+                continue
+            order_date = datetime.fromisoformat(purchase_date_raw.replace("Z", "+00:00")).date()
+            if not (start <= order_date <= end):
+                continue
+            items = await api.order_items(order_id)
+            day = daily.get(
+                order_date,
+                DailyPoint(
+                    date=order_date, units_ordered=0, ordered_revenue=Decimal(0), order_items=0
+                ),
+            )
+            day_units = day.units_ordered
+            day_revenue = day.ordered_revenue
+            day_items = (day.order_items or 0) + len(items)
+
+            for item in items:
+                asin = item.get("ASIN")
+                if not asin:
+                    continue
+                sku = item.get("SellerSKU")
+                qty = int(item.get("QuantityOrdered", 0))
+                title = item.get("Title")
+                price_node = item.get("ItemPrice")
+                if price_node and price_node.get("Amount") is not None:
+                    item_revenue = Decimal(str(price_node["Amount"]))
+                    if price_node.get("CurrencyCode"):
+                        currency = currency or price_node["CurrencyCode"]
+                else:
+                    item_revenue = Decimal(0)
+                    missing_price_items += 1
+
+                day_units += qty
+                day_revenue += item_revenue
+
+                key = (asin, sku)
+                prev = products.get(key)
+                units = qty + (prev.units_ordered if prev else 0)
+                rev = item_revenue + (prev.ordered_revenue if prev else Decimal(0))
+                products[key] = ProductRow(
+                    asin=asin,
+                    sku=sku,
+                    product_name=title or (prev.product_name if prev else None),
+                    units_ordered=units,
+                    ordered_revenue=rev,
+                    avg_selling_price=(rev / units).quantize(Decimal("0.01")) if units else None,
+                )
+
+            daily[order_date] = DailyPoint(
+                date=order_date,
+                units_ordered=day_units,
+                ordered_revenue=day_revenue,
+                order_items=day_items,
+            )
+
+        if missing_price_items:
+            warnings.append(
+                f"{missing_price_items} order item(s) had no price from Amazon (e.g. gifts/"
+                "promotions) -- counted in units but contribute 0 to ordered revenue."
+            )
+        if time_truncated_at is not None:
+            warnings.append(
+                f"Stopped after {time_truncated_at} of {len(orders)} orders "
+                f"({ORDERS_API_TIME_BUDGET_SECONDS:.0f}s time budget reached, to stay under "
+                "the backend's request time limit); this report is incomplete for the range. "
+                "Narrow the date range for a complete report."
+            )
+
+        days = [daily[k] for k in sorted(daily)]
+        rows = sorted(products.values(), key=lambda r: r.ordered_revenue, reverse=True)
+        total_units = sum(p.units_ordered for p in days)
+        total_rev = sum((p.ordered_revenue for p in days), Decimal(0))
+
+        summary = SalesSummary(
+            currency=currency,
+            total_units_ordered=total_units,
+            total_ordered_revenue=total_rev,
+            products_sold=len({r.asin for r in rows if r.units_ordered > 0}),
+        )
+        _mark_success()
+        return SalesReport(
+            date_from=start,
+            date_to=end,
+            fetched_at=datetime.now(UTC),
+            summary=summary,
+            daily=days,
+            weekly=_weekly(days),
+            monthly=_monthly(days),
+            products=rows,
+            unavailable={
+                "daily.units_shipped": "Orders API does not report shipped units/revenue.",
+                "daily.units_refunded": "Orders API does not report refunds.",
+                "product.units_shipped": "Orders API does not report shipped units per product.",
+            },
+            warnings=warnings,
+            definitions={
+                k: DEFINITIONS[k]
+                for k in (
+                    "units_ordered",
+                    "ordered_revenue",
+                    "avg_selling_price",
+                    "products_sold",
+                    "product_rows",
+                    "weekly",
+                    "monthly",
+                )
+            },
+        )
+
+    async def orders_for_date(self, day: date) -> DayOrdersReport:
+        """Order-level drill-down for ONE day: product line items + Amazon's
+        own COD/Prepaid payment method. Scoped to a single day (not a
+        range) specifically to stay fast and well under any request time
+        limit -- a day has far fewer orders than a multi-day report.
+
+        Never reads `BuyerInfo`/`ShippingAddress`/any buyer field, even
+        though they're present in Amazon's raw order response.
+        """
+        self.validate_range(day, day)
+        api = self._api()
+        orders = await api.list_orders(day, day)
+        started_at = time.monotonic()
+        out: list[OrderSummary] = []
+        truncated = False
+        for order in orders:
+            if time.monotonic() - started_at > ORDERS_API_TIME_BUDGET_SECONDS:
+                truncated = True
+                break
+            order_id = order.get("AmazonOrderId")
+            if not order_id:
+                continue
+            items = await api.order_items(order_id)
+            rows: list[OrderItemRow] = []
+            for item in items:
+                asin = item.get("ASIN")
+                if not asin:
+                    continue
+                price_node = item.get("ItemPrice")
+                rows.append(
+                    OrderItemRow(
+                        asin=asin,
+                        sku=item.get("SellerSKU"),
+                        product_name=item.get("Title"),
+                        units_ordered=int(item.get("QuantityOrdered", 0)),
+                        item_price=(
+                            Decimal(str(price_node["Amount"]))
+                            if price_node and price_node.get("Amount") is not None
+                            else None
+                        ),
+                    )
+                )
+            raw_method = order.get("PaymentMethod")
+            payment_method = (
+                "COD" if raw_method == "COD" else ("Prepaid" if raw_method else "Unknown")
+            )
+            out.append(
+                OrderSummary(
+                    order_id=order_id,
+                    order_status=order.get("OrderStatus", "Unknown"),
+                    payment_method=payment_method,
+                    items=rows,
+                )
+            )
+        _mark_success()
+        return DayOrdersReport(
+            date=day,
+            orders=out,
+            truncated=truncated,
+            truncated_note=(
+                f"Stopped after {len(out)} of {len(orders)} orders "
+                f"({ORDERS_API_TIME_BUDGET_SECONDS:.0f}s time budget reached)."
+                if truncated
+                else None
+            ),
+        )
+
+    async def account_report(self, start: date, end: date) -> AccountSalesReport:
+        """Account-level ordered units/revenue (all products combined) from
+        the Sales API `orderMetrics` -- no `sku`/`asin` filter. Works
+        independently of the Reports API, which currently returns 403
+        pending Amazon's Brand Analytics authorization. No per-product
+        breakdown is possible from this endpoint; see `AccountSalesReport.
+        scope_note`.
+        """
+        self.validate_range(start, end)
+        rows = await self._api().order_metrics(start, end)
+        currency: str | None = None
+        days: list[DailyPoint] = []
+        for r in rows:
+            total = r.get("totalSales") or {}
+            amount = total.get("amount", 0)
+            if total.get("currencyCode"):
+                currency = currency or total["currencyCode"]
+            days.append(
+                DailyPoint(
+                    date=date.fromisoformat(r["interval"][:10]),
+                    units_ordered=int(r.get("unitCount", 0)),
+                    ordered_revenue=Decimal(str(amount)),
+                    order_items=r.get("orderItemCount"),
+                )
+            )
+        days.sort(key=lambda d: d.date)
+        summary = AccountSalesSummary(
+            currency=currency,
+            total_units_ordered=sum(d.units_ordered for d in days),
+            total_ordered_revenue=sum((d.ordered_revenue for d in days), Decimal(0)),
+        )
+        _mark_success()
+        return AccountSalesReport(
+            date_from=start,
+            date_to=end,
+            fetched_at=datetime.now(UTC),
+            summary=summary,
+            daily=days,
+            weekly=_weekly(days),
+            monthly=_monthly(days),
+            definitions={
+                k: DEFINITIONS[k] for k in ("units_ordered", "ordered_revenue", "weekly", "monthly")
+            },
+        )
 
     async def product_trend(self, start: date, end: date, sku: str | None, asin: str | None):
         if not (sku or asin):

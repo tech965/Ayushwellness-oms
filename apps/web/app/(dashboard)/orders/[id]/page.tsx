@@ -39,6 +39,7 @@ import {
 import { getApiErrorMessage } from "@/lib/api-client"
 import { useAuth } from "@/lib/auth-context"
 import { formatDateTime, formatMoney } from "@/lib/format"
+import { useIntegrations, useTriggerSync } from "@/services/integrations"
 import { usePaymentsForOrder } from "@/services/payments"
 import { useRefundsForOrder } from "@/services/refunds"
 import { useReturnsForOrder } from "@/services/returns"
@@ -89,6 +90,32 @@ function OrderDetailContent() {
   const transition = useTransitionOrderStatus(orderId)
   const processShipment = useProcessExistingShipments()
   const validateAddress = useValidateOrderAddress(orderId)
+
+  // API-first/minimal-storage initiative: the order detail page already
+  // reads purely from local DB (by design -- see docs on why that stays),
+  // so this surfaces when that local copy was last refreshed from the
+  // owning platform and lets a user force a resync, instead of silently
+  // presenting possibly-stale data as live. Looked up by `code` rather
+  // than assuming an id -- same pattern as `marketplace/integrations`.
+  const integrationsQuery = useIntegrations({ page: 1, pageSize: 50 })
+  const sourceIntegration = integrationsQuery.data?.data.find(
+    (integration) => integration.code === orderQuery.data?.source_system
+  )
+  const refreshSync = useTriggerSync(sourceIntegration?.id ?? "")
+
+  function handleRefreshSync() {
+    if (!sourceIntegration) return
+    refreshSync.mutate(
+      { entityType: "orders", syncType: "incremental" },
+      {
+        onSuccess: () =>
+          toast.success(
+            "Sync queued — this order will reflect the latest platform data once it completes."
+          ),
+        onError: (error) => toast.error(getApiErrorMessage(error)),
+      }
+    )
+  }
 
   const [nextStatus, setNextStatus] = React.useState<OrderStatus | undefined>(undefined)
   const [dialogOpen, setDialogOpen] = React.useState(false)
@@ -176,34 +203,58 @@ function OrderDetailContent() {
                   <StatusBadge domain="order" status={order.status} />
                   <StatusBadge domain="payment" status={order.payment_status} />
                 </div>
-                {(hasPermission("orders.update") || hasPermission("orders.cancel")) && (
-                  <div className="flex items-center gap-2">
-                    <Select
-                      value={nextStatus ?? ""}
-                      onValueChange={(value) => setNextStatus(value as OrderStatus)}
-                    >
-                      <SelectTrigger className="w-[180px]">
-                        <SelectValue placeholder="Change status..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {ORDER_STATUS_OPTIONS.filter(
-                          (option) => option.value !== order.status
-                        ).map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      size="sm"
-                      disabled={!nextStatus || transition.isPending}
-                      onClick={handleTransition}
-                    >
-                      {transition.isPending ? "Updating..." : "Update"}
-                    </Button>
-                  </div>
-                )}
+                <div className="flex flex-wrap items-center gap-3">
+                  {order.source_system && order.source_system !== "manual" && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-muted-foreground text-xs">
+                        {order.last_synced_at
+                          ? `Last synced ${formatDateTime(order.last_synced_at)}`
+                          : `Synced from ${order.source_system}, never refreshed`}
+                      </span>
+                      {hasPermission("sync_jobs.manage") && sourceIntegration && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={refreshSync.isPending}
+                          onClick={handleRefreshSync}
+                        >
+                          <RefreshCw
+                            className={`size-3.5 ${refreshSync.isPending ? "animate-spin" : ""}`}
+                          />
+                          Refresh
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {(hasPermission("orders.update") || hasPermission("orders.cancel")) && (
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={nextStatus ?? ""}
+                        onValueChange={(value) => setNextStatus(value as OrderStatus)}
+                      >
+                        <SelectTrigger className="w-[180px]">
+                          <SelectValue placeholder="Change status..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {ORDER_STATUS_OPTIONS.filter(
+                            (option) => option.value !== order.status
+                          ).map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        size="sm"
+                        disabled={!nextStatus || transition.isPending}
+                        onClick={handleTransition}
+                      >
+                        {transition.isPending ? "Updating..." : "Update"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
               </CardHeader>
               <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                 <SummaryStat

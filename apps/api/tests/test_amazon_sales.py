@@ -7,6 +7,7 @@ import io
 import json
 from datetime import date, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -103,6 +104,8 @@ class FakeAmazon:
         rate_limits=0,
         document=None,
         gzip_doc=False,
+        orders=None,
+        order_items=None,
     ):
         self.statuses = list(statuses)
         self.lwa_status = lwa_status
@@ -110,6 +113,8 @@ class FakeAmazon:
         self.rate_limits = rate_limits
         self.document = document or doc()
         self.gzip_doc = gzip_doc
+        self.orders = orders
+        self.order_items = order_items or {}
         self.calls: list[str] = []
         self.created: list[dict] = []
 
@@ -166,6 +171,13 @@ class FakeAmazon:
                         }
                     ]
                 },
+            )
+        if path == "/orders/v0/orders":
+            return httpx.Response(200, json={"payload": {"Orders": self.orders or []}})
+        if "/orders/v0/orders/" in path and path.endswith("/orderItems"):
+            order_id = path.split("/orders/v0/orders/")[1].split("/orderItems")[0]
+            return httpx.Response(
+                200, json={"payload": {"OrderItems": self.order_items.get(order_id, [])}}
             )
         if path == "/catalog/2022-04-01/items":
             return httpx.Response(
@@ -395,6 +407,216 @@ def test_product_sku_filter():
 async def test_product_trend_uses_sales_api():
     pts = await make_service(FakeAmazon()).product_trend(DAY1, DAY2, "SKU-A", None)
     assert pts[0].units_ordered == 3 and pts[0].ordered_revenue == Decimal("300.00")
+
+
+# --- account-level sales (Sales API, independent of the Reports API) ------
+
+
+async def test_account_report_uses_sales_api_not_reports_api():
+    """Account-level totals come from `orderMetrics` (Sales API) -- must
+    never call `/reports/...` (Reports API), since that's the endpoint
+    currently blocked on Amazon's Brand Analytics authorization.
+    """
+    fake = FakeAmazon()
+    report = await make_service(fake).account_report(DAY1, DAY2)
+    assert fake.created == []  # no Reports API createReport call was made
+    assert report.summary.total_units_ordered == 3
+    assert report.summary.total_ordered_revenue == Decimal("300.00")
+    assert report.summary.currency == "INR"
+    assert len(report.daily) == 1
+    assert report.daily[0].units_ordered == 3
+    assert "Not product-wise" in report.scope_note
+
+
+async def test_account_report_has_no_product_breakdown():
+    """The schema itself has no ASIN/SKU field -- there is nothing to
+    fabricate even if a caller tried.
+    """
+    report = await make_service(FakeAmazon()).account_report(DAY1, DAY2)
+    assert not hasattr(report, "products")
+
+
+async def test_account_report_weekly_monthly_match_daily_sum():
+    report = await make_service(FakeAmazon()).account_report(DAY1, DAY2)
+    assert sum(w.units_ordered for w in report.weekly) == sum(
+        d.units_ordered for d in report.daily
+    )
+    assert sum(m.units_ordered for m in report.monthly) == sum(
+        d.units_ordered for d in report.daily
+    )
+
+
+async def test_account_report_rejects_invalid_date_range():
+    with pytest.raises(AmazonDateRangeError):
+        await make_service(FakeAmazon()).account_report(DAY2, DAY1)
+
+
+# --- product-wise sales via Orders API (alternative to Reports API) -------
+
+
+def _order(order_id: str, purchase_date, status="Shipped"):
+    return {
+        "AmazonOrderId": order_id,
+        "PurchaseDate": f"{purchase_date.isoformat()}T10:00:00Z",
+        "OrderStatus": status,
+    }
+
+
+def _item(asin, sku, title, qty, price=None):
+    out = {"ASIN": asin, "SellerSKU": sku, "Title": title, "QuantityOrdered": qty}
+    if price is not None:
+        out["ItemPrice"] = {"CurrencyCode": "INR", "Amount": price}
+    return out
+
+
+async def test_orders_api_product_report_aggregates_by_product():
+    fake = FakeAmazon(
+        orders=[_order("O1", DAY1), _order("O2", DAY2)],
+        order_items={
+            "O1": [_item("B001", "SKU-A", "Ashwagandha Capsules", 2, "500.00")],
+            "O2": [
+                _item("B001", "SKU-A", "Ashwagandha Capsules", 1, "250.00"),
+                _item("B002", "SKU-B", "Turmeric Tablets", 3, "300.00"),
+            ],
+        },
+    )
+    report = await make_service(fake).orders_api_product_report(DAY1, DAY2)
+
+    assert {p.asin for p in report.products} == {"B001", "B002"}
+    b001 = next(p for p in report.products if p.asin == "B001")
+    assert b001.units_ordered == 3
+    assert b001.ordered_revenue == Decimal("750.00")
+    assert b001.product_name == "Ashwagandha Capsules"
+    assert report.summary.total_units_ordered == 6
+    assert report.summary.total_ordered_revenue == Decimal("1050.00")
+    assert any("Orders API" in w for w in report.warnings)
+    # Shipped/refund data genuinely doesn't exist from this source.
+    assert report.summary.total_units_shipped is None
+
+
+async def test_orders_api_product_report_never_calls_reports_api():
+    fake = FakeAmazon(orders=[_order("O1", DAY1)], order_items={"O1": []})
+    await make_service(fake).orders_api_product_report(DAY1, DAY2)
+    assert not any("/reports" in c for c in fake.calls)
+
+
+async def test_orders_api_product_report_handles_missing_item_price():
+    """A gift/promo item with no ItemPrice must count units but not
+    silently become 0 revenue without saying so.
+    """
+    fake = FakeAmazon(
+        orders=[_order("O1", DAY1)],
+        order_items={"O1": [_item("B001", "SKU-A", "Free Sample", 1, price=None)]},
+    )
+    report = await make_service(fake).orders_api_product_report(DAY1, DAY2)
+    assert report.products[0].units_ordered == 1
+    assert report.products[0].ordered_revenue == Decimal(0)
+    assert any("no price from Amazon" in w for w in report.warnings)
+
+
+async def test_orders_api_product_report_truncates_with_warning():
+    orders = [_order(f"O{i}", DAY1) for i in range(5)]
+    fake = FakeAmazon(orders=orders, order_items={o["AmazonOrderId"]: [] for o in orders})
+    svc = make_service(fake)
+    with patch("app.services.amazon_sales_service.MAX_ORDERS_API_ORDERS", 2):
+        report = await svc.orders_api_product_report(DAY1, DAY2)
+    assert any("only the first" in w for w in report.warnings)
+
+
+async def test_orders_api_product_report_stops_within_time_budget():
+    """The backend may run as a Vercel serverless function with a hard
+    60s limit (apps/api/vercel.json) -- this must stop itself well
+    before that and return a clearly partial report, never hang until
+    the platform kills the request with no response at all.
+    """
+    orders = [_order(f"O{i}", DAY1) for i in range(5)]
+    fake = FakeAmazon(orders=orders, order_items={o["AmazonOrderId"]: [] for o in orders})
+    svc = make_service(fake)
+    with patch("app.services.amazon_sales_service.ORDERS_API_TIME_BUDGET_SECONDS", -1.0):
+        report = await svc.orders_api_product_report(DAY1, DAY2)
+    assert any("time budget reached" in w for w in report.warnings)
+
+
+async def test_orders_api_product_report_403_reports_blocker_clearly():
+    fake = FakeAmazon(api_status=403)
+    with pytest.raises(AmazonPermissionError):
+        await make_service(fake).orders_api_product_report(DAY1, DAY2)
+
+
+def _order_with_payment(order_id, purchase_date, payment_method, status="Shipped"):
+    o = _order(order_id, purchase_date, status)
+    o["PaymentMethod"] = payment_method
+    return o
+
+
+async def test_orders_for_date_reports_payment_method_and_items():
+    fake = FakeAmazon(
+        orders=[
+            _order_with_payment("O1", DAY1, "COD"),
+            _order_with_payment("O2", DAY1, "Other"),
+        ],
+        order_items={
+            "O1": [_item("B001", "SKU-A", "Ashwagandha Capsules", 1, "500.00")],
+            "O2": [_item("B002", "SKU-B", "Turmeric Tablets", 2, "300.00")],
+        },
+    )
+    report = await make_service(fake).orders_for_date(DAY1)
+    assert report.date == DAY1
+    assert not report.truncated
+    by_id = {o.order_id: o for o in report.orders}
+    assert by_id["O1"].payment_method == "COD"
+    assert by_id["O2"].payment_method == "Prepaid"
+    assert by_id["O1"].items[0].asin == "B001"
+    assert by_id["O1"].items[0].units_ordered == 1
+
+
+async def test_orders_for_date_unknown_payment_method_when_absent():
+    fake = FakeAmazon(orders=[_order("O1", DAY1)], order_items={"O1": []})
+    report = await make_service(fake).orders_for_date(DAY1)
+    assert report.orders[0].payment_method == "Unknown"
+
+
+async def test_orders_for_date_never_exposes_buyer_fields():
+    """Even if Amazon's raw order includes BuyerInfo/ShippingAddress, the
+    schema returned to the frontend has no field for them at all.
+    """
+    order = _order_with_payment("O1", DAY1, "COD")
+    order["BuyerInfo"] = {"BuyerEmail": "buyer@example.com", "BuyerName": "Real Name"}
+    order["ShippingAddress"] = {"City": "Mumbai", "PostalCode": "400001"}
+    fake = FakeAmazon(orders=[order], order_items={"O1": []})
+    report = await make_service(fake).orders_for_date(DAY1)
+    dumped = report.orders[0].model_dump()
+    assert "BuyerInfo" not in str(dumped.keys())
+    assert "buyer@example.com" not in str(dumped)
+    assert "Real Name" not in str(dumped)
+    assert "Mumbai" not in str(dumped)
+
+
+async def test_orders_for_date_stops_within_time_budget():
+    orders = [_order(f"O{i}", DAY1) for i in range(5)]
+    fake = FakeAmazon(orders=orders, order_items={o["AmazonOrderId"]: [] for o in orders})
+    svc = make_service(fake)
+    with patch("app.services.amazon_sales_service.ORDERS_API_TIME_BUDGET_SECONDS", -1.0):
+        report = await svc.orders_for_date(DAY1)
+    assert report.truncated
+    assert report.truncated_note is not None
+
+
+async def test_orders_api_product_report_weekly_monthly_reconcile_with_daily():
+    fake = FakeAmazon(
+        orders=[_order("O1", DAY1), _order("O2", DAY2)],
+        order_items={
+            "O1": [_item("B001", "SKU-A", "X", 2, "100.00")],
+            "O2": [_item("B001", "SKU-A", "X", 1, "50.00")],
+        },
+    )
+    report = await make_service(fake).orders_api_product_report(DAY1, DAY2)
+    assert sum(w.units_ordered for w in report.weekly) == sum(
+        d.units_ordered for d in report.daily
+    )
+    assert sum(m.units_ordered for m in report.monthly) == sum(
+        d.units_ordered for d in report.daily
+    )
 
 
 # --- Excel export ---------------------------------------------------------

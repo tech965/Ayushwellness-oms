@@ -14,6 +14,7 @@ import {
   YAxis,
 } from "recharts"
 
+import { AmazonOrderDrilldown } from "@/components/marketplaces/amazon-order-drilldown"
 import { StatTile } from "@/components/shared/stat-tile"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -39,7 +40,18 @@ export function num(v: number | null | undefined): string {
   return v == null ? UNAVAILABLE : String(v)
 }
 
-function PeriodTable({ rows, currency }: { rows: PeriodPoint[]; currency: string | null }) {
+function PeriodTable({
+  rows,
+  currency,
+  onDateClick,
+}: {
+  rows: PeriodPoint[]
+  currency: string | null
+  /** Only passed for the daily tab, where `period` is an actual ISO date
+   * Amazon's Orders API can be queried for. Weekly/monthly periods span
+   * multiple dates and have no single day to drill into. */
+  onDateClick?: (date: string) => void
+}) {
   return (
     <Table>
       <TableHeader>
@@ -53,7 +65,11 @@ function PeriodTable({ rows, currency }: { rows: PeriodPoint[]; currency: string
       </TableHeader>
       <TableBody>
         {rows.map((r) => (
-          <TableRow key={r.period}>
+          <TableRow
+            key={r.period}
+            className={onDateClick ? "cursor-pointer" : undefined}
+            onClick={onDateClick ? () => onDateClick(r.period) : undefined}
+          >
             <TableCell>{r.label}</TableCell>
             <TableCell className="text-right">{r.units_ordered}</TableCell>
             <TableCell className="text-right">{money(r.ordered_revenue, currency)}</TableCell>
@@ -67,6 +83,7 @@ function PeriodTable({ rows, currency }: { rows: PeriodPoint[]; currency: string
 }
 
 export function AmazonSalesView({ report }: { report: SalesReport }) {
+  const [drilldownDate, setDrilldownDate] = React.useState<string | null>(null)
   const cur = report.summary.currency
   const s = report.summary
   const trend = report.daily.map((d) => ({
@@ -203,6 +220,7 @@ export function AmazonSalesView({ report }: { report: SalesReport }) {
           <PeriodTable
             currency={cur}
             rows={report.daily.map((d) => ({ ...d, period: d.date, label: d.date }))}
+            onDateClick={setDrilldownDate}
           />
         </TabsContent>
         <TabsContent value="weekly">
@@ -230,6 +248,11 @@ export function AmazonSalesView({ report }: { report: SalesReport }) {
           ))}
         </CardContent>
       </Card>
+
+      <AmazonOrderDrilldown
+        date={drilldownDate}
+        onOpenChange={(open) => !open && setDrilldownDate(null)}
+      />
     </div>
   )
 }

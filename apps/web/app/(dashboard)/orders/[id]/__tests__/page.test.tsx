@@ -11,6 +11,7 @@ import {
   useProcessExistingShipments,
   useValidateOrderAddress,
 } from "@/services/orders"
+import { useIntegrations, useTriggerSync } from "@/services/integrations"
 import { usePaymentsForOrder } from "@/services/payments"
 import { useShipmentsForOrder } from "@/services/shipments"
 import { useReturnsForOrder } from "@/services/returns"
@@ -52,6 +53,11 @@ vi.mock("@/services/refunds", () => ({
   useRefundsForOrder: vi.fn(),
 }))
 
+vi.mock("@/services/integrations", () => ({
+  useIntegrations: vi.fn(),
+  useTriggerSync: vi.fn(),
+}))
+
 vi.mock("@/lib/auth-context", () => ({
   useAuth: vi.fn(),
 }))
@@ -69,6 +75,8 @@ const mockedUseRefundsForOrder = vi.mocked(useRefundsForOrder)
 const mockedUseAuth = vi.mocked(useAuth)
 const mockedUseProcessExistingShipments = vi.mocked(useProcessExistingShipments)
 const mockedUseValidateOrderAddress = vi.mocked(useValidateOrderAddress)
+const mockedUseIntegrations = vi.mocked(useIntegrations)
+const mockedUseTriggerSync = vi.mocked(useTriggerSync)
 
 type ProcessOpts = {
   onSuccess?: (r: {
@@ -183,6 +191,22 @@ function setUpQueries(order: OrderDetail) {
   mockedUseAuth.mockReturnValue({
     hasPermission: () => false,
   } as unknown as ReturnType<typeof useAuth>)
+  mockedUseIntegrations.mockReturnValue({
+    isLoading: false,
+    isError: false,
+    error: null,
+    data: {
+      success: true,
+      message: "Success",
+      data: [{ id: "integration-shopify", code: "shopify" }],
+      meta: { page: 1, page_size: 50, total_items: 1, total_pages: 1 },
+    },
+    refetch: vi.fn(),
+  } as unknown as ReturnType<typeof useIntegrations>)
+  mockedUseTriggerSync.mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof useTriggerSync>)
 }
 
 describe("OrderDetailPage — Shopify tags and order note", () => {
@@ -493,5 +517,113 @@ describe("OrderDetailPage — Address Validation card", () => {
     await user.click(screen.getByRole("button", { name: /Validate Address/i }))
 
     expect(mutate).toHaveBeenCalled()
+  })
+})
+
+describe("OrderDetailPage — Last synced / Refresh (API-first initiative)", () => {
+  afterEach(() => vi.clearAllMocks())
+
+  it("shows the last-synced timestamp for a platform-synced order", () => {
+    setUpQueries({ ...BASE_ORDER, source_system: "shopify", last_synced_at: "2026-11-05T10:00:00Z" })
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.getByText(/Last synced/i)).toBeInTheDocument()
+  })
+
+  it("shows a never-refreshed message when synced but last_synced_at is null", () => {
+    setUpQueries({ ...BASE_ORDER, source_system: "shopify", last_synced_at: null })
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.getByText(/never refreshed/i)).toBeInTheDocument()
+  })
+
+  it("never shows the sync affordance for a manually created order", () => {
+    setUpQueries({ ...BASE_ORDER, source_system: "manual", last_synced_at: null })
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.queryByText(/Last synced/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/never refreshed/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /^Refresh$/i })).not.toBeInTheDocument()
+  })
+
+  it("hides the Refresh button without sync_jobs.manage permission even when last synced text shows", () => {
+    setUpQueries({ ...BASE_ORDER, source_system: "shopify", last_synced_at: "2026-11-05T10:00:00Z" })
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => false,
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.getByText(/Last synced/i)).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /^Refresh$/i })).not.toBeInTheDocument()
+  })
+
+  it("triggers an incremental orders sync for the order's integration on Refresh click", async () => {
+    const user = userEvent.setup()
+    const mutate = vi.fn()
+    setUpQueries({ ...BASE_ORDER, source_system: "shopify", last_synced_at: "2026-11-05T10:00:00Z" })
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockedUseTriggerSync.mockReturnValue({
+      mutate,
+      isPending: false,
+    } as unknown as ReturnType<typeof useTriggerSync>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Refresh$/i }))
+
+    expect(mutate).toHaveBeenCalledWith(
+      { entityType: "orders", syncType: "incremental" },
+      expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) })
+    )
+  })
+
+  it("queues the sync and shows a toast instead of claiming the order is already refreshed", async () => {
+    const user = userEvent.setup()
+    setUpQueries({ ...BASE_ORDER, source_system: "shopify", last_synced_at: "2026-11-05T10:00:00Z" })
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+    mockedUseTriggerSync.mockReturnValue({
+      mutate: (
+        _input: unknown,
+        opts?: { onSuccess?: () => void; onError?: (e: unknown) => void }
+      ) => opts?.onSuccess?.(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useTriggerSync>)
+
+    renderWithProviders(<OrderDetailPage />)
+
+    await user.click(screen.getByRole("button", { name: /^Refresh$/i }))
+
+    expect(toast.success).toHaveBeenCalledWith(expect.stringMatching(/queued/i))
+  })
+
+  it("has no Refresh button when no matching Integration row exists for the order's source_system", () => {
+    setUpQueries({ ...BASE_ORDER, source_system: "amazon", last_synced_at: null })
+    mockedUseAuth.mockReturnValue({
+      hasPermission: () => true,
+    } as unknown as ReturnType<typeof useAuth>)
+    // Only a "shopify" integration row exists (the default `setUpQueries`
+    // fixture) -- "amazon" has no matching integration id to trigger a
+    // sync against.
+
+    renderWithProviders(<OrderDetailPage />)
+
+    expect(screen.queryByRole("button", { name: /^Refresh$/i })).not.toBeInTheDocument()
   })
 })

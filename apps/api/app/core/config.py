@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     AMAZON_SP_API_TIMEZONE: str = "Asia/Kolkata"
     AMAZON_SP_API_MAX_RANGE_DAYS: int = 90
 
+    # --- Flipkart Seller API (optional, read-only order sync; the API
+    # never fails to start without them). Only APP_ID/APP_SECRET are
+    # required by Flipkart's documented OAuth2 client_credentials flow
+    # (https://seller.flipkart.com/api-docs/FMSAPI.html) -- no other
+    # credential is documented there.
+    FLIPKART_APP_ID: str | None = None
+    FLIPKART_APP_SECRET: str | None = None
+
     # --- Shopify (optional — connected starting Phase 2.2 when credentials
     # are present; the API never fails to start without them) ---
     SHOPIFY_API_KEY: str | None = None
@@ -212,14 +220,37 @@ class Settings(BaseSettings):
     # `AddressValidationService.is_stale`.
     ADDRESS_VALIDATION_STALE_DAYS: int = 90
 
-    # --- WhatsApp (optional, V2) ---
-    WHATSAPP_API_URL: str | None = None
+    # --- WhatsApp Cloud API (optional, read-only until configured; the
+    # API never fails to start without them). Verified against Meta's
+    # official Cloud API docs (developers.facebook.com/docs/whatsapp/
+    # cloud-api) -- base host is always graph.facebook.com, version is
+    # a path segment Meta deprecates over time so it's configurable
+    # rather than hardcoded. `WHATSAPP_API_URL` above is an older,
+    # unused stub -- left as-is, not read by the new client below.
     WHATSAPP_ACCESS_TOKEN: str | None = None
+    WHATSAPP_PHONE_NUMBER_ID: str | None = None
+    WHATSAPP_BUSINESS_ACCOUNT_ID: str | None = None
+    WHATSAPP_API_VERSION: str = "v21.0"
+    # Arbitrary string this app picks and Meta echoes back on webhook
+    # subscription (`hub.verify_token`) -- standard Meta Graph API
+    # webhook-verification handshake, not specific to WhatsApp.
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str | None = None
+    WHATSAPP_API_URL: str | None = None
 
     # --- Meta (optional, V3) ---
     META_APP_ID: str | None = None
+    # Used here to verify the `X-Hub-Signature-256` header Meta signs
+    # every webhook delivery with (HMAC-SHA256 over the raw body) -- see
+    # `app.integrations.whatsapp.webhook_security`.
     META_APP_SECRET: str | None = None
     META_ACCESS_TOKEN: str | None = None
+
+    # --- Sales CRM -> OMS internal WhatsApp webhook forwarding ---
+    # Dedicated shared secret for POST /api/v1/internal/whatsapp/forwarded-event
+    # only -- never META_APP_SECRET/WHATSAPP_ACCESS_TOKEN/any AiSensy
+    # credential. Same randomly-generated value must be set in Sales
+    # CRM's own backend .env (SALES_CRM_FORWARD_SECRET there too).
+    SALES_CRM_FORWARD_SECRET: str | None = None
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

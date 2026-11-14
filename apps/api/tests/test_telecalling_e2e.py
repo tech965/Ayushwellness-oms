@@ -10,6 +10,8 @@ order.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from app.db.session import get_db
 from app.main import app
@@ -120,9 +122,12 @@ async def test_full_team_leader_telecaller_workflow(db_session: AsyncSession) ->
         assert attempt_2.json()["data"]["attempt_number"] == 2
 
         # --- Schedule Follow-up ---
+        # Relative to "now" (not a fixed date) so this stays "upcoming"
+        # regardless of when the test actually runs.
+        next_follow_up_at = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         follow_up = await tc1_client.post(
             f"/api/v1/telecaller/orders/{target_order_id}/follow-up",
-            json={"next_follow_up_at": "2026-08-28T10:00:00Z"},
+            json={"next_follow_up_at": next_follow_up_at},
         )
         assert follow_up.status_code == 200
 

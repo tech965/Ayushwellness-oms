@@ -799,16 +799,28 @@ class SyncService:
             )
 
             if not page.has_more:
+                # A genuine, observed `has_more=False` means this fetch
+                # (incremental or backlog) reached the real end of its
+                # result set — any resume cursor persisted below for a
+                # prior interrupted page is now stale and must be cleared,
+                # regardless of mode. Production incident this closes: an
+                # *incremental* run that was previously interrupted by the
+                # time budget (see the per-page persist below) left a
+                # resume cursor behind; without clearing it here on a
+                # later, uninterrupted incremental completion, every
+                # subsequent run would keep resuming from that stale point
+                # via `backlog`-style cursor pagination forever instead of
+                # returning to normal `since`-based incremental mode.
+                await self._persist_sync_cursor(
+                    integration_id=integration_id, entity_type=entity_type, cursor=None
+                )
                 if not incremental_mode:
-                    # Backlog crawl finished a full pass — clear the resume
-                    # point and record the explicit completion flag so the
-                    # next run switches to incremental mode. This is the
-                    # ONLY place `backlog_complete` is ever set `True` — a
-                    # genuine, observed `has_more=False` from a non-
-                    # incremental fetch, never inferred.
-                    await self._persist_sync_cursor(
-                        integration_id=integration_id, entity_type=entity_type, cursor=None
-                    )
+                    # Backlog crawl finished a full pass — record the
+                    # explicit completion flag so the next run switches to
+                    # incremental mode. This is the ONLY place
+                    # `backlog_complete` is ever set `True` — a genuine,
+                    # observed `has_more=False` from a non-incremental
+                    # fetch, never inferred.
                     await self._mark_backlog_complete(
                         integration_id=integration_id, entity_type=entity_type, complete=True
                     )
@@ -820,10 +832,26 @@ class SyncService:
                 break
 
             cursor = page.next_cursor
-            if not incremental_mode:
-                await self._persist_sync_cursor(
-                    integration_id=integration_id, entity_type=entity_type, cursor=cursor
-                )
+            # Persisted regardless of mode — not just `not
+            # incremental_mode` as before. Production incident this
+            # closes: an *incremental* run (`since` set, no resume cursor)
+            # that got cut off by the time budget below used to discard
+            # `cursor` entirely once the page loop ended, because this
+            # call was skipped in incremental mode. The next run then
+            # recomputed `since` from this job's own `completed_at` (this
+            # job *did* complete successfully — a time-budget stop is not
+            # a failure) and silently never fetched the gap between where
+            # this run actually stopped and when the next run started.
+            # Persisting the cursor here means that gap is always
+            # resumable: if present on the next run, `resume_cursor` is
+            # no longer `None`, so `incremental_mode` naturally becomes
+            # `False` and the next run resumes via cursor pagination
+            # (persisting/advancing it per page, same as backlog mode)
+            # instead of trusting a `since` boundary that can't account
+            # for an in-progress interruption.
+            await self._persist_sync_cursor(
+                integration_id=integration_id, entity_type=entity_type, cursor=cursor
+            )
 
             if datetime.now(UTC) >= deadline:
                 logger.info(

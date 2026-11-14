@@ -10,12 +10,15 @@ from starlette.responses import StreamingResponse
 from app.dependencies.auth import require_permission
 from app.models.auth import User
 from app.schemas.amazon_sales import (
+    AccountSalesReport,
     AmazonStatus,
     ChunkRef,
     DailyPoint,
+    DayOrdersReport,
     FetchRequest,
     PollRequest,
     PollResponse,
+    SalesReport,
 )
 from app.schemas.response import ApiResponse
 from app.services.amazon_export import report_to_xlsx
@@ -60,6 +63,48 @@ async def export_reports(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={name}"},
     )
+
+
+@router.get("/account", response_model=ApiResponse[AccountSalesReport])
+async def account_report(
+    date_from: date,
+    date_to: date,
+    svc: AmazonSalesService = Depends(get_service),
+    _: User = Depends(_perm),
+):
+    """Account-level ordered units/revenue (Sales API, works independently
+    of the Reports API). Not product-wise -- see `AccountSalesReport.
+    scope_note`.
+    """
+    return ApiResponse(data=await svc.account_report(date_from, date_to))
+
+
+@router.get("/orders-product-report", response_model=ApiResponse[SalesReport])
+async def orders_product_report(
+    date_from: date,
+    date_to: date,
+    svc: AmazonSalesService = Depends(get_service),
+    _: User = Depends(_perm),
+):
+    """Product-wise sales aggregated from the Orders API -- an
+    alternative to the Reports API while it's blocked on authorization.
+    See the response's `warnings` for why totals differ from the other
+    two data sources.
+    """
+    return ApiResponse(data=await svc.orders_api_product_report(date_from, date_to))
+
+
+@router.get("/orders-by-date", response_model=ApiResponse[DayOrdersReport])
+async def orders_by_date(
+    date: date,
+    svc: AmazonSalesService = Depends(get_service),
+    _: User = Depends(_perm),
+):
+    """Order-level drill-down for one day: product line items + COD/
+    Prepaid payment method only -- no buyer/address fields. Used by the
+    product-wise views' click-through.
+    """
+    return ApiResponse(data=await svc.orders_for_date(date))
 
 
 @router.get("/product-trend", response_model=ApiResponse[list[DailyPoint]])

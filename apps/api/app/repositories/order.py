@@ -104,6 +104,7 @@ class OrderRepository(BaseRepository[Order]):
         telecaller_id: uuid.UUID | None = None,
         confirmed_date_from: datetime | None = None,
         confirmed_date_to: datetime | None = None,
+        source_systems: list[str] | None = None,
     ):
         """`confirmed_only`/`telecaller_id`/`confirmed_date_from`/
         `confirmed_date_to` back the "Confirmed by Telecaller" page
@@ -114,8 +115,16 @@ class OrderRepository(BaseRepository[Order]):
         rule, which this does not touch or duplicate). All four default
         to their existing no-op values, so every current caller of
         `search_query`/`GET /orders` is unaffected.
+
+        `source_systems` (Marketplace Orders module) restricts to one or
+        more `Order.source_system` values — e.g. `GET /marketplace/orders`
+        passes `["amazon", "flipkart", "meesho"]` so that workspace never
+        shows a Shopify-sourced row. `None` (the default, every existing
+        caller) applies no restriction at all.
         """
         stmt = self._base_query()
+        if source_systems:
+            stmt = stmt.where(Order.source_system.in_(source_systems))
         if q:
             like = f"%{q}%"
             # `q` matches order number/Shopify id directly, or (via EXISTS,
