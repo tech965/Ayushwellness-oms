@@ -8,6 +8,15 @@ import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -37,6 +46,7 @@ import { useRoles } from "@/services/roles"
 import {
   useCreateUser,
   useDeactivateUser,
+  useDeleteUser,
   useUpdateUser,
   useUsers,
 } from "@/services/users"
@@ -408,6 +418,61 @@ function UserStatusAction({ user }: { user: User }) {
   )
 }
 
+function DeleteUserAction({ user }: { user: User }) {
+  const { user: me, hasPermission } = useAuth()
+  const deleteUser = useDeleteUser()
+  const [open, setOpen] = React.useState(false)
+
+  // Not offered for your own account or a superuser (the server refuses both too).
+  if (!hasPermission("users.manage") || me?.id === user.id || user.is_superuser) return null
+
+  return (
+    <>
+      <Button
+        variant="outline"
+        size="sm"
+        className="text-destructive hover:text-destructive"
+        onClick={() => setOpen(true)}
+      >
+        Delete
+      </Button>
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {user.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes {user.email} and cannot be undone. If this user already has
+              orders, calls or other history, deletion is refused and you should use Deactivate
+              instead.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteUser.isPending}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={deleteUser.isPending}
+              onClick={() =>
+                deleteUser.mutate(user.id, {
+                  onSuccess: () => {
+                    toast.success("User deleted.")
+                    setOpen(false)
+                  },
+                  onError: (error) => {
+                    toast.error(getApiErrorMessage(error))
+                    setOpen(false)
+                  },
+                })
+              }
+            >
+              {deleteUser.isPending ? "Deleting..." : "Delete user"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  )
+}
+
 function AccessRestricted() {
   return (
     <Alert variant="destructive">
@@ -499,6 +564,7 @@ function UsersPageContent() {
         <div className="flex items-center gap-2">
           <EditUserDialog user={user} roles={roles} shipmentStaffOptions={shipmentStaffOptions} />
           <UserStatusAction user={user} />
+          <DeleteUserAction user={user} />
         </div>
       ),
     },

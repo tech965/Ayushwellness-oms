@@ -3,10 +3,11 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.security import hash_password
 from app.models.auth import RefreshToken, User
 from app.models.rbac import UserRole
@@ -127,6 +128,30 @@ class UserService:
             token.revoked_at = now
         await self.session.commit()
         return await self.get_user(user_id)
+
+    async def delete_user(self, user_id: uuid.UUID, *, actor_id: uuid.UUID) -> User:
+        """Permanently removes a user. Refused for yourself, for superusers, and
+        for any account that other records still point at (orders, calls,
+        stock movements, ...): those must be deactivated instead so history
+        keeps its owner. Returns the deleted user (for audit)."""
+        user = await self.get_user(user_id)
+        if user.id == actor_id:
+            raise ValidationError("You cannot delete your own account.")
+        if user.is_superuser:
+            raise ValidationError("A superuser account cannot be deleted. Deactivate it instead.")
+        snapshot = user
+        try:
+            await self.session.execute(delete(UserRole).where(UserRole.user_id == user.id))
+            await self.session.execute(delete(RefreshToken).where(RefreshToken.user_id == user.id))
+            await self.session.delete(user)
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ConflictError(
+                "This user has linked records (orders, calls, stock movements or similar) "
+                "and cannot be deleted. Deactivate the account instead."
+            ) from exc
+        return snapshot
 
     async def deactivate_user(self, user_id: uuid.UUID) -> User:
         return await self.update_user(user_id, is_active=False)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import uuid
 import pathlib
 
 import pytest
@@ -192,3 +193,56 @@ async def test_ims_user_role_creation_permissions_and_isolation(db_session, make
     # still works after a "refresh" (new login/session)
     again = await _login("ims.user@x.com", "Passw0rd!x")
     assert (await again.get("/api/v1/ims/stock")).status_code == 200
+
+
+async def test_permanent_user_delete_rules(db_session, make_authenticated_client):
+    from app.models.auth import User
+
+    admin, roles, create = await _setup(db_session, make_authenticated_client)
+    a = (await create("Gone Soon", "gone@x.com", "INVENTORY_STAFF")).json()["data"]
+    b = (await create("Other", "other@x.com", "INVENTORY_STAFF")).json()["data"]
+
+    # default DELETE still only deactivates
+    r = await admin.delete(f"/api/v1/users/{b['id']}")
+    assert r.status_code == 200
+    assert (await admin.get(f"/api/v1/users/{b['id']}")).json()["data"]["is_active"] is False
+
+    # permanent delete removes the account and its role links, and is audited
+    r = await admin.delete(f"/api/v1/users/{a['id']}", params={"permanent": True})
+    assert r.status_code == 200, r.text
+    assert (await admin.get(f"/api/v1/users/{a['id']}")).status_code == 404
+    assert await _anon_login_status("gone@x.com", "Passw0rd!x") == 401
+    assert "user.deleted" in {
+        l.action for l in (await db_session.execute(select(AuditLog))).scalars()
+    }
+
+    # not your own account, not a superuser
+    me = (await db_session.execute(select(User).where(User.email == "admin@x.com"))).scalar_one()
+    assert (await admin.delete(f"/api/v1/users/{me.id}", params={"permanent": True})).status_code == 422
+    sup = (await db_session.execute(select(User).where(User.is_superuser.is_(True)))).scalars().first()
+    other_admin = await make_authenticated_client(
+        db_session, permission_codes=["users.manage"], email="mgr2@x.com"
+    )
+    assert (await other_admin.delete(f"/api/v1/users/{sup.id}", params={"permanent": True})).status_code == 422
+    assert (await other_admin.delete(f"/api/v1/users/{uuid.uuid4()}", params={"permanent": True})).status_code == 404
+
+    # requires users.manage
+
+
+async def test_permanent_delete_refused_when_user_has_history(db_session, make_authenticated_client):
+    import os
+
+    if not os.environ.get("OMS_TEST_DATABASE_URL"):
+        pytest.skip("needs PostgreSQL to enforce foreign keys")
+    admin, roles, create = await _setup(db_session, make_authenticated_client)
+    u = (await create("Stock Person", "stock@x.com", "INVENTORY_MANAGER")).json()["data"]
+    mgr = await _login("stock@x.com", "Passw0rd!x")
+    wh = (await mgr.post("/api/v1/ims/warehouses", json={"code": "9", "name": "Annex"})).json()["data"]["id"]
+    pk = (await mgr.post("/api/v1/ims/packaging", json={"name": "P", "units": ["BOX"]})).json()["data"]
+    r = await mgr.post("/api/v1/ims/stock/inward", json={
+        "idempotency_key": uuid.uuid4().hex, "warehouse_id": wh, "item_id": pk["units"]["BOX"]["item_id"],
+        "quantity": 5, "reason": "history"})
+    assert r.status_code == 201
+    res = await admin.delete(f"/api/v1/users/{u['id']}", params={"permanent": True})
+    assert res.status_code == 409 and "Deactivate" in res.json()["error"]["message"]
+    assert (await admin.get(f"/api/v1/users/{u['id']}")).status_code == 200

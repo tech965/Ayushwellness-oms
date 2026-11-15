@@ -205,6 +205,38 @@ async def filter_categories(
     return ApiResponse(data={"items": sorted(cats), "shopify_available": shopify_ok})
 
 
+@router.get("/filters/categories", response_model=ApiResponse[dict])
+async def filter_categories(
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission(READ)),
+) -> ApiResponse[dict]:
+    """Category choices for filters: categories of tracked items, plus
+    Shopify's when reachable. Never fails because Shopify is down."""
+    cats = set(await _svc(session, user).categories())
+    shopify_ok = True
+    try:
+        cats |= {p["category"] for p in (await ims_catalog.get_catalog()).products}
+    except IntegrationError:
+        shopify_ok = False
+    return ApiResponse(data={"items": sorted(cats), "shopify_available": shopify_ok})
+
+
+@router.get("/filters/categories", response_model=ApiResponse[dict])
+async def filter_categories(
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission(READ)),
+) -> ApiResponse[dict]:
+    """Category choices for filters: categories of tracked items, plus
+    Shopify's when reachable. Never fails because Shopify is down."""
+    cats = set(await _svc(session, user).categories())
+    shopify_ok = True
+    try:
+        cats |= {p["category"] for p in (await ims_catalog.get_catalog()).products}
+    except IntegrationError:
+        shopify_ok = False
+    return ApiResponse(data={"items": sorted(cats), "shopify_available": shopify_ok})
+
+
 @router.post("/catalog/refresh", response_model=ApiResponse[dict])
 async def catalog_refresh(
     session: AsyncSession = Depends(get_db),

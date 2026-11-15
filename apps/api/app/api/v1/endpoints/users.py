@@ -113,10 +113,20 @@ async def update_user(
 @router.delete("/{user_id}", response_model=ApiResponse[None])
 async def deactivate_user(
     user_id: uuid.UUID,
+    permanent: bool = False,
     session: AsyncSession = Depends(get_db),
     actor: User = Depends(require_permission("users.manage")),
 ) -> ApiResponse[None]:
-    """Master data is deactivated, never hard-deleted (spec §31)."""
+    """Default: deactivate (master data is never hard-deleted by default, spec
+    §31). `?permanent=true` deletes the account, but only when nothing else
+    references it."""
+    if permanent:
+        service = UserService(session)
+        target = await service.get_user(user_id)
+        details = {"email": target.email, "roles": target.role_names}
+        await service.delete_user(user_id, actor_id=actor.id)
+        await _audit(session, actor, "user.deleted", target, details)
+        return ApiResponse(data=None, message="User deleted.")
     user = await UserService(session).deactivate_user(user_id)
     await _audit(session, actor, "user.deactivated", user, {"is_active": False})
     return ApiResponse(data=None, message="User deactivated.")

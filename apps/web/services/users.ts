@@ -74,3 +74,18 @@ export function useDeactivateUser() {
     },
   })
 }
+
+/** `DELETE /users/{id}?permanent=true` removes the account for good. The
+ * server refuses (409) if other records still reference the user, in which
+ * case Deactivate is the right action. */
+export function useDeleteUser() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await apiClient.delete(`/users/${id}`, { params: { permanent: true } })
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["users"] })
+    },
+  })
+}

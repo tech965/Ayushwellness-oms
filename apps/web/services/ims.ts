@@ -104,6 +104,13 @@ export function useCategoryOptions() {
     queryFn: () => get<{ items: string[] }>("/filters/categories").then((d) => d.items),
   })
 }
+/** Category options for filters; resilient to Shopify being unreachable. */
+export function useCategoryOptions() {
+  return useQuery({
+    queryKey: ["ims", "filters", "categories"],
+    queryFn: () => get<{ items: string[] }>("/filters/categories").then((d) => d.items),
+  })
+}
 export function useCatalogVariantSearch(q: string, enabled = true) {
   return useQuery({
     queryKey: ["ims", "catalog", "variants", q],
