@@ -162,3 +162,33 @@ async def test_existing_roles_unaffected(db_session, make_authenticated_client):
     assert (await client.get("/api/v1/ims/stock")).status_code == 403  # no IMS permission
     me = (await client.get("/api/v1/auth/me")).json()["data"]
     assert "OPERATIONS" in me["roles"]
+
+
+async def test_ims_user_role_creation_permissions_and_isolation(db_session, make_authenticated_client):
+    admin, roles, _ = await _setup(db_session, make_authenticated_client)
+    assert "IMS_USER" in roles
+    role = (await db_session.execute(select(Role).where(Role.name == "IMS_USER"))).scalar_one()
+    assert role.description == "IMS User role"
+
+    created = await admin.post(
+        "/api/v1/users",
+        json={"name": "Ims Person", "email": "ims.user@x.com", "password": "Passw0rd!x",
+              "role_ids": [roles["IMS_USER"]]},
+    )
+    assert created.status_code == 201
+    assert created.json()["data"]["roles"] == ["IMS_USER"]
+
+    client = await _login("ims.user@x.com", "Passw0rd!x")
+    me = (await client.get("/api/v1/auth/me")).json()["data"]
+    assert me["roles"] == ["IMS_USER"]
+    assert sorted(me["permissions"]) == ["ims.read", "ims.stock.write"]
+
+    # works in the IMS (read + stock operations), but not management or OMS
+    assert (await client.get("/api/v1/ims/stock")).status_code == 200
+    assert (await client.post("/api/v1/ims/parties", json={"name": "Acme"})).status_code == 201
+    assert (await client.post("/api/v1/ims/warehouses", json={"code": "7", "name": "X"})).status_code == 403
+    for path in ("/api/v1/orders", "/api/v1/users", "/api/v1/roles", "/api/v1/customers"):
+        assert (await client.get(path)).status_code == 403, path
+    # still works after a "refresh" (new login/session)
+    again = await _login("ims.user@x.com", "Passw0rd!x")
+    assert (await again.get("/api/v1/ims/stock")).status_code == 200

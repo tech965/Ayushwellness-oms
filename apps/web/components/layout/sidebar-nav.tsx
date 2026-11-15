@@ -9,7 +9,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useAuth } from "@/lib/auth-context"
 import { cn } from "@/lib/utils"
 import {
-  allNavItems,
   fulfillmentNavGroups,
   navGroups,
   shipmentStaffNavGroups,
@@ -98,15 +97,8 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
             </span>
           )}
           {group.items.map((item) => {
-            // A more specific sibling (e.g. /users/ims under /users) wins.
             const isActive =
-              pathname === item.href ||
-              (pathname.startsWith(`${item.href}/`) &&
-                !allNavItems.some(
-                  (other) =>
-                    other.href.startsWith(`${item.href}/`) &&
-                    (pathname === other.href || pathname.startsWith(`${other.href}/`))
-                ))
+              pathname === item.href || pathname.startsWith(`${item.href}/`)
             const Icon = item.icon
 
             const link = (

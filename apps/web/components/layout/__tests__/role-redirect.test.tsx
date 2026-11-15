@@ -188,4 +188,18 @@ describe("RoleRedirect", () => {
     renderWithProviders(<RoleRedirect />)
     expect(mockReplace).not.toHaveBeenCalled()
   })
+
+  it("IMS user on /dashboard is redirected to /ims, and stays on /ims after a refresh", () => {
+    mockReplace.mockClear()
+    mockUsePathname.mockReturnValue("/dashboard")
+    mockedUseAuth.mockReturnValue(authWithRoles(["IMS_USER"]))
+    renderWithProviders(<RoleRedirect />)
+    expect(mockReplace).toHaveBeenCalledTimes(1)
+    expect(mockReplace).toHaveBeenCalledWith("/ims")
+
+    mockReplace.mockClear()
+    mockUsePathname.mockReturnValue("/ims/stock")
+    renderWithProviders(<RoleRedirect />)
+    expect(mockReplace).not.toHaveBeenCalled()
+  })
 })

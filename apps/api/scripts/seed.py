@@ -113,6 +113,8 @@ PERMISSIONS: dict[str, str] = {
     "settings.manage": "Update OMS settings (Administration -> Settings)",
 }
 
+ROLE_DESCRIPTIONS: dict[str, str] = {"IMS_USER": "IMS User role"}
+
 ROLE_PERMISSIONS: dict[str, list[str] | str] = {
     "ADMIN": "*",
     "OPERATIONS": [
@@ -172,6 +174,9 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
     ],
     # Dedicated inventory workspace roles (/ims). Staff can operate stock;
     # managers can additionally configure warehouses/packaging/conversions.
+    # Default role for inventory-workspace users created from Administration
+    # -> Users. Same grants as INVENTORY_STAFF; redirects to /ims on login.
+    "IMS_USER": ["ims.read", "ims.stock.write"],
     "INVENTORY_STAFF": ["ims.read", "ims.stock.write"],
     "INVENTORY_MANAGER": ["ims.read", "ims.stock.write", "ims.manage"],
     "TEAM_LEADER": ["telecalling.manage"],
@@ -275,7 +280,10 @@ async def _seed_roles(session, permissions: dict[str, Permission]) -> None:  # n
             await session.execute(select(Role).where(Role.name == role_name))
         ).scalar_one_or_none()
         if role is None:
-            role = Role(name=role_name, description=f"{role_name.title()} role")
+            role = Role(
+                name=role_name,
+                description=ROLE_DESCRIPTIONS.get(role_name, f"{role_name.title()} role"),
+            )
             session.add(role)
             await session.flush()
 

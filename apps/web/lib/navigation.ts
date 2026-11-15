@@ -199,7 +199,6 @@ export const navGroups: NavGroup[] = [
     label: "Administration",
     items: [
       { label: "Users", href: "/users", icon: ShieldCheck, permission: "users.manage" },
-      { label: "IMS Users", href: "/users/ims", icon: Boxes, permission: "users.manage" },
       { label: "Roles", href: "/roles", icon: Gauge, permission: "roles.manage" },
       { label: "Settings", href: "/settings", icon: Settings },
     ],

@@ -26,7 +26,8 @@ import { Input } from "@/components/ui/input"
 import { PasswordInput } from "@/components/ui/password-input"
 import { getApiErrorMessage, getStoredAccessToken } from "@/lib/api-client"
 import { loginSchema, type LoginInput } from "@/lib/validation/auth"
-import { login } from "@/services/auth"
+import { roleHome } from "@/lib/role-home"
+import { getCurrentUser, login } from "@/services/auth"
 
 export default function LoginPage() {
   const router = useRouter()
@@ -34,7 +35,10 @@ export default function LoginPage() {
 
   React.useEffect(() => {
     if (getStoredAccessToken()) {
-      router.replace("/dashboard")
+      // Already signed in (e.g. a fresh tab): go to the role's home directly.
+      getCurrentUser()
+        .then((me) => router.replace(roleHome(me.roles, me.is_superuser)))
+        .catch(() => router.replace("/dashboard"))
     }
   }, [router])
 
@@ -44,7 +48,17 @@ export default function LoginPage() {
   })
 
   const mutation = useMutation({
-    mutationFn: login,
+    // Look up the signed-in user's real roles so IMS users go straight to
+    // /ims instead of passing through the OMS dashboard.
+    mutationFn: async (values: LoginInput) => {
+      await login(values)
+      try {
+        const me = await getCurrentUser()
+        return roleHome(me.roles, me.is_superuser)
+      } catch {
+        return "/dashboard"
+      }
+    },
     // Root cause of a previous user's role/nav briefly (or persistently,
     // within the `["auth", "me"]` query's `staleTime`) rendering after a
     // DIFFERENT user logs in in the same tab: the `QueryClient` is a
@@ -56,9 +70,9 @@ export default function LoginPage() {
     // context.tsx`) already does this same `queryClient.clear()`; this
     // mirrors it on the other side of the same handoff so neither
     // direction can leak stale cross-user data.
-    onSuccess: () => {
+    onSuccess: (home) => {
       queryClient.clear()
-      router.push("/dashboard")
+      router.push(home)
     },
   })
 

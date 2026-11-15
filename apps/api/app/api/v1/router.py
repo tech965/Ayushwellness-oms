@@ -26,6 +26,7 @@ from app.api.v1.endpoints import (
     couriers,
     customers,
     dashboard,
+    flipkart_sales,
     ims,
     integrations,
     internal_whatsapp,
