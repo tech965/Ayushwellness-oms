@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.security import hash_password
-from app.models.auth import User
+from app.models.auth import RefreshToken, User
 from app.models.rbac import UserRole
 from app.repositories.auth import UserRepository
 from app.repositories.rbac import RoleRepository
@@ -107,6 +108,25 @@ class UserService:
         shipment_staff = await self.users.get_with_permissions(shipment_staff_id)
         if shipment_staff is None or "SHIPMENT_STAFF" not in shipment_staff.role_names:
             raise NotFoundError("shipment_staff_id does not reference a Shipment Staff user.")
+
+    async def reset_password(self, user_id: uuid.UUID, new_password: str) -> User:
+        """Admin-initiated reset: stores a new Argon2 hash and revokes every
+        live refresh token so existing sessions end. The OMS has no emailed
+        reset flow, so this is the supported reset path."""
+        user = await self.get_user(user_id)
+        await self.users.update(user, password_hash=hash_password(new_password))
+        tokens = (
+            await self.session.execute(
+                select(RefreshToken).where(
+                    RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None)
+                )
+            )
+        ).scalars()
+        now = datetime.now(UTC)
+        for token in tokens:
+            token.revoked_at = now
+        await self.session.commit()
+        return await self.get_user(user_id)
 
     async def deactivate_user(self, user_id: uuid.UUID) -> User:
         return await self.update_user(user_id, is_active=False)

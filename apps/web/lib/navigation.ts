@@ -60,6 +60,7 @@ export const navGroups: NavGroup[] = [
       { label: "Customers", href: "/customers", icon: Users },
       { label: "Products", href: "/products", icon: Package },
       { label: "Inventory", href: "/inventory", icon: Warehouse, permission: "inventory.read" },
+      { label: "Inventory Workspace (IMS)", href: "/ims", icon: Boxes, permission: "ims.read" },
     ],
   },
   {
@@ -198,6 +199,7 @@ export const navGroups: NavGroup[] = [
     label: "Administration",
     items: [
       { label: "Users", href: "/users", icon: ShieldCheck, permission: "users.manage" },
+      { label: "IMS Users", href: "/users/ims", icon: Boxes, permission: "users.manage" },
       { label: "Roles", href: "/roles", icon: Gauge, permission: "roles.manage" },
       { label: "Settings", href: "/settings", icon: Settings },
     ],

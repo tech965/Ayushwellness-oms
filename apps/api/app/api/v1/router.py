@@ -26,7 +26,7 @@ from app.api.v1.endpoints import (
     couriers,
     customers,
     dashboard,
-    flipkart_sales,
+    ims,
     integrations,
     internal_whatsapp,
     inventory,
@@ -79,6 +79,7 @@ api_router.include_router(orders.router, prefix="/orders", tags=["orders"])
 api_router.include_router(customers.router, prefix="/customers", tags=["customers"])
 api_router.include_router(products.router, prefix="/products", tags=["products"])
 api_router.include_router(inventory.router, prefix="/inventory", tags=["inventory"])
+api_router.include_router(ims.router, prefix="/ims", tags=["ims"])
 api_router.include_router(
     cashfree_live.router, prefix="/payments/cashfree/live", tags=["payments:cashfree:live"]
 )

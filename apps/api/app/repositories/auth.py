@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import selectinload
 
 from app.models.auth import RefreshToken, User
@@ -29,7 +29,7 @@ class UserRepository(BaseRepository[User]):
     async def get_by_email(self, email: str) -> User | None:
         stmt = (
             select(User)
-            .where(User.email == email)
+            .where(func.lower(User.email) == email.strip().lower())
             .options(
                 selectinload(User.user_roles)
                 .selectinload(UserRole.role)

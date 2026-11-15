@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     # Shopify — see app.integrations.shopify.webhooks.
     SHOPIFY_WEBHOOK_SECRET_OLD: str | None = None
     SHOPIFY_STORE_DOMAIN: str | None = None
+    # IMS: finished-goods items without their own threshold are "low stock"
+    # at or below this total quantity.
+    IMS_DEFAULT_LOW_STOCK_THRESHOLD: int = 10
+    IMS_CATALOG_CACHE_SECONDS: int = 300
     # GraphQL Admin API — REST is legacy as of April 2025; new integrations
     # must use GraphQL. Quarterly release, e.g. "2026-01". Verify against
     # https://shopify.dev/docs/api/admin-graphql before bumping.

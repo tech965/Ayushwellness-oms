@@ -23,6 +23,19 @@ from app.models.inventory_architecture import (
     ProviderVariantMapping,
     Warehouse,
 )
+from app.models.ims import (
+    ImsAdjustment,
+    ImsBalance,
+    ImsExternalParty,
+    ImsItem,
+    ImsLedger,
+    ImsPackagingProduct,
+    ImsReturn,
+    ImsReturnLine,
+    ImsTransfer,
+    ImsTransferLine,
+    ImsUnitConversion,
+)
 from app.models.ndr import NDR
 from app.models.order import Order, OrderEvent, OrderItem
 from app.models.order_workflow import OrderWorkflow
@@ -69,6 +82,17 @@ __all__ = [
     "SyncJob",
     "WebhookEvent",
     "InventoryMovement",
+    "ImsAdjustment",
+    "ImsBalance",
+    "ImsExternalParty",
+    "ImsItem",
+    "ImsLedger",
+    "ImsPackagingProduct",
+    "ImsReturn",
+    "ImsReturnLine",
+    "ImsTransfer",
+    "ImsTransferLine",
+    "ImsUnitConversion",
     "NDR",
     "Order",
     "OrderEvent",

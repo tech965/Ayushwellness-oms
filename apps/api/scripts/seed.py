@@ -56,6 +56,9 @@ PERMISSIONS: dict[str, str] = {
     "products.update": "Create/update products",
     "inventory.read": "View stock levels and inventory movement history",
     "inventory.manage": "Manually adjust product stock levels",
+    "ims.read": "View the Inventory Management workspace (stock, history, reports)",
+    "ims.stock.write": "Record stock inward, transfers, external returns and adjustments",
+    "ims.manage": "Manage IMS warehouses, packaging, unit conversions, parties and opening balances",
     "ndr.read": "View NDR records",
     "ndr.update": "Update NDR records",
     "rto.read": "View RTO records",
@@ -167,6 +170,10 @@ ROLE_PERMISSIONS: dict[str, list[str] | str] = {
         "reconciliation.read",
         "chat.use",
     ],
+    # Dedicated inventory workspace roles (/ims). Staff can operate stock;
+    # managers can additionally configure warehouses/packaging/conversions.
+    "INVENTORY_STAFF": ["ims.read", "ims.stock.write"],
+    "INVENTORY_MANAGER": ["ims.read", "ims.stock.write", "ims.manage"],
     "TEAM_LEADER": ["telecalling.manage"],
     # `orders.read` here is a plain read grant, same tier as OPERATIONS/
     # CUSTOMER_SUPPORT/MANAGEMENT already have -- it does NOT widen what a

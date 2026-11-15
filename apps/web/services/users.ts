@@ -74,3 +74,13 @@ export function useDeactivateUser() {
     },
   })
 }
+
+/** Admin-initiated password reset (`POST /users/{id}/reset-password`); the
+ * server also revokes that user's active sessions. */
+export function useResetPassword(id: string) {
+  return useMutation({
+    mutationFn: async (newPassword: string) => {
+      await apiClient.post(`/users/${id}/reset-password`, { new_password: newPassword })
+    },
+  })
+}

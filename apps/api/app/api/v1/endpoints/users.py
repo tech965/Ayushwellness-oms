@@ -14,7 +14,13 @@ from app.dependencies.pagination import sort_params as sort_params_dep
 from app.models.auth import User
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.response import ApiResponse, PaginatedResponse
-from app.schemas.user import UserCreateRequest, UserResponse, UserUpdateRequest
+from app.schemas.user import (
+    PasswordResetRequest,
+    UserCreateRequest,
+    UserResponse,
+    UserUpdateRequest,
+)
+from app.services.audit_service import AuditService
 from app.services.user_service import UserService
 
 router = APIRouter()
@@ -24,6 +30,14 @@ def _to_response(user: User) -> UserResponse:
     return UserResponse.model_validate(user, from_attributes=True).model_copy(
         update={"roles": user.role_names}
     )
+
+
+async def _audit(session: AsyncSession, actor: User, action: str, target: User, data: dict) -> None:
+    """Never include passwords or hashes in `data`."""
+    await AuditService(session).record(
+        user=actor, action=action, entity_type="user", entity_id=str(target.id), new_value=data
+    )
+    await session.commit()
 
 
 @router.get("", response_model=PaginatedResponse[UserResponse])
@@ -46,7 +60,7 @@ async def list_users(
 async def create_user(
     payload: UserCreateRequest,
     session: AsyncSession = Depends(get_db),
-    _: User = Depends(require_permission("users.manage")),
+    actor: User = Depends(require_permission("users.manage")),
 ) -> ApiResponse[UserResponse]:
     user = await UserService(session).create_user(
         name=payload.name,
@@ -57,6 +71,7 @@ async def create_user(
         team_leader_id=payload.team_leader_id,
         shipment_staff_id=payload.shipment_staff_id,
     )
+    await _audit(session, actor, "user.created", user, {"email": user.email, "roles": user.role_names})
     return ApiResponse(data=_to_response(user), message="User created.")
 
 
@@ -75,7 +90,7 @@ async def update_user(
     user_id: uuid.UUID,
     payload: UserUpdateRequest,
     session: AsyncSession = Depends(get_db),
-    _: User = Depends(require_permission("users.manage")),
+    actor: User = Depends(require_permission("users.manage")),
 ) -> ApiResponse[UserResponse]:
     user = await UserService(session).update_user(
         user_id,
@@ -88,6 +103,10 @@ async def update_user(
         shipment_staff_id=payload.shipment_staff_id,
         clear_shipment_staff=payload.clear_shipment_staff,
     )
+    changed = payload.model_dump(exclude_unset=True, exclude={"role_ids"})
+    if payload.role_ids is not None:
+        changed["roles"] = user.role_names
+    await _audit(session, actor, "user.updated", user, changed)
     return ApiResponse(data=_to_response(user), message="User updated.")
 
 
@@ -95,8 +114,22 @@ async def update_user(
 async def deactivate_user(
     user_id: uuid.UUID,
     session: AsyncSession = Depends(get_db),
-    _: User = Depends(require_permission("users.manage")),
+    actor: User = Depends(require_permission("users.manage")),
 ) -> ApiResponse[None]:
     """Master data is deactivated, never hard-deleted (spec §31)."""
-    await UserService(session).deactivate_user(user_id)
+    user = await UserService(session).deactivate_user(user_id)
+    await _audit(session, actor, "user.deactivated", user, {"is_active": False})
     return ApiResponse(data=None, message="User deactivated.")
+
+
+@router.post("/{user_id}/reset-password", response_model=ApiResponse[None])
+async def reset_password(
+    user_id: uuid.UUID,
+    payload: PasswordResetRequest,
+    session: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_permission("users.manage")),
+) -> ApiResponse[None]:
+    """Admin sets a new password; the user's active sessions are revoked."""
+    user = await UserService(session).reset_password(user_id, payload.new_password)
+    await _audit(session, actor, "user.password_reset", user, {"sessions_revoked": True})
+    return ApiResponse(data=None, message="Password reset.")

@@ -58,6 +58,8 @@ export function RoleRedirect() {
     // prefixes needed.
     if (hasRole("SHIPMENT_STAFF"))
       return { home: "/shipment-staff/dashboard", allowed: ["/shipment-staff"] }
+    if (hasRole("INVENTORY_STAFF") || hasRole("INVENTORY_MANAGER"))
+      return { home: "/ims", allowed: ["/ims"] }
     return null
   }, [hasRole])
 
