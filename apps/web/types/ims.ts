@@ -55,6 +55,7 @@ export interface StockOverview {
   page: number
   page_size: number
   warehouses: ImsWarehouse[]
+  totals: { by_warehouse: Record<string, number>; total: number }
 }
 
 export interface PackagingUnitCell {
@@ -224,6 +225,52 @@ export interface LedgerRow {
   notes: string | null
 }
 
+export interface NamedLocation {
+  label: string
+  id: string
+  code: string
+  name: string
+}
+
+export interface CategoryOverviewSku {
+  sku: string
+  packaging: string
+  item_id: string | null
+  status: string | null
+  found_in_catalog: boolean
+  by_warehouse: Record<string, number>
+  total: number
+}
+
+/** A flavour (Herbal Masala) or a product (Ayurvedic/Nutraceutical) -- the
+ * middle level of Category -> group -> SKU. */
+export interface CategoryOverviewGroup {
+  name: string
+  skus: CategoryOverviewSku[]
+  total: number
+}
+
+export interface CategoryOverviewEntry {
+  category: string
+  groups: CategoryOverviewGroup[]
+  total_products: number
+  total_skus: number
+  total_stock: number
+}
+
+export interface UnclassifiedProduct {
+  title: string
+  sku: string
+  current_category: string | null
+  found_in_catalog: boolean
+}
+
+export interface CategoriesOverview {
+  items: CategoryOverviewEntry[]
+  locations: NamedLocation[]
+  unclassified: UnclassifiedProduct[]
+}
+
 export interface Dashboard {
   filters: Record<string, string | null>
   cards: {
@@ -246,6 +293,7 @@ export interface Dashboard {
     movements_in_range: number
     last_activity: string | null
   })[]
+  named_locations: (NamedLocation & { finished_quantity: number })[]
   stock_distribution: { warehouse: string; code: string; finished: number; packaging: number }[]
   category_stock: { category: string; quantity: number }[]
   low_stock: (ImsItem & { total: number; by_warehouse: Record<string, number> })[]

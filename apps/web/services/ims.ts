@@ -7,6 +7,7 @@ import type {
   CatalogPage,
   CatalogProduct,
   CatalogVariantHit,
+  CategoriesOverview,
   Dashboard,
   ImsItem,
   ImsItemDetail,
@@ -88,6 +89,15 @@ export function useCatalogProduct(id: string) {
     queryFn: () => get<CatalogProduct>(`/catalog/products/${id}`),
   })
 }
+/** Categories page data: each bucket category's products and actual
+ * per-warehouse stock, for the inline accordion. */
+export function useCategoriesOverview() {
+  return useQuery({
+    queryKey: ["ims", "categories"],
+    queryFn: () => get<CategoriesOverview>("/categories"),
+  })
+}
+
 export function useCatalogCategories() {
   return useQuery({
     queryKey: ["ims", "catalog", "categories"],

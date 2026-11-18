@@ -9,8 +9,10 @@ import {
   Barcode,
   Boxes,
   Layers,
+  Leaf,
   Package,
   PackageX,
+  Sparkles,
   Tags,
   Warehouse,
 } from "lucide-react"
@@ -91,8 +93,36 @@ export default function ImsDashboardPage() {
                 <AlertDescription>{w}</AlertDescription>
               </Alert>
             ))}
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <StatTile label="All Products" value={d.catalog ? fmt(d.catalog.total_products) : "—"} icon={Package} accent="slate" href="/ims/products" />
               <StatTile label="Active Products" value={d.catalog ? fmt(d.catalog.active_products) : "—"} icon={Package} accent="blue" href="/ims/products" />
+              <StatTile label="Total Inventory" value={fmt(d.cards.total_physical_stock)} icon={Boxes} accent="emerald" subtext="Warehouse 1 + Warehouse 2 + Office" href="/ims/stock" />
+              {d.named_locations.map((loc) => (
+                <StatTile key={loc.id} label={`${loc.label} Stock`} value={fmt(loc.finished_quantity)} icon={loc.label === "Office" ? Warehouse : Boxes} accent="violet" href={`/ims/stock?warehouse_id=${loc.id}`} />
+              ))}
+            </div>
+
+            <Section title="Categories" description="Click a category to see its full stock table.">
+              <div className="grid gap-4 sm:grid-cols-3">
+                {[
+                  { name: "Herbal Masala", icon: Leaf },
+                  { name: "Ayurvedic Products", icon: Sparkles },
+                  { name: "Nutraceutical Products", icon: Tags },
+                ].map(({ name, icon: Icon }) => {
+                  const count = d.category_stock.find((c) => c.category === name)
+                  return (
+                    <Link key={name} href={`/ims/stock?category=${encodeURIComponent(name)}`} className="hover:border-primary/40 block rounded-lg border p-4 transition-colors">
+                      <div className="flex items-center gap-2 font-semibold">
+                        <Icon className="text-muted-foreground size-4" /> {name}
+                      </div>
+                      <p className="text-muted-foreground mt-2 text-sm">{count ? `${fmt(count.quantity)} units in stock` : "No stock recorded yet"}</p>
+                    </Link>
+                  )
+                })}
+              </div>
+            </Section>
+
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               <StatTile label="Product Categories" value={d.catalog ? fmt(d.catalog.categories) : "—"} icon={Tags} accent="violet" href="/ims/categories" />
               <StatTile
                 label="Total SKUs"
@@ -101,14 +131,6 @@ export default function ImsDashboardPage() {
                 accent="slate"
                 subtext={d.catalog && d.catalog.missing_sku_variants > 0 ? `${d.catalog.missing_sku_variants} variants missing SKU` : undefined}
                 href="/ims/skus"
-              />
-              <StatTile
-                label="Total Physical Stock"
-                value={fmt(d.cards.total_physical_stock)}
-                icon={Boxes}
-                accent="emerald"
-                subtext={`${d.cards.tracked_finished_items} finished SKUs tracked`}
-                href="/ims/stock"
               />
               <StatTile label="Total Warehouses" value={fmt(d.cards.total_warehouses)} icon={Warehouse} accent="blue" subtext={`${d.cards.active_warehouses} active`} href="/ims/warehouses" />
               <StatTile label="Low Stock Items" value={fmt(d.cards.low_stock_items)} icon={AlertTriangle} accent="amber" href="/ims/stock" />

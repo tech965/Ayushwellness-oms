@@ -44,7 +44,7 @@ def _product(pid: str, title: str, ptype: str, variants: list[tuple[str, str | N
 def shopify(monkeypatch):
     """Two catalogue pages served through the existing live fetcher."""
     pages = [
-        ([_product("1", "Gold Sachets", "Sachets", [("11", "GS-1")]),
+        ([_product("1", "Gold Sachets", "Herbal Masala", [("11", "GS-1")]),
           _product("2", "Calcium Tablets", "Tablets", [("21", "CAL-1"), ("22", None)])],
          "cur1", True),
         ([_product("3", "Old Thing", "Misc", [("31", "OLD")], status="archived")], None, False),
@@ -499,12 +499,12 @@ async def test_shopify_catalog_pagination_and_filters(db_session, make_authentic
     assert [p["title"] for p in miss["items"]] == ["Calcium Tablets"]
     assert miss["items"][0]["variants"][1]["sku_missing"] is True
     assert miss["items"][0]["variants"][1]["sku"] is None
-    cat = (await mgr.get("/api/v1/ims/catalog/products?category=Sachets")).json()["data"]
+    cat = (await mgr.get("/api/v1/ims/catalog/products?category=Herbal+Masala")).json()["data"]
     assert cat["total_items"] == 1
     search = (await mgr.get("/api/v1/ims/catalog/products?q=cal-1")).json()["data"]
     assert search["total_items"] == 1
     cats = (await mgr.get("/api/v1/ims/catalog/categories")).json()["data"]["items"]
-    assert {c["category"] for c in cats} == {"Sachets", "Tablets", "Misc"}
+    assert {c["category"] for c in cats} == {"Herbal Masala", "Nutraceutical Products"}
     assert len(shopify) == 2  # served from cache after the first load
 
 

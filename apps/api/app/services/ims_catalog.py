@@ -29,6 +29,133 @@ PAGE_SIZE = 100
 MAX_PAGES = 50  # 5,000 products; `truncated` is reported beyond this.
 UNCATEGORISED = "Uncategorised"
 
+# IMS-level cat egory buckets (independent of Shopify's `product_type`,
+# which doesn't carve the catalogue this way). Herbal Masala already has
+# its own Shopify product_type and needs no override. The three products
+# below have no Shopify category matching their real-world classification
+# as Ayurvedic -- confirmed with the business on 2026-11-17 (Vajrashakti,
+# Himalayan Shilajit Drops, Arjuna Plus -- 3 products / 8 SKUs exactly).
+# Mardshakti Kit and Gut & Detox Bundle are their own fourth bucket, Kits
+# & Combos -- approved 2026-11-17, after first being excluded from the
+# other three pending that confirmation. Every other active product falls
+# into Nutraceutical Products. Keyed by Shopify product id (stable across
+# title/variant edits, unlike title matching).
+HERBAL_MASALA = "Herbal Masala"
+AYURVEDIC_PRODUCTS = "Ayurvedic Products"
+NUTRACEUTICAL_PRODUCTS = "Nutraceutical Products"
+KITS_AND_COMBOS = "Kits & Combos"
+
+_AYURVEDIC_PRODUCT_IDS = {
+    "8471325999293",  # Vajrashakti
+    "8475914043581",  # Arjuna Plus
+    "8310135521469",  # Himalayan Shilajit Drops
+}
+
+_KITS_AND_COMBOS_PRODUCT_IDS = {
+    "8491034673341",  # Mardshakti Kit
+    "8210784059581",  # Gut & Detox Bundle
+}
+
+
+def _ims_bucket(product_id: str | None, shopify_product_type: str) -> str:
+    if product_id in _AYURVEDIC_PRODUCT_IDS:
+        return AYURVEDIC_PRODUCTS
+    if product_id in _KITS_AND_COMBOS_PRODUCT_IDS:
+        return KITS_AND_COMBOS
+    if shopify_product_type == HERBAL_MASALA:
+        return HERBAL_MASALA
+    return NUTRACEUTICAL_PRODUCTS
+
+
+# Exact, hand-confirmed hierarchy for the IMS Categories page (Category ->
+# group -> SKU). A "group" is a flavour for Herbal Masala (one Shopify
+# product, three flavours encoded in its variants) and a product for
+# Ayurvedic/Nutraceutical. Packaging text is preserved exactly as supplied
+# by the business, not reinterpreted from Shopify's own variant titles
+# (e.g. Beauty Gummies' second SKU is "2 Jars + 2 Jars" here even though
+# Shopify's variant title says "2 Jars+2 Free" -- same SKU, business's own
+# wording). Every SKU below was confirmed live against Shopify on
+# 2026-11-17: all 43 exist with these exact codes, nothing invented.
+CURATED_CATALOG: dict[str, list[dict[str, Any]]] = {
+    HERBAL_MASALA: [
+        {
+            "name": "Paan Flavour",
+            "skus": [("AW-HM-PN-60", "1 Outer"), ("AW-HM-PN-120", "2 Outers"), ("AW-HM-PN-180", "3 Outers")],
+        },
+        {
+            "name": "Gutka Flavour",
+            "skus": [("AW-HM-CR-60", "1 Outer"), ("AW-HM-CR-120", "2 Outers"), ("AW-HM-CR-180", "3 Outers")],
+        },
+        {
+            "name": "Royal Tobacco Flavour",
+            "skus": [("AW-HM-RG-60", "1 Outer"), ("AW-HM-RG-120", "2 Outers"), ("AW-HM-RG-180", "3 Outers")],
+        },
+    ],
+    AYURVEDIC_PRODUCTS: [
+        {
+            "name": "Arjuna Plus Tablets",
+            "skus": [("ARJ-PLS-30", "1 Bottle"), ("ARJ-PLS-60", "2 Bottles"), ("ARJ-PLS-90", "3 Bottles")],
+        },
+        {
+            "name": "Vajrashakti Capsules",
+            "skus": [("VJR-SKT-30", "1 Bottle"), ("VJR-SKT-60", "2 Bottles"), ("VJR-SKT-90", "3 Bottles")],
+        },
+        {
+            "name": "Himalayan Shilajit Drops",
+            "skus": [("AW-HS-DP-30", "1 Bottle"), ("AW-HS-DP-60", "2 Bottles")],
+        },
+    ],
+    NUTRACEUTICAL_PRODUCTS: [
+        {
+            "name": "Sleep Gummies",
+            "skus": [("AW-SG-GM-30", "1 Jar"), ("AW-SG-GM-60", "2 Jars"), ("AW-SG-GM-90", "3 Jars")],
+        },
+        {
+            "name": "Beauty Gummies",
+            "skus": [("AW-BV-GM-30", "1 Jar"), ("AW-BV-GM-60", "2 Jars + 2 Jars")],
+        },
+        {
+            "name": "Lung Care Tablets",
+            "skus": [("AW-LC-TB-30", "1 Bottle"), ("AW-LC-TB-60", "2 Bottles"), ("AW-LC-TB-90", "3 Bottles")],
+        },
+        {
+            "name": "Liver Care Tablets",
+            "skus": [("AW-LD-TB-30", "1 Bottle"), ("AW-LD-TB-60", "2 Bottles"), ("AW-LD-TB-90", "3 Bottles")],
+        },
+        {
+            "name": "Immune Care Tablets",
+            "skus": [("AW-IC-TB-30", "1 Bottle"), ("AW-IC-TB-60", "2 Bottles"), ("AW-IC-TB-90", "3 Bottles")],
+        },
+        {
+            "name": "Gut Fuel Capsules",
+            "skus": [("AW-GF-CP-30", "1 Bottle"), ("AW-GF-CP-60", "2 Bottles"), ("AW-GF-CP-90", "3 Bottles")],
+        },
+        {
+            "name": "Dia Shield Tablets",
+            "skus": [("AW-DS-TB-20", "1 Bottle"), ("AW-DS-TB-40", "2 Bottles"), ("AW-DS-TB-60", "3 Bottles")],
+        },
+        {
+            "name": "Calcium + Vitamins",
+            "skus": [("AW-CV-TB-30", "1 Bottle"), ("AW-CV-TB-60", "2 Bottles"), ("AW-CV-TB-90", "3 Bottles")],
+        },
+        {
+            "name": "Brain Fuel Capsules",
+            "skus": [("AW-BF-CP-30", "1 Bottle"), ("AW-BF-CP-60", "2 Bottles"), ("AW-BF-CP-90", "3 Bottles")],
+        },
+    ],
+    KITS_AND_COMBOS: [
+        {"name": "Mardshakti Kit", "skus": [("SHJT-VJR-1", "1 Bottle + 1 Bottle")]},
+        {"name": "Gut & Detox Bundle", "skus": [("GTDT-BDL1", "1 Bottle + 1 Bottle")]},
+    ],
+}
+
+# Hand-confirmed exclusions from the four curated buckets above, reported
+# by the Categories page separately rather than guessed into a bucket.
+# Empty now that Mardshakti Kit / Gut & Detox Bundle have their own Kits
+# & Combos bucket -- kept as a mechanism in case a future product needs
+# the same "don't guess, ask" treatment.
+UNCLASSIFIED_SKUS: dict[str, str] = {}
+
 
 @dataclass
 class CatalogSnapshot:
@@ -77,10 +204,11 @@ def _slim(product: dict[str, Any]) -> dict[str, Any]:
                 "price": str(v["price"]) if v.get("price") is not None else None,
             }
         )
+    product_id = product.get("external_id")
     return {
-        "product_id": product.get("external_id"),
+        "product_id": product_id,
         "title": product.get("title"),
-        "category": (product.get("product_type") or "").strip() or UNCATEGORISED,
+        "category": _ims_bucket(product_id, (product.get("product_type") or "").strip()),
         "vendor": product.get("vendor"),
         "status": _status(product),
         "image_url": product.get("image_url"),

@@ -171,6 +171,17 @@ async def catalog_variants(
     )
 
 
+@router.get("/categories", response_model=ApiResponse[dict])
+async def categories_overview(
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission(READ)),
+) -> ApiResponse[dict]:
+    """Herbal Masala / Ayurvedic Products / Nutraceutical Products with each
+    category's live product list and actual per-warehouse stock, for the
+    Categories page's inline accordion."""
+    return ApiResponse(data=await _svc(session, user).categories_overview())
+
+
 @router.get("/catalog/categories", response_model=ApiResponse[dict])
 async def catalog_categories(
     session: AsyncSession = Depends(get_db),
@@ -411,6 +422,7 @@ async def stock_overview(
     category: str | None = None,
     q: str | None = Query(default=None, max_length=120),
     status: str | None = Query(default=None, pattern="^(in_stock|low_stock|out_of_stock)$"),
+    include_inactive: bool = False,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=200),
     session: AsyncSession = Depends(get_db),
@@ -419,7 +431,7 @@ async def stock_overview(
     return _paged(
         await _svc(session, user).stock_overview(
             warehouse_id=warehouse_id, kind=kind, category=category, q=q, status=status,
-            page=page, page_size=page_size,
+            page=page, page_size=page_size, include_inactive=include_inactive,
         )
     )
 

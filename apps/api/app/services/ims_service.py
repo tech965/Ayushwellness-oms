@@ -123,6 +123,25 @@ def item_dict(item: ImsItem) -> dict[str, Any]:
     }
 
 
+def label_locations(whs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Positional "Warehouse 1"/"Warehouse 2"/"Office" labels for the active
+    IMS locations, in `sort_order` -- the one location whose name mentions
+    "office" is called out as such; every other active location is numbered
+    in order. Used wherever the UI needs these fixed, human labels instead
+    of raw warehouse codes."""
+    wh_num = 0
+    out = []
+    for w in whs:
+        if not w["is_active"]:
+            continue
+        label = "Office" if "office" in w["name"].lower() else None
+        if label is None:
+            wh_num += 1
+            label = f"Warehouse {wh_num}"
+        out.append({"label": label, "id": w["id"], "code": w["code"], "name": w["name"]})
+    return out
+
+
 def warehouse_dict(w: Warehouse) -> dict[str, Any]:
     return {
         "id": str(w.id),
@@ -790,9 +809,12 @@ class IMSService:
         status: str | None = None,
         page: int = 1,
         page_size: int = 25,
+        include_inactive: bool = False,
     ) -> dict[str, Any]:
         """One row per item, with its quantity in every IMS warehouse."""
-        stmt = select(ImsItem).where(ImsItem.is_active.is_(True))
+        stmt = select(ImsItem)
+        if not include_inactive:
+            stmt = stmt.where(ImsItem.is_active.is_(True))
         if kind:
             stmt = stmt.where(ImsItem.kind == kind)
         if category:
@@ -813,12 +835,22 @@ class IMSService:
             rows.append({**item_dict(i), "by_warehouse": by_wh, "total": total, "status": st})
         total_items = len(rows)
         start = (page - 1) * page_size
+        # Totals across the FULL filtered set (not just the current page) --
+        # this is what a category/stock table's "grand total" row must show.
+        totals_by_warehouse: dict[str, int] = defaultdict(int)
+        for r in rows:
+            for wid, n in r["by_warehouse"].items():
+                totals_by_warehouse[wid] += n
         return {
             "items": rows[start : start + page_size],
             "total_items": total_items,
             "page": page,
             "page_size": page_size,
             "warehouses": whs,
+            "totals": {
+                "by_warehouse": dict(totals_by_warehouse),
+                "total": sum(r["total"] for r in rows),
+            },
         }
 
     async def item_detail(self, item_id: uuid.UUID) -> dict[str, Any]:
@@ -1632,6 +1664,13 @@ class IMSService:
         for i in finished:
             by_category[i.category or ims_catalog.UNCATEGORISED] += totals[i.id]
 
+        # Dashboard-level named locations, independent of any warehouse_id
+        # filter above -- these always reflect the full picture.
+        named_locations = [
+            {**loc, "finished_quantity": sum(qty(i.id, loc["id"]) for i in finished)}
+            for loc in label_locations(whs)
+        ]
+
         move_conds = self._ledger_conditions(
             warehouse_id=warehouse_id, item_id=None, movement_type=None, q=q, category=category,
             reference_no=None, date_from=date_from, date_to=date_to,
@@ -1662,6 +1701,7 @@ class IMSService:
                 "tracked_packaging_items": len(packaging),
             },
             "warehouses": wh_cards,
+            "named_locations": named_locations,
             "stock_distribution": [
                 {
                     "warehouse": w["name"], "code": w["code"],
@@ -1686,4 +1726,92 @@ class IMSService:
             select(ImsItem.category).where(ImsItem.category.is_not(None)).distinct()
         )
         return sorted(r[0] for r in rows.all())
+
+    async def categories_overview(self) -> dict[str, Any]:
+        """The curated Categories page hierarchy: Category -> group (a
+        flavour for Herbal Masala, a product for Ayurvedic/Nutraceutical)
+        -> exact SKU -> actual warehouse-by-warehouse stock. The SKU list
+        per group is a fixed, hand-confirmed whitelist (`ims_catalog.
+        CURATED_CATALOG`), not a live Shopify sweep -- a SKU that has never
+        been stocked still appears, with zero in every location (nothing
+        here invents stock), and a catalogue product NOT on the whitelist
+        (e.g. Mardshakti Kit, Gut & Detox Bundle) never silently appears in
+        one of the three buckets; it is reported under `unclassified`
+        instead."""
+        snap = await ims_catalog.get_catalog()
+        whs = await self.list_warehouses()
+        locations = label_locations(whs)
+        sku_index = {v["sku"]: (p, v) for p in snap.products for v in p["variants"] if v["sku"]}
+
+        wanted_variant_ids = {
+            sku_index[sku][1]["variant_id"]
+            for groups in ims_catalog.CURATED_CATALOG.values()
+            for group in groups
+            for sku, _ in group["skus"]
+            if sku in sku_index
+        }
+        items = (
+            (
+                await self.session.execute(
+                    select(ImsItem).where(ImsItem.shopify_variant_id.in_(wanted_variant_ids))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        item_by_variant = {i.shopify_variant_id: i for i in items}
+        per_wh = await self._qty_by_item_wh([i.id for i in items])
+
+        def sku_row(sku: str, packaging: str) -> dict[str, Any]:
+            hit = sku_index.get(sku)
+            by_wh = {loc["id"]: 0 for loc in locations}
+            item_id = status = None
+            if hit is not None:
+                product, variant = hit
+                status = product["status"]
+                item = item_by_variant.get(variant["variant_id"])
+                if item is not None:
+                    item_id = str(item.id)
+                    by_wh = {
+                        loc["id"]: per_wh.get((item.id, uuid.UUID(loc["id"])), 0) for loc in locations
+                    }
+            return {
+                "sku": sku,
+                "packaging": packaging,
+                "item_id": item_id,
+                "status": status,
+                "found_in_catalog": hit is not None,
+                "by_warehouse": by_wh,
+                "total": sum(by_wh.values()),
+            }
+
+        result_items = []
+        for category, groups in ims_catalog.CURATED_CATALOG.items():
+            group_rows = []
+            for group in groups:
+                sku_rows = [sku_row(sku, packaging) for sku, packaging in group["skus"]]
+                group_rows.append({"name": group["name"], "skus": sku_rows, "total": sum(s["total"] for s in sku_rows)})
+            result_items.append(
+                {
+                    "category": category,
+                    "groups": group_rows,
+                    "total_products": len(group_rows),
+                    "total_skus": sum(len(g["skus"]) for g in group_rows),
+                    "total_stock": sum(g["total"] for g in group_rows),
+                }
+            )
+
+        unclassified = []
+        for sku, name in ims_catalog.UNCLASSIFIED_SKUS.items():
+            hit = sku_index.get(sku)
+            unclassified.append(
+                {
+                    "title": name,
+                    "sku": sku,
+                    "current_category": hit[0]["category"] if hit else None,
+                    "found_in_catalog": hit is not None,
+                }
+            )
+
+        return {"items": result_items, "locations": locations, "unclassified": unclassified}
 
