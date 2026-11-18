@@ -611,6 +611,56 @@ async def test_service_level_locking_order_and_ledger_arithmetic(db_session, mak
     assert datetime.now(UTC) > rows[0].occurred_at
 
 
+# --------------------------------------------------------- categories page
+async def test_categories_overview_product_level_aggregation(db_session, make_authenticated_client, monkeypatch):
+    """Categories page: Kits & Combos is no longer returned, and a product
+    with several packaging SKUs (Vajrashakti's 1/2/3 Bottles) is reported as
+    one row whose `by_warehouse`/`total` sum every one of its SKUs, with no
+    double counting."""
+    vajrashakti = _product(
+        "8471325999293", "Vajrashakti", "Capsules",
+        [("v30", "VJR-SKT-30"), ("v60", "VJR-SKT-60"), ("v90", "VJR-SKT-90")],
+    )
+    kit = _product("8491034673341", "Mardshakti Kit", "Kits", [("kv1", "SHJT-VJR-1")])
+
+    async def fake_fetch(*, cursor=None, limit=25, query_filter=None):
+        return ([vajrashakti, kit], None, False)
+
+    monkeypatch.setattr(live_catalog, "fetch_products", fake_fetch)
+    mgr, wh = await _setup(db_session, make_authenticated_client)
+
+    async def resolve(variant_id: str) -> str:
+        body = {"product_id": "8471325999293", "variant_id": variant_id}
+        r = await mgr.post("/api/v1/ims/items/finished", json=body)
+        return r.json()["data"]["id"]
+
+    item30 = await resolve("v30")
+    item60 = await resolve("v60")
+    await _seed_stock(mgr, wh["251"], item30, 10)
+    await _seed_stock(mgr, wh["310"], item30, 4)
+    await _seed_stock(mgr, wh["251"], item60, 5)
+
+    r = await mgr.get("/api/v1/ims/categories")
+    data = r.json()["data"]
+    categories = {c["category"] for c in data["items"]}
+    assert "Kits & Combos" not in categories
+
+    ayurvedic = next(c for c in data["items"] if c["category"] == "Ayurvedic Products")
+    vajra = next(g for g in ayurvedic["groups"] if g["name"] == "Vajrashakti Capsules")
+    assert vajra["total"] == 19  # 10 + 4 + 5, across two different SKUs
+    assert vajra["by_warehouse"][wh["251"]] == 15
+    assert vajra["by_warehouse"][wh["310"]] == 4
+    assert vajra["by_warehouse"][wh["402"]] == 0
+
+    options = {o["sku"]: o for o in vajra["packaging_options"]}
+    # all 3, even the one never adjusted (not yet resolved into an ImsItem)
+    assert set(options) == {"VJR-SKT-30", "VJR-SKT-60", "VJR-SKT-90"}
+    assert options["VJR-SKT-30"]["item_id"] == item30
+    assert options["VJR-SKT-90"]["item_id"] is None  # never adjusted -> no ImsItem yet
+    assert options["VJR-SKT-90"]["product_id"] == "8471325999293"
+    assert options["VJR-SKT-90"]["variant_id"] == "v90"
+
+
 async def test_category_filter_options_survive_shopify_outage(db_session, make_authenticated_client, monkeypatch):
     from app.core.exceptions import IntegrationError
 

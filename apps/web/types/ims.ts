@@ -240,14 +240,34 @@ export interface CategoryOverviewSku {
   found_in_catalog: boolean
   by_warehouse: Record<string, number>
   total: number
+  product_id: string | null
+  variant_id: string | null
+}
+
+/** One packaging variant of a product/flavour, for the Add Stock modal's
+ * packaging dropdown -- no SKU code is shown in the UI, but the item/
+ * product/variant ids are needed to resolve (or create) the IMS item and
+ * post the adjustment against the right packaging. */
+export interface PackagingOption {
+  sku: string
+  packaging: string
+  item_id: string | null
+  product_id: string | null
+  variant_id: string | null
 }
 
 /** A flavour (Herbal Masala) or a product (Ayurvedic/Nutraceutical) -- the
- * middle level of Category -> group -> SKU. */
+ * middle level of Category -> group -> SKU. Displayed as a single
+ * product-level row (`by_warehouse`/`total` already sum every packaging
+ * SKU in the group, so nothing is double-counted); `skus` is kept for
+ * other consumers but no longer rendered on the Categories page. */
 export interface CategoryOverviewGroup {
   name: string
   skus: CategoryOverviewSku[]
   total: number
+  by_warehouse: Record<string, number>
+  image_url: string | null
+  packaging_options: PackagingOption[]
 }
 
 export interface CategoryOverviewEntry {

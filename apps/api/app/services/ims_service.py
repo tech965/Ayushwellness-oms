@@ -1766,9 +1766,11 @@ class IMSService:
             hit = sku_index.get(sku)
             by_wh = {loc["id"]: 0 for loc in locations}
             item_id = status = None
+            product_id = variant_id = None
             if hit is not None:
                 product, variant = hit
                 status = product["status"]
+                product_id, variant_id = product["product_id"], variant["variant_id"]
                 item = item_by_variant.get(variant["variant_id"])
                 if item is not None:
                     item_id = str(item.id)
@@ -1783,14 +1785,48 @@ class IMSService:
                 "found_in_catalog": hit is not None,
                 "by_warehouse": by_wh,
                 "total": sum(by_wh.values()),
+                "product_id": product_id,
+                "variant_id": variant_id,
             }
 
         result_items = []
         for category, groups in ims_catalog.CURATED_CATALOG.items():
+            if category == ims_catalog.KITS_AND_COMBOS:
+                # Hand-removed from the Categories page per business request
+                # (2026-11-18) -- underlying ImsItem/ledger rows for
+                # Mardshakti Kit / Gut & Detox Bundle are untouched, this
+                # bucket just no longer renders here.
+                continue
             group_rows = []
             for group in groups:
                 sku_rows = [sku_row(sku, packaging) for sku, packaging in group["skus"]]
-                group_rows.append({"name": group["name"], "skus": sku_rows, "total": sum(s["total"] for s in sku_rows)})
+                group_by_wh = {
+                    loc["id"]: sum(s["by_warehouse"][loc["id"]] for s in sku_rows)
+                    for loc in locations
+                }
+                found = (sku_index[s["sku"]] for s in sku_rows if s["found_in_catalog"])
+                image_url = next((p["image_url"] for p, _ in found), None)
+                packaging_options = [
+                    {
+                        "sku": s["sku"],
+                        "packaging": s["packaging"],
+                        "item_id": s["item_id"],
+                        "product_id": s["product_id"],
+                        "variant_id": s["variant_id"],
+                    }
+                    for s in sku_rows
+                    if s["found_in_catalog"]
+                ]
+                group_rows.append(
+                    {
+                        "name": group["name"],
+                        "skus": sku_rows,
+                        "total": sum(s["total"] for s in sku_rows),
+                        "by_warehouse": group_by_wh,
+                        "image_url": image_url,
+                        "packaging_options": packaging_options,
+                    }
+                )
             result_items.append(
                 {
                     "category": category,
