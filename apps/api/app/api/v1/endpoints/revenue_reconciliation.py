@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import IntegrationError
+from app.core.exceptions import AuthorizationError, IntegrationError
 from app.db.session import get_db
 from app.dependencies.auth import require_permission
 from app.dependencies.pagination import pagination_params
@@ -125,7 +125,7 @@ async def shiprocket_probe(
     `SHIPROCKET_REMITTANCE_PATH` to the path that returns remittance rows.
     """
     if not user.is_superuser:
-        raise IntegrationError("Admin only.")
+        raise AuthorizationError("Superuser only.")
     adapter = get_adapter(IntegrationCode.SHIPROCKET)
     if not isinstance(adapter, ShiprocketAdapter):
         raise IntegrationError("Shiprocket is not configured.")

@@ -81,6 +81,7 @@ celery_app = Celery(
         "app.tasks.shiprocket_sync",
         "app.tasks.reconciliation_tasks",
         "app.tasks.cod_remittance_sync",
+        "app.tasks.shiprocket_wallet_sync",
         "app.tasks.whatsapp_tasks",
         # Provider-specific task modules are added here as needed, e.g.:
         # "app.tasks.delay_detection",
@@ -141,7 +142,12 @@ def route_task(
         if entity_type is None and len(args) >= 3:
             entity_type = args[2]
         return {"queue": queue_for_entity(entity_type if isinstance(entity_type, str) else None)}
-    if name in ("shiprocket.refresh_tracking", "shiprocket.sync_cod_remittances"):
+    if name in (
+        "shiprocket.refresh_tracking",
+        "shiprocket.sync_cod_remittances",
+        "shiprocket.refresh_wallet_balance",
+        "shiprocket.sync_wallet_ledger",
+    ):
         return {"queue": SHIPROCKET_QUEUE}
     return None
 
@@ -204,6 +210,14 @@ celery_app.conf.update(
         # 20-minute staleness threshold is what actually bounds how long
         # an orphaned job can sit before cleanup, not this interval.
         # COD remittance/collection data from Shiprocket, idempotent per AWB.
+        "refresh-shiprocket-wallet-balance": {
+            "task": "shiprocket.refresh_wallet_balance",
+            "schedule": 1800.0,
+        },
+        "sync-shiprocket-wallet-ledger": {
+            "task": "shiprocket.sync_wallet_ledger",
+            "schedule": 3600.0,
+        },
         "sync-cod-remittances": {
             "task": "shiprocket.sync_cod_remittances",
             "schedule": 3600.0,
