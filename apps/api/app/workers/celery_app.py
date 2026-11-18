@@ -80,6 +80,7 @@ celery_app = Celery(
         "app.tasks.retry_processing",
         "app.tasks.shiprocket_sync",
         "app.tasks.reconciliation_tasks",
+        "app.tasks.cod_remittance_sync",
         "app.tasks.whatsapp_tasks",
         # Provider-specific task modules are added here as needed, e.g.:
         # "app.tasks.delay_detection",
@@ -140,7 +141,7 @@ def route_task(
         if entity_type is None and len(args) >= 3:
             entity_type = args[2]
         return {"queue": queue_for_entity(entity_type if isinstance(entity_type, str) else None)}
-    if name == "shiprocket.refresh_tracking":
+    if name in ("shiprocket.refresh_tracking", "shiprocket.sync_cod_remittances"):
         return {"queue": SHIPROCKET_QUEUE}
     return None
 
@@ -202,6 +203,11 @@ celery_app.conf.update(
         # Same cadence as the sync backstop above; the reaper's own
         # 20-minute staleness threshold is what actually bounds how long
         # an orphaned job can sit before cleanup, not this interval.
+        # COD remittance/collection data from Shiprocket, idempotent per AWB.
+        "sync-cod-remittances": {
+            "task": "shiprocket.sync_cod_remittances",
+            "schedule": 3600.0,
+        },
         "reap-stale-sync-jobs": {
             "task": "sync.reap_stale",
             "schedule": 600.0,

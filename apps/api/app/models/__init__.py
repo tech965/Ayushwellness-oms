@@ -12,6 +12,7 @@ from app.models.abandoned_checkout import AbandonedCheckout
 from app.models.audit_log import AuditLog
 from app.models.auth import RefreshToken, User
 from app.models.cashfree_settlement import CashfreeSettlement
+from app.models.cod_remittance import CodRemittance
 from app.models.chat import ChatQueryLog
 from app.models.checkout_workflow import CheckoutWorkflow
 from app.models.courier import Courier
@@ -126,6 +127,7 @@ __all__ = [
     "Warehouse",
     "CheckoutWorkflow",
     "ShipmentRef",
+    "CodRemittance",
     "WebhookDelivery",
     "WhatsAppContact",
     "WhatsAppCustomerWindow",
