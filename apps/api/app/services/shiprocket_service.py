@@ -28,6 +28,7 @@ from app.models.enums import (
     FulfillmentStatus,
     NDRStatus,
     OrderStatus,
+    PaymentType,
     ShipmentStatus,
     ShopifySyncStatus,
 )
@@ -467,9 +468,44 @@ class ShiprocketOperationsService:
                 )
         return results
 
+    async def _wallet_guard(self, shipment_id: uuid.UUID, courier_id: str | None) -> None:
+        """Pre-assignment wallet protection (see `ShiprocketWalletService`).
+        Runs BEFORE any Shiprocket write, so a failed check creates and
+        assigns nothing. Only a provable shortfall blocks; any other problem
+        with the check itself is logged and the shipment proceeds."""
+        if not settings.SHIPROCKET_WALLET_GUARD_ENABLED:
+            return
+        from app.services.shiprocket_wallet_service import (
+            AssignContext,
+            WalletInsufficientError,
+            WalletService,
+        )
+
+        try:
+            ctx = AssignContext(shipment_ref=str(shipment_id), courier_id=courier_id)
+            if settings.SHOPIFY_LIVE_MODE and await _is_live_ref(self.session, shipment_id):
+                ref = await LiveShiprocketService(self.session).get_ref(shipment_id)
+                ctx.shiprocket_order_id = ref.shiprocket_order_id if ref else None
+            else:
+                shipment = await self._get_shipment(shipment_id)
+                ctx.shiprocket_order_id = shiprocket_order_id(shipment)
+                order = await self.orders.get_by_id(shipment.order_id)
+                if order is not None:
+                    ctx.order_number = order.order_number
+                    ctx.cod = order.payment_type == PaymentType.COD
+                    address = order.shipping_address or {}
+                    ctx.delivery_pincode = address.get("pin_code") or None
+            await WalletService(self.session).check_before_assignment(self._get_adapter(), ctx)
+        except WalletInsufficientError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a broken check must never halt shipping
+            await self.session.rollback()
+            logger.warning("wallet_guard_error_allowing_shipment", error=str(exc))
+
     async def assign_awb(
         self, shipment_id: uuid.UUID, *, actor: User | None, courier_id: str | None
     ) -> Shipment:
+        await self._wallet_guard(shipment_id, courier_id)
         if settings.SHOPIFY_LIVE_MODE and await _is_live_ref(self.session, shipment_id):
             return await LiveShiprocketService(self.session).assign_awb(
                 shipment_id, actor=actor, courier_id=courier_id

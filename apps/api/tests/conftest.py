@@ -84,6 +84,10 @@ def _isolate_provider_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     "SHOPIFY_ACCESS_TOKEN", ...)` in test_shopify_sync.py), which still
     wins since it runs later, in the same test's monkeypatch stack.
     """
+    # The wallet guard makes extra Shiprocket calls; tests that script a queue of
+    # Shiprocket responses must not have them consumed. Wallet tests re-enable it.
+    monkeypatch.setattr(settings, "SHIPROCKET_WALLET_GUARD_ENABLED", False)
+    monkeypatch.setattr(settings, "SHIPROCKET_WALLET_STATEMENT_PATH", "")
     for attr in (
         "SHOPIFY_ACCESS_TOKEN",
         "SHOPIFY_CLIENT_ID",

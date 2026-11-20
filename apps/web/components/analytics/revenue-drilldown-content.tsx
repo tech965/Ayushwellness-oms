@@ -4,6 +4,7 @@ import * as React from "react"
 import { CheckCircle2, Clock, IndianRupee } from "lucide-react"
 import { endOfDay, startOfDay, subDays } from "date-fns"
 
+import { CodReconciliationSection } from "@/components/analytics/cod-reconciliation-section"
 import { DrilldownOrdersTable } from "@/components/analytics/drilldown-orders-table"
 import { MoneyDonutCard } from "@/components/analytics/money-donut"
 import { SplitTimelineChart } from "@/components/analytics/split-timeline-chart"
@@ -163,6 +164,13 @@ export function RevenueDrilldownContent({
               isLoading={timeseriesQuery.isLoading}
             />
           </section>
+
+          <CodReconciliationSection
+            paymentType={paymentType}
+            label={label}
+            dateFrom={dateParams.date_from}
+            dateTo={dateParams.date_to}
+          />
 
           <DrilldownOrdersTable
             title={`${label} Orders`}

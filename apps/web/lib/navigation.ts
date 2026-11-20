@@ -28,6 +28,7 @@ import {
   ShoppingCart,
   Truck,
   Users,
+  Wallet,
   Warehouse,
   Workflow,
 } from "lucide-react"
@@ -115,6 +116,12 @@ export const navGroups: NavGroup[] = [
     items: [
       { label: "Integrations", href: "/integrations", icon: Plug },
       { label: "Reconciliation", href: "/reconciliation", icon: Scale },
+      {
+        label: "Shiprocket Wallet",
+        href: "/shiprocket-wallet",
+        icon: Wallet,
+        permission: "analytics.read",
+      },
       { label: "Automation", href: "/automation", icon: Workflow },
       {
         label: "WhatsApp Automation",

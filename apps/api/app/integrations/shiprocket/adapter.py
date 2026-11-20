@@ -361,6 +361,95 @@ class ShiprocketAdapter(IntegrationAdapter):
             nodes=nodes, next_cursor=str(page_number + 1) if has_more else None, has_more=has_more
         )
 
+    async def get_wallet_balance(self) -> dict[str, Any]:
+        """Raw `GET <SHIPROCKET_WALLET_BALANCE_PATH>` body (shared client +
+        credentials). Parsing lives in `integrations.shiprocket.wallet`."""
+        from app.core.config import settings
+
+        client = self._get_client()
+        try:
+            return await client.request("GET", settings.SHIPROCKET_WALLET_BALANCE_PATH)
+        except ShiprocketApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+    async def get_serviceability(self, params: dict[str, Any]) -> dict[str, Any]:
+        """`GET /courier/serviceability/` (documented in Shiprocket's API
+        helpsheet) -- read-only; used to ESTIMATE the charge before AWB
+        assignment. Never creates or changes anything."""
+        client = self._get_client()
+        try:
+            return await client.request("GET", "/courier/serviceability/", params=params)
+        except ShiprocketApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+
+    async def fetch_wallet_statement(
+        self, *, page: int = 1, per_page: int = 100
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """One page of wallet transactions from `SHIPROCKET_WALLET_STATEMENT_PATH`.
+        Disabled (raises) until that path is set from a verified source."""
+        from app.core.config import settings
+
+        if not settings.SHIPROCKET_WALLET_STATEMENT_PATH:
+            raise IntegrationError(
+                "Wallet transaction sync is not enabled: SHIPROCKET_WALLET_STATEMENT_PATH "
+                "is not set.",
+                details={"error_type": "not_configured"},
+            )
+        client = self._get_client()
+        try:
+            data = await client.request(
+                "GET",
+                settings.SHIPROCKET_WALLET_STATEMENT_PATH,
+                params={"page": page, "per_page": per_page},
+            )
+        except ShiprocketApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+        body = data.get("data", data) if isinstance(data, dict) else data
+        if isinstance(body, dict):
+            body = next((v for v in body.values() if isinstance(v, list)), [])
+        records = [r for r in body if isinstance(r, dict)] if isinstance(body, list) else []
+        meta = data.get("meta", {}).get("pagination", {}) if isinstance(data, dict) else {}
+        total_pages = meta.get("total_pages") if isinstance(meta, dict) else None
+        has_more = bool(records) and (
+            page < total_pages if total_pages else len(records) >= per_page
+        )
+        return records, has_more
+
+    async def fetch_cod_remittances(
+        self, *, page: int = 1, per_page: int = 100
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """One page of COD remittance records via the shared client/token
+        (same credentials as every other Shiprocket call). Returns
+        `(records, has_more)`. The path comes from
+        `settings.SHIPROCKET_REMITTANCE_PATH`.
+        """
+        from app.core.config import settings
+
+        if not settings.SHIPROCKET_REMITTANCE_PATH:
+            raise IntegrationError(
+                "COD remittance sync is not enabled: SHIPROCKET_REMITTANCE_PATH is not set.",
+                details={"error_type": "not_configured"},
+            )
+        client = self._get_client()
+        try:
+            data = await client.request(
+                "GET",
+                settings.SHIPROCKET_REMITTANCE_PATH,
+                params={"page": page, "per_page": per_page},
+            )
+        except ShiprocketApiError as exc:
+            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+        body = data.get("data", data) if isinstance(data, dict) else data
+        if isinstance(body, dict):
+            body = next((v for v in body.values() if isinstance(v, list)), [])
+        records = [r for r in body if isinstance(r, dict)] if isinstance(body, list) else []
+        meta = data.get("meta", {}).get("pagination", {}) if isinstance(data, dict) else {}
+        total_pages = meta.get("total_pages") if isinstance(meta, dict) else None
+        has_more = bool(records) and (
+            page < total_pages if total_pages else len(records) >= per_page
+        )
+        return records, has_more
+
     async def fetch_incremental(
         self, entity_type: str, *, since: datetime, cursor: str | None = None, limit: int = 50
     ) -> FetchPage:

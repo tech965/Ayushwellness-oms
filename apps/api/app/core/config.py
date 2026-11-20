@@ -161,6 +161,31 @@ class Settings(BaseSettings):
     SHIPROCKET_PASSWORD: str | None = None
     SHIPROCKET_API_URL: str = "https://apiv2.shiprocket.in/v1/external"
     SHIPROCKET_WEBHOOK_SECRET: str | None = None
+    # Path (under SHIPROCKET_API_URL) the COD remittance sync reads.
+    # EMPTY = remittance sync disabled (COD figures show "Not reported").
+    # Deliberately has no guessed default: set it only after
+    # /revenue-reconciliation/shiprocket-probe confirms the real endpoint.
+    SHIPROCKET_REMITTANCE_PATH: str = ""
+    # --- Shiprocket wallet ---
+    # Wallet balance endpoint (given by the product owner; response shape not
+    # independently verified -- see integrations/shiprocket/wallet.py).
+    SHIPROCKET_WALLET_BALANCE_PATH: str = "/account/details/wallet-balance"
+    # Wallet transaction-history (passbook/statement) endpoint. EMPTY =
+    # ledger sync disabled: Shiprocket's statement API path/fields are not
+    # verified, so none is guessed. Set only after the wallet probe confirms it.
+    SHIPROCKET_WALLET_STATEMENT_PATH: str = ""
+    # Pre-assignment wallet protection. Blocks AWB assignment only when a
+    # numeric balance AND a numeric charge estimate prove a shortfall; if
+    # either cannot be read the shipment is allowed (and the check is logged
+    # as unverified) so a parsing problem never halts shipping.
+    SHIPROCKET_WALLET_GUARD_ENABLED: bool = False
+    SHIPROCKET_WALLET_SAFETY_BUFFER: float = 50.0
+    # Charge assumed when no estimate can be read. 0 = no assumption.
+    SHIPROCKET_WALLET_FALLBACK_CHARGE: float = 0.0
+    SHIPROCKET_WALLET_LOW_BALANCE_THRESHOLD: float = 500.0
+    # Optional: only used to estimate rates by pincode when the order-id based
+    # serviceability lookup returns nothing.
+    SHIPROCKET_PICKUP_PINCODE: str | None = None
     # Pickup location nickname exactly as configured in the Shiprocket
     # dashboard — required by the order-create API, not guessable/optional.
     SHIPROCKET_PICKUP_LOCATION: str | None = None
