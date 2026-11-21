@@ -114,14 +114,62 @@ function sameInstant(a: Date | undefined, b: Date | undefined): boolean {
   return Math.abs(a.getTime() - b.getTime()) < 2000
 }
 
-/** Global date-range selector with the presets every date-scoped screen
- * needs (spec: dashboard + orders): a horizontal preset toolbar where the
- * active range is filled/highlighted, plus a "Custom Range" popover
- * calendar for anything else. Generalizes the inline picker in `FilterBar`
- * into a standalone, reusable component.
+/** The calendar widget works in browser-local Y/M/D, so the applied IST
+ * instants are re-expressed as local midnights for it (see
+ * `istCalendarDateAsLocalMidnight`).
  */
+function toCalendarRange(value: DateRangeValue): DayRange {
+  return {
+    from: value.from ? istCalendarDateAsLocalMidnight(value.from) : undefined,
+    to: value.to ? istCalendarDateAsLocalMidnight(value.to) : undefined,
+  }
+}
+
+interface DayRange {
+  from?: Date
+  to?: Date
+}
+
+function formatDay(date: Date): string {
+  return format(date, "d MMM yyyy")
+}
+
+/** Global date-range selector with the presets every date-scoped screen
+ * needs: a horizontal preset toolbar where the active range is
+ * filled/highlighted, plus a "Custom Range" popover calendar.
+ *
+ * The custom calendar edits a local *draft*: picking the start date never
+ * propagates to the page (which would refetch and -- on pages that swap in
+ * a loading skeleton -- unmount the picker) and never closes the popover.
+ * The range is applied to the page only on "Apply" (or a preset click);
+ * "Clear" removes the filter. An end date earlier than the start date is
+ * impossible: the calendar re-anchors the range on the new earliest day.
+ * Everything applied is IST-bounded (`lib/ist-date.ts`).
+ */
+const WIDE_QUERY = "(min-width: 640px)"
+
+// `matchMedia` is missing in some environments (e.g. jsdom): assume wide.
+function hasMatchMedia(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function"
+}
+
+function subscribeToWidth(callback: () => void) {
+  if (!hasMatchMedia()) return () => {}
+  const query = window.matchMedia(WIDE_QUERY)
+  query.addEventListener("change", callback)
+  return () => query.removeEventListener("change", callback)
+}
+
 export function DateRangePicker({ value, onChange, className }: DateRangePickerProps) {
+  // Two side-by-side months only where they fit; one month on phones so
+  // the popover (and its Apply/Clear footer) stays inside the viewport.
+  const wide = React.useSyncExternalStore(
+    subscribeToWidth,
+    () => (hasMatchMedia() ? window.matchMedia(WIDE_QUERY).matches : true),
+    () => true
+  )
   const [open, setOpen] = React.useState(false)
+  const [draft, setDraft] = React.useState<DayRange>({})
 
   const activePreset = PRESETS.find((preset) => {
     const range = preset.range()
@@ -130,10 +178,40 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
 
   // Formatted off the IST calendar date (not the raw UTC instant) so the
   // label reads correctly regardless of the viewer's browser timezone.
+  const applied = toCalendarRange(value)
   const customLabel =
-    !activePreset && value.from && value.to
-      ? `${format(istCalendarDateAsLocalMidnight(value.from), "d MMM yyyy")} – ${format(istCalendarDateAsLocalMidnight(value.to), "d MMM yyyy")}`
+    !activePreset && applied.from && applied.to
+      ? `${formatDay(applied.from)} – ${formatDay(applied.to)}`
       : "Custom Range"
+
+  function handleOpenChange(next: boolean) {
+    // Re-seed the draft from the applied value every time the popover
+    // opens, so an abandoned selection never leaks into the next one.
+    if (next) setDraft(toCalendarRange(value))
+    setOpen(next)
+  }
+
+  function apply() {
+    if (!draft.from) return
+    const last = draft.to ?? draft.from
+    onChange({
+      from: istMidnightFromLocalParts(draft.from),
+      to: istEndOfDayFromLocalParts(last),
+    })
+    setOpen(false)
+  }
+
+  function clear() {
+    setDraft({})
+    onChange({ from: undefined, to: undefined })
+    setOpen(false)
+  }
+
+  const summary = !draft.from
+    ? "Select a start date"
+    : !draft.to
+      ? `${formatDay(draft.from)} – select an end date`
+      : `${formatDay(draft.from)} – ${formatDay(draft.to)}`
 
   return (
     <div className={cn("flex flex-wrap items-center gap-1.5", className)}>
@@ -148,7 +226,7 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
           {preset.label}
         </Button>
       ))}
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover open={open} onOpenChange={handleOpenChange}>
         <PopoverTrigger asChild>
           <Button
             variant={!activePreset && value.from && value.to ? "default" : "outline"}
@@ -161,26 +239,43 @@ export function DateRangePicker({ value, onChange, className }: DateRangePickerP
             {customLabel}
           </Button>
         </PopoverTrigger>
-        <PopoverContent className="w-auto p-0" align="end">
+        <PopoverContent
+          className="max-h-[80dvh] w-auto max-w-[calc(100vw-1rem)] overflow-auto p-0"
+          align="end"
+        >
           <Calendar
             mode="range"
-            // The calendar widget compares/highlights day cells via local
-            // Y/M/D getters, so it's fed the IST calendar date re-expressed
-            // as a local midnight — not the raw UTC instant `value` holds
-            // (see `istCalendarDateAsLocalMidnight`'s docstring).
-            selected={{
-              from: value.from ? istCalendarDateAsLocalMidnight(value.from) : undefined,
-              to: value.to ? istCalendarDateAsLocalMidnight(value.to) : undefined,
-            }}
-            onSelect={(range) => {
-              onChange({
-                from: range?.from ? istMidnightFromLocalParts(range.from) : undefined,
-                to: range?.to ? istEndOfDayFromLocalParts(range.to) : undefined,
-              })
-              if (range?.from && range?.to) setOpen(false)
-            }}
-            numberOfMonths={2}
+            defaultMonth={draft.from ?? applied.from}
+            selected={draft.from ? { from: draft.from, to: draft.to } : undefined}
+            onSelect={(range) => setDraft({ from: range?.from, to: range?.to })}
+            numberOfMonths={wide ? 2 : 1}
           />
+          <div className="bg-popover sticky bottom-0 flex flex-wrap items-center justify-between gap-2 border-t p-2">
+            <span
+              className="text-muted-foreground text-xs"
+              data-testid="date-range-summary"
+            >
+              {summary}
+            </span>
+            <div className="flex gap-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clear}
+                data-testid="date-range-clear"
+              >
+                Clear
+              </Button>
+              <Button
+                size="sm"
+                onClick={apply}
+                disabled={!draft.from}
+                data-testid="date-range-apply"
+              >
+                Apply
+              </Button>
+            </div>
+          </div>
         </PopoverContent>
       </Popover>
     </div>

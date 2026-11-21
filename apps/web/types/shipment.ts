@@ -186,10 +186,10 @@ export interface ShipmentAnalytics {
   telecaller_stats: TelecallerShipmentStats[]
 }
 
-/** OMS SOW Module 2 — the 12-status funnel derived from `Order`/
+/** OMS SOW Module 2 — the 13-status funnel (12 SOW statuses plus Fulfilled – Tracking Unavailable) derived from `Order`/
  * `Shipment` state (`app.services.shipment_status.UNIFIED_STATUSES`),
  * distinct from the 9-value `ShipmentStatus` persisted on a `Shipment`
- * row above. Never invent a 13th value here -- the backend's
+ * row above. Never invent a value here -- the backend's
  * `pattern=` validator on `GET /shipments/status-analytics/orders`
  * rejects anything outside this list with a 422.
  */
@@ -206,8 +206,12 @@ export type UnifiedShipmentStatus =
   | "rto_delivered"
   | "ndr"
   | "cancelled"
+  | "fulfilled_tracking_unavailable"
 
-export const UNIFIED_SHIPMENT_STATUS_OPTIONS: { label: string; value: UnifiedShipmentStatus }[] = [
+export const UNIFIED_SHIPMENT_STATUS_OPTIONS: {
+  label: string
+  value: UnifiedShipmentStatus
+}[] = [
   { label: "Order Placed", value: "order_placed" },
   { label: "Ready to Ship", value: "ready_to_ship" },
   { label: "Pickup Pending", value: "pickup_pending" },
@@ -220,6 +224,7 @@ export const UNIFIED_SHIPMENT_STATUS_OPTIONS: { label: string; value: UnifiedShi
   { label: "RTO Delivered", value: "rto_delivered" },
   { label: "NDR", value: "ndr" },
   { label: "Cancelled", value: "cancelled" },
+  { label: "Fulfilled – Tracking Unavailable", value: "fulfilled_tracking_unavailable" },
 ]
 
 export interface UnifiedStatusCount {
@@ -254,6 +259,7 @@ export interface UnifiedStatusDailyPoint {
   rto_delivered: number
   ndr: number
   cancelled: number
+  fulfilled_tracking_unavailable: number
 }
 
 export interface ShipmentStatusHistory {

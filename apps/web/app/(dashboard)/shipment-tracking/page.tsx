@@ -1,16 +1,10 @@
 "use client"
 
 import * as React from "react"
-import {
-  CheckCircle2,
-  PackageCheck,
-  RotateCcw,
-  Timer,
-  Truck,
-} from "lucide-react"
+import { CheckCircle2, PackageCheck, RotateCcw, Timer, Truck } from "lucide-react"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
-import { FilterBar, type DateRangeValue } from "@/components/shared/filter-bar"
+import { FilterBar } from "@/components/shared/filter-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
@@ -24,8 +18,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { formatDate, formatMoney } from "@/lib/format"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { formatDate, formatMoney, formatRate } from "@/lib/format"
+import { useDateRangeFilter } from "@/lib/use-date-range-filter"
 import { usePaginationState } from "@/lib/use-pagination"
 import { useCouriers } from "@/services/couriers"
 import {
@@ -50,19 +52,26 @@ const ALL_COURIERS = "__all__"
  * backend endpoints 403 with a clear reason in that mode instead; see
  * `QueryStates`' error rendering below).
  */
-export default function ShipmentTrackingPage() {
-  const [dateRange, setDateRange] = React.useState<DateRangeValue>({})
+function ShipmentTrackingPageContent() {
+  const {
+    range: dateRange,
+    setRange: setDateRange,
+    dateFrom,
+    dateTo,
+    isDefaultRange,
+  } = useDateRangeFilter()
   const [courierId, setCourierId] = React.useState<string | undefined>(undefined)
   const [paymentType, setPaymentType] = React.useState<string | undefined>(undefined)
   const [sku, setSku] = React.useState("")
-  const [selectedStatus, setSelectedStatus] = React.useState<UnifiedShipmentStatus | null>(null)
+  const [selectedStatus, setSelectedStatus] =
+    React.useState<UnifiedShipmentStatus | null>(null)
 
   const filters = {
     courier_id: courierId,
     payment_type: paymentType,
     sku: sku || undefined,
-    date_from: dateRange.from?.toISOString(),
-    date_to: dateRange.to?.toISOString(),
+    date_from: dateFrom,
+    date_to: dateTo,
   }
 
   const couriersQuery = useCouriers()
@@ -74,6 +83,7 @@ export default function ShipmentTrackingPage() {
     unifiedStatus: selectedStatus ?? "ready_to_ship",
     page,
     pageSize,
+    enabled: selectedStatus !== null,
     ...filters,
   })
 
@@ -109,6 +119,7 @@ export default function ShipmentTrackingPage() {
       />
 
       <FilterBar
+        dateRangeIsDefault={isDefaultRange}
         dateRange={dateRange}
         onDateRangeChange={(range) => {
           setDateRange(range)
@@ -165,89 +176,111 @@ export default function ShipmentTrackingPage() {
         data={analyticsQuery.data}
         onRetry={() => analyticsQuery.refetch()}
       >
-        {(data) => (
-          <>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-              <StatTile
-                label="Pickup %"
-                value={`${data.pickup_rate}%`}
-                icon={Truck}
-                accent="blue"
-                subtext={`of ${data.total_eligible_orders} eligible orders`}
-              />
-              <StatTile
-                label="In-Transit %"
-                value={`${data.in_transit_rate}%`}
-                icon={Timer}
-                accent="amber"
-                subtext={`of ${data.total_shipped_orders} shipped orders`}
-              />
-              <StatTile
-                label="Out for Delivery %"
-                value={`${data.out_for_delivery_rate}%`}
-                icon={PackageCheck}
-                accent="violet"
-                subtext={`of ${data.total_shipped_orders} shipped orders`}
-              />
-              <StatTile
-                label="Delivery %"
-                value={`${data.delivery_rate}%`}
-                icon={CheckCircle2}
-                accent="emerald"
-                subtext={`of ${data.total_shipped_orders} shipped orders`}
-              />
-              <StatTile
-                label="RTO %"
-                value={`${data.rto_rate}%`}
-                icon={RotateCcw}
-                accent="orange"
-                subtext={`of ${data.total_shipped_orders} shipped orders`}
-              />
-            </div>
+        {(data) => {
+          const untrackedCount =
+            data.status_breakdown.find(
+              (row) => row.status === "fulfilled_tracking_unavailable"
+            )?.count ?? 0
+          return (
+            <>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+                <StatTile
+                  label="Pickup %"
+                  value={formatRate(data.pickup_rate, data.total_eligible_orders)}
+                  icon={Truck}
+                  accent="blue"
+                  subtext={`of ${data.total_eligible_orders} eligible orders`}
+                />
+                <StatTile
+                  label="In-Transit %"
+                  value={formatRate(data.in_transit_rate, data.total_shipped_orders)}
+                  icon={Timer}
+                  accent="amber"
+                  subtext={`of ${data.total_shipped_orders} shipped orders`}
+                />
+                <StatTile
+                  label="Out for Delivery %"
+                  value={formatRate(
+                    data.out_for_delivery_rate,
+                    data.total_shipped_orders
+                  )}
+                  icon={PackageCheck}
+                  accent="violet"
+                  subtext={`of ${data.total_shipped_orders} shipped orders`}
+                />
+                <StatTile
+                  label="Delivery %"
+                  value={formatRate(data.delivery_rate, data.total_shipped_orders)}
+                  icon={CheckCircle2}
+                  accent="emerald"
+                  subtext={`of ${data.total_shipped_orders} shipped orders`}
+                />
+                <StatTile
+                  label="RTO %"
+                  value={formatRate(data.rto_rate, data.total_shipped_orders)}
+                  icon={RotateCcw}
+                  accent="orange"
+                  subtext={`of ${data.total_shipped_orders} shipped orders`}
+                />
+              </div>
 
-            <div className="bg-card overflow-hidden rounded-lg border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Orders</TableHead>
-                    <TableHead className="text-right">% of Total</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {data.status_breakdown.map((row) => {
-                    const option = UNIFIED_SHIPMENT_STATUS_OPTIONS.find(
-                      (o) => o.value === row.status
-                    )
-                    return (
-                      <TableRow
-                        key={row.status}
-                        className="hover:bg-muted/50 cursor-pointer"
-                        onClick={() => selectStatus(row.status)}
-                        aria-selected={selectedStatus === row.status}
-                      >
-                        <TableCell className="font-medium">
-                          {option?.label ?? row.status}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">{row.count}</TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {row.percent_of_total}%
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
-            </div>
-          </>
-        )}
+              {untrackedCount > 0 && (
+                <p className="text-muted-foreground text-xs">
+                  {untrackedCount} order(s) are marked fulfilled in Shopify but have no
+                  shipment record here, so there is no tracking or delivery confirmation.
+                  They are shown as “Fulfilled – Tracking Unavailable” and are excluded
+                  from the Pickup, In-Transit, Delivery and RTO percentages.
+                </p>
+              )}
+              <div className="bg-card overflow-hidden rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="text-right">Orders</TableHead>
+                      <TableHead className="text-right">% of Total</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {data.status_breakdown.map((row) => {
+                      const option = UNIFIED_SHIPMENT_STATUS_OPTIONS.find(
+                        (o) => o.value === row.status
+                      )
+                      return (
+                        <TableRow
+                          key={row.status}
+                          className="hover:bg-muted/50 cursor-pointer"
+                          onClick={() => selectStatus(row.status)}
+                          aria-selected={selectedStatus === row.status}
+                        >
+                          <TableCell className="font-medium">
+                            {option?.label ?? row.status}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {row.count}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {row.percent_of_total}%
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )
+        }}
       </QueryStates>
 
       {selectedStatus && (
         <div className="space-y-3">
           <h3 className="text-sm font-semibold">
             Orders —{" "}
-            {UNIFIED_SHIPMENT_STATUS_OPTIONS.find((o) => o.value === selectedStatus)?.label}
+            {
+              UNIFIED_SHIPMENT_STATUS_OPTIONS.find((o) => o.value === selectedStatus)
+                ?.label
+            }
           </h3>
           <QueryStates
             isLoading={drilldownQuery.isLoading}
@@ -323,5 +356,18 @@ export default function ShipmentTrackingPage() {
         </QueryStates>
       </div>
     </div>
+  )
+}
+
+/** `useDateRangeFilter` keeps the range in the URL (`useSearchParams`), which
+ * Next.js requires to sit under a Suspense boundary for static prerendering.
+ */
+export default function ShipmentTrackingPage() {
+  return (
+    <React.Suspense
+      fallback={<div className="text-muted-foreground p-4 text-sm">Loading…</div>}
+    >
+      <ShipmentTrackingPageContent />
+    </React.Suspense>
   )
 }

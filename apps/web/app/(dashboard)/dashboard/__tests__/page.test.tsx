@@ -75,25 +75,30 @@ describe("Dashboard Today/Yesterday hourly comparison", () => {
       logout: vi.fn(),
     } as unknown as ReturnType<typeof useAuth>)
 
-    mockedSummary.mockReturnValue({ data: undefined, isLoading: false } as unknown as ReturnType<
-      typeof useAnalyticsSummary
-    >)
-    mockedBreakdowns.mockReturnValue({ data: undefined, isLoading: false } as unknown as ReturnType<
-      typeof useBreakdowns
-    >)
-    mockedCourier.mockReturnValue({ data: undefined, isLoading: false } as unknown as ReturnType<
-      typeof useCourierPerformance
-    >)
-    mockedRecent.mockReturnValue({ data: undefined, isLoading: false } as unknown as ReturnType<
-      typeof useRecentActivity
-    >)
+    mockedSummary.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAnalyticsSummary>)
+    mockedBreakdowns.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useBreakdowns>)
+    mockedCourier.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useCourierPerformance>)
+    mockedRecent.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useRecentActivity>)
     mockedReturnsRefunds.mockReturnValue({
       data: undefined,
       isLoading: false,
     } as unknown as ReturnType<typeof useReturnsRefundsSummary>)
-    mockedTopProducts.mockReturnValue({ data: undefined, isLoading: false } as unknown as ReturnType<
-      typeof useTopProducts
-    >)
+    mockedTopProducts.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useTopProducts>)
     mockedTimeseries.mockReturnValue({
       data: EMPTY_TIMESERIES,
       isLoading: false,
@@ -198,5 +203,85 @@ describe("Dashboard Today/Yesterday hourly comparison", () => {
     renderWithProviders(<DashboardPage />)
 
     expect(screen.getByText("0.0% of customers")).toBeInTheDocument()
+  })
+})
+
+describe("Dashboard analytics query gating", () => {
+  function authWith(hasAnalytics: boolean) {
+    mockedUseAuth.mockReturnValue({
+      user: {
+        id: "1",
+        name: "Test",
+        email: "t@example.com",
+        phone: null,
+        is_active: true,
+        is_superuser: false,
+        roles: [],
+        permissions: [],
+      },
+      permissions: new Set(),
+      isLoading: false,
+      hasPermission: (code: string) => (code === "analytics.read" ? hasAnalytics : true),
+      hasRole: () => false,
+      logout: vi.fn(),
+    } as unknown as ReturnType<typeof useAuth>)
+    for (const hook of [
+      mockedSummary,
+      mockedBreakdowns,
+      mockedCourier,
+      mockedRecent,
+      mockedReturnsRefunds,
+      mockedTopProducts,
+      mockedTimeseries,
+    ]) {
+      const mocked = hook as unknown as {
+        mockReset: () => void
+        mockReturnValue: (value: unknown) => void
+      }
+      mocked.mockReset()
+      mocked.mockReturnValue({ data: undefined, isLoading: false })
+    }
+    searchParams = new URLSearchParams()
+  }
+
+  // Every analytics hook is called with the options object as its LAST argument.
+  function enabledFlags(mocked: { mock: { calls: unknown[][] } }) {
+    return mocked.mock.calls.map(
+      (call) => (call[call.length - 1] as { enabled?: boolean } | undefined)?.enabled
+    )
+  }
+
+  const allHooks = () => [
+    mockedSummary,
+    mockedBreakdowns,
+    mockedCourier,
+    mockedRecent,
+    mockedReturnsRefunds,
+    mockedTopProducts,
+    mockedTimeseries,
+  ]
+
+  it("never enables any analytics request for a role without analytics.read", () => {
+    authWith(false)
+    renderWithProviders(<DashboardPage />)
+    for (const hook of allHooks()) {
+      expect(hook).toHaveBeenCalled()
+      expect(enabledFlags(hook).every((flag) => flag === false)).toBe(true)
+    }
+  })
+
+  it("enables the analytics requests for a role with analytics.read", () => {
+    authWith(true)
+    renderWithProviders(<DashboardPage />)
+    for (const hook of [
+      mockedSummary,
+      mockedBreakdowns,
+      mockedCourier,
+      mockedRecent,
+      mockedReturnsRefunds,
+      mockedTopProducts,
+    ]) {
+      expect(enabledFlags(hook).every((flag) => flag === true)).toBe(true)
+    }
   })
 })

@@ -191,10 +191,12 @@ interface DrilldownParams extends ShipmentStatusAnalyticsFilters {
   unifiedStatus: UnifiedShipmentStatus
   page: number
   pageSize: number
+  /** Only fetch once a status row has actually been selected. */
+  enabled?: boolean
 }
 
 export function useShipmentStatusDrilldown(params: DrilldownParams) {
-  const { unifiedStatus, page, pageSize, ...filters } = params
+  const { unifiedStatus, page, pageSize, enabled = true, ...filters } = params
   return useQuery({
     queryKey: ["shipments", "status-analytics", "orders", unifiedStatus, page, pageSize, filters],
     queryFn: async (): Promise<PaginatedResponse<ShipmentStatusDrilldownRow>> => {
@@ -204,7 +206,7 @@ export function useShipmentStatusDrilldown(params: DrilldownParams) {
       )
       return response.data
     },
-    enabled: Boolean(unifiedStatus),
+    enabled: enabled && Boolean(unifiedStatus),
     placeholderData: (previous) => previous,
   })
 }

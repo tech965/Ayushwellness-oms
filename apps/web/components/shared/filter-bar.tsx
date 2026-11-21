@@ -1,13 +1,11 @@
 "use client"
 
 import * as React from "react"
-import { CalendarIcon, Search, X } from "lucide-react"
-import { format } from "date-fns"
+import { Search, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Calendar } from "@/components/ui/calendar"
+import { DateRangePicker } from "@/components/shared/date-range-picker"
 import { Input } from "@/components/ui/input"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import {
   Select,
   SelectContent,
@@ -39,6 +37,11 @@ interface FilterBarProps {
   statusLabel?: string
   dateRange?: DateRangeValue
   onDateRangeChange?: (range: DateRangeValue) => void
+  /** True when `dateRange` is just the page's built-in default (e.g. Last
+   * 30 Days) rather than something the viewer picked -- it then doesn't
+   * count as an active filter, so "Clear" isn't offered for it.
+   */
+  dateRangeIsDefault?: boolean
   extra?: React.ReactNode
   className?: string
 }
@@ -56,11 +59,14 @@ export function FilterBar({
   statusLabel = "Status",
   dateRange,
   onDateRangeChange,
+  dateRangeIsDefault = false,
   extra,
   className,
 }: FilterBarProps) {
   const hasActiveFilters = Boolean(
-    searchValue || statusValue || dateRange?.from || dateRange?.to
+    searchValue ||
+    statusValue ||
+    (!dateRangeIsDefault && (dateRange?.from || dateRange?.to))
   )
 
   function clearAll() {
@@ -110,31 +116,11 @@ export function FilterBar({
       )}
 
       {onDateRangeChange && (
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button
-              variant="outline"
-              className={cn(
-                "gap-2 font-normal",
-                !dateRange?.from && !dateRange?.to && "text-muted-foreground"
-              )}
-            >
-              <CalendarIcon className="size-4" />
-              {dateRange?.from ? format(dateRange.from, "d MMM") : "From"} &ndash;{" "}
-              {dateRange?.to ? format(dateRange.to, "d MMM") : "To"}
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent className="w-auto p-0" align="start">
-            <Calendar
-              mode="range"
-              selected={{ from: dateRange?.from, to: dateRange?.to }}
-              onSelect={(range) =>
-                onDateRangeChange({ from: range?.from, to: range?.to })
-              }
-              numberOfMonths={2}
-            />
-          </PopoverContent>
-        </Popover>
+        // The shared IST-aware picker (draft selection + Apply/Clear +
+        // presets) -- the same component the dashboards use, so every
+        // date filter behaves identically and sends IST day-bounded
+        // instants (end date inclusive through 23:59:59.999 IST).
+        <DateRangePicker value={dateRange ?? {}} onChange={onDateRangeChange} />
       )}
 
       {hasActiveFilters && (

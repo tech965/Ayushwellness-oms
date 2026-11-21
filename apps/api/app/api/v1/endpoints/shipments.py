@@ -259,7 +259,7 @@ async def get_shipment_status_drilldown(
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("shipments.read")),
 ) -> PaginatedResponse[ShipmentStatusDrilldownRowResponse]:
-    """Individual orders under one of the 12 unified statuses — the
+    """Individual orders under one of the 13 unified statuses — the
     SOW's "ability to view individual orders under each status".
     """
     rows, total = await ShipmentStatusAnalyticsService(session).get_status_drilldown(

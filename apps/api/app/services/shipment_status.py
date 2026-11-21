@@ -17,8 +17,12 @@ whole table) are provided below. They MUST stay in lock-step -- see
 `tests/test_shipment_status_analytics.py`, which asserts both produce
 the same bucket for every seeded combination.
 
-## The 12 buckets, and exactly how each is reached
+## The 12 SOW buckets plus `fulfilled_tracking_unavailable`, and how each is reached
 
+- `fulfilled_tracking_unavailable`: no `Shipment` row at all, but Shopify's
+  `fulfillment_status` is FULFILLED (whatever `Order.status` is). Shipped
+  outside this OMS: no tracking, NO delivery confirmation -- never counted
+  as delivered, shipped, pending or eligible-for-pickup.
 - `order_placed`: `Order.status == PENDING`. Order exists, not yet
   confirmed -- nothing shipping-related has happened yet.
 - `ready_to_ship`: `Order.status` in (CONFIRMED, PROCESSING, PACKED) and
@@ -66,8 +70,9 @@ the same bucket for every seeded combination.
    routed through this OMS's own Shiprocket pipeline --
    `shipment_queue_query`'s docstring calls this out explicitly for the
    same reason it filters on `fulfillment_status`). Classified as
-   `delivered` when `Order.fulfillment_status == FULFILLED` (Shopify's
-   own record says it arrived), else folded into `ready_to_ship` as the
+   `fulfilled_tracking_unavailable` when `Order.fulfillment_status ==
+   FULFILLED` (Shopify says it shipped, but with no tracking there is NO
+   delivery confirmation, so it is never `delivered`), else folded into `ready_to_ship` as the
    least-wrong "needs attention" bucket, since this OMS has no shipment
    timeline for it at all. This is a pre-existing data-shape quirk, not
    something Module 2 introduces.
@@ -100,10 +105,7 @@ UNIFIED_STATUSES: Final[tuple[str, ...]] = (
     "rto_delivered",
     "ndr",
     "cancelled",
-)
-
-_PRE_SHIPMENT_ORDER_STATUSES: Final[frozenset[str]] = frozenset(
-    {OrderStatus.CONFIRMED.value, OrderStatus.PROCESSING.value, OrderStatus.PACKED.value}
+    "fulfilled_tracking_unavailable",
 )
 
 # Every shipment status that maps 1:1 onto a unified bucket of the same
@@ -151,11 +153,17 @@ def classify_unified_status(
         return "cancelled"
     if order_status == OrderStatus.PENDING.value:
         return "order_placed"
-    if order_status in _PRE_SHIPMENT_ORDER_STATUSES:
-        return "ready_to_ship"
-    # SHIPPED/DELIVERED with no local Shipment row -- judgment call (2) above.
+    # No local Shipment row, but Shopify already marks the order fulfilled:
+    # it shipped outside this OMS's own pipeline, so it must never be
+    # reported as still awaiting shipment -- whatever `Order.status` says
+    # (an order can sit at CONFIRMED while Shopify has fulfilled it). But
+    # "fulfilled" is not "delivered": with no tracking there is no delivery
+    # confirmation, so it gets its own bucket and is excluded from every
+    # delivery/shipped KPI. Only a *fully* fulfilled order qualifies;
+    # PARTIAL/UNFULFILLED orders still need shipping and stay
+    # `ready_to_ship`. Judgment call (2) above.
     if fulfillment_status == FulfillmentStatus.FULFILLED.value:
-        return "delivered"
+        return "fulfilled_tracking_unavailable"
     return "ready_to_ship"
 
 
@@ -227,12 +235,8 @@ def unified_status_sql_case(
             "order_placed",
         ),
         (
-            order_status_col.in_(tuple(_PRE_SHIPMENT_ORDER_STATUSES)),
-            "ready_to_ship",
-        ),
-        (
             fulfillment_status_col == FulfillmentStatus.FULFILLED.value,
-            "delivered",
+            "fulfilled_tracking_unavailable",
         ),
         else_="ready_to_ship",
     )

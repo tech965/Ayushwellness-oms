@@ -16,3 +16,10 @@ export function formatDate(iso: string): string {
 export function formatDateTime(iso: string): string {
   return format(parseISO(iso), "d MMM yyyy, h:mm a")
 }
+
+/** A rate over a zero denominator is undefined, not 0%: show "—". A real
+ * 0% (denominator > 0, nothing successful) still renders as "0%".
+ */
+export function formatRate(rate: number, denominator: number): string {
+  return denominator > 0 ? `${rate}%` : "—"
+}

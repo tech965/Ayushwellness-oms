@@ -125,6 +125,7 @@ class _FulfilmentRow:
     fulfilment_start: datetime
     pickup_date: datetime | None
     unified_status: str
+    has_shipment: bool = True
 
 
 @dataclass
@@ -181,6 +182,7 @@ class FulfilmentPerformanceService:
                     fulfilment_start=confirmed_at or order_dt,
                     pickup_date=pickup_date,
                     unified_status=unified,
+                    has_shipment=shp_status is not None,
                 )
             )
         return out
@@ -219,7 +221,13 @@ class FulfilmentPerformanceService:
                     pending_over_24h += 1
                 if age_hours > 48:
                     pending_over_48h += 1
-            elif row.unified_status not in ("order_placed", "cancelled"):
+            elif row.has_shipment and row.unified_status not in (
+                "order_placed",
+                "cancelled",
+                "fulfilled_tracking_unavailable",
+            ):
+                # (No Shipment row at all -- e.g. fulfilled directly in
+                # Shopify -- means no pickup timestamp by design, not a gap.)
                 # Reached picked_up-or-later per the classifier, but the
                 # controlling shipment has no `pickup_date` -- a genuine
                 # upstream data gap (sync lag / legacy row), not "pending".

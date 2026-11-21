@@ -3,12 +3,20 @@
 import * as React from "react"
 import { AlertTriangle, PackageCheck, Percent, Truck } from "lucide-react"
 
-import { FilterBar, type DateRangeValue } from "@/components/shared/filter-bar"
+import { FilterBar } from "@/components/shared/filter-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { StatTile } from "@/components/shared/stat-tile"
 import { Input } from "@/components/ui/input"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { useDateRangeFilter } from "@/lib/use-date-range-filter"
 import { usePartnerAllocation, usePartnerPerformance } from "@/services/shipments"
 
 function pct(value: number | null): string {
@@ -27,16 +35,22 @@ function days(value: number | null): string {
  * stored order/shipment data — same "stored data" screen as Module 2/3's
  * pages, no `LiveModeGate` needed.
  */
-export default function ShippingPartnersPage() {
-  const [dateRange, setDateRange] = React.useState<DateRangeValue>({})
+function ShippingPartnersPageContent() {
+  const {
+    range: dateRange,
+    setRange: setDateRange,
+    dateFrom,
+    dateTo,
+    isDefaultRange,
+  } = useDateRangeFilter()
   const [paymentType, setPaymentType] = React.useState<string | undefined>(undefined)
   const [sku, setSku] = React.useState("")
 
   const filters = {
     payment_type: paymentType,
     sku: sku || undefined,
-    date_from: dateRange.from?.toISOString(),
-    date_to: dateRange.to?.toISOString(),
+    date_from: dateFrom,
+    date_to: dateTo,
   }
 
   const allocationQuery = usePartnerAllocation(filters)
@@ -45,11 +59,12 @@ export default function ShippingPartnersPage() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title="Shipping Partners"
+        title="Shipping Partner Performance"
         description="Order allocation and performance comparison across every registered shipping partner — allocation %, delivery success rate, RTO %, COD/Prepaid performance. Unintegrated partners (no courier record yet) simply don't appear."
       />
 
       <FilterBar
+        dateRangeIsDefault={isDefaultRange}
         dateRange={dateRange}
         onDateRangeChange={setDateRange}
         statusValue={paymentType}
@@ -117,15 +132,25 @@ export default function ShippingPartnersPage() {
                     {data.partners.map((row) => (
                       <TableRow key={row.courier_id}>
                         <TableCell className="font-medium">{row.courier_name}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.orders_allocated}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.allocation_percent}%</TableCell>
-                        <TableCell className="text-right tabular-nums">{days(row.avg_delivery_days)}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.orders_allocated}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.allocation_percent}%
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {days(row.avg_delivery_days)}
+                        </TableCell>
                       </TableRow>
                     ))}
                     <TableRow className="bg-muted/30 font-semibold">
                       <TableCell>Total</TableCell>
-                      <TableCell className="text-right tabular-nums">{data.total_orders_allocated}</TableCell>
-                      <TableCell className="text-right tabular-nums">{data.total_allocation_percent}%</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {data.total_orders_allocated}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {data.total_allocation_percent}%
+                      </TableCell>
                       <TableCell className="text-right">—</TableCell>
                     </TableRow>
                   </TableBody>
@@ -155,7 +180,7 @@ export default function ShippingPartnersPage() {
           {(data) => (
             <>
               {!data.shipping_cost_available && (
-                <div className="bg-amber-50 text-amber-900 dark:bg-amber-950 dark:text-amber-200 flex items-start gap-2 rounded-lg border border-amber-200 p-3 text-sm dark:border-amber-800">
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200">
                   <AlertTriangle className="mt-0.5 size-4 shrink-0" />
                   <span>{data.shipping_cost_unavailable_reason}</span>
                 </div>
@@ -171,7 +196,9 @@ export default function ShippingPartnersPage() {
                       <TableHead className="text-right">Delivery Success %</TableHead>
                       <TableHead className="text-right">RTO %</TableHead>
                       <TableHead className="text-right">Avg. Delivery Days</TableHead>
-                      <TableHead className="text-right">Avg. Fulfilment-to-Delivery Days</TableHead>
+                      <TableHead className="text-right">
+                        Avg. Fulfilment-to-Delivery Days
+                      </TableHead>
                       <TableHead className="text-right">COD Success %</TableHead>
                       <TableHead className="text-right">Prepaid Success %</TableHead>
                       <TableHead className="text-right">Cost / Delivered Order</TableHead>
@@ -182,16 +209,30 @@ export default function ShippingPartnersPage() {
                     {data.partners.map((row) => (
                       <TableRow key={row.courier_id}>
                         <TableCell className="font-medium">{row.courier_name}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.total_allocated}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.total_picked_up}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.total_delivered}</TableCell>
-                        <TableCell className="text-right tabular-nums">{pct(row.delivery_success_rate)}</TableCell>
-                        <TableCell className="text-right tabular-nums">{pct(row.rto_percentage)}</TableCell>
-                        <TableCell className="text-right tabular-nums">{days(row.avg_delivery_days)}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.total_allocated}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.total_picked_up}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.total_delivered}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {pct(row.delivery_success_rate)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {pct(row.rto_percentage)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {days(row.avg_delivery_days)}
+                        </TableCell>
                         <TableCell className="text-right tabular-nums">
                           {days(row.avg_fulfilment_to_delivery_days)}
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">{pct(row.cod_delivery_success_rate)}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {pct(row.cod_delivery_success_rate)}
+                        </TableCell>
                         <TableCell className="text-right tabular-nums">
                           {pct(row.prepaid_delivery_success_rate)}
                         </TableCell>
@@ -215,5 +256,18 @@ export default function ShippingPartnersPage() {
         </QueryStates>
       </div>
     </div>
+  )
+}
+
+/** `useDateRangeFilter` keeps the range in the URL (`useSearchParams`), which
+ * Next.js requires to sit under a Suspense boundary for static prerendering.
+ */
+export default function ShippingPartnersPage() {
+  return (
+    <React.Suspense
+      fallback={<div className="text-muted-foreground p-4 text-sm">Loading…</div>}
+    >
+      <ShippingPartnersPageContent />
+    </React.Suspense>
   )
 }

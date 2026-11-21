@@ -18,7 +18,7 @@ import pytest
 from app.db.session import get_db
 from app.main import app
 from app.models.courier import Courier
-from app.models.enums import OrderStatus, PaymentType, ShipmentStatus
+from app.models.enums import FulfillmentStatus, OrderStatus, PaymentType, ShipmentStatus
 from app.models.shipment import Shipment
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,6 +161,42 @@ async def test_pending_fulfilment_24h_48h_buckets(db_session: AsyncSession) -> N
     assert data["pending_fulfilment_count"] == 3
     assert data["pending_over_24h_count"] == 2
     assert data["pending_over_48h_count"] == 1
+
+
+async def test_shopify_fulfilled_orders_without_shipment_are_not_pending(
+    db_session: AsyncSession,
+) -> None:
+    """Regression: a CONFIRMED order Shopify already marked FULFILLED (no
+    local Shipment row) is not "pending fulfilment" and not a missing-pickup
+    data gap; a genuinely unfulfilled confirmed order still is pending.
+    """
+    user = await _make_reader(db_session, email="fa-shopify@example.com")
+    now = datetime.now(UTC)
+
+    fulfilled = await make_order(
+        db_session,
+        order_number="FA-SHOPIFY-FULFILLED",
+        status=OrderStatus.CONFIRMED,
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+    )
+    await _set_confirmed_at(db_session, fulfilled, now - timedelta(hours=100))
+
+    unfulfilled = await make_order(
+        db_session,
+        order_number="FA-REALLY-PENDING",
+        status=OrderStatus.CONFIRMED,
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+    )
+    await _set_confirmed_at(db_session, unfulfilled, now - timedelta(hours=100))
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.get("/api/v1/shipments/fulfilment-performance")
+        data = response.json()["data"]
+
+    assert data["pending_fulfilment_count"] == 1
+    assert data["pending_over_24h_count"] == 1
+    assert data["pending_over_48h_count"] == 1
+    assert data["missing_pickup_timestamp_count"] == 0
 
 
 async def test_order_placed_not_counted_as_pending_fulfilment(db_session: AsyncSession) -> None:
@@ -503,3 +539,40 @@ async def test_delivery_performance_history_buckets_by_delivery_day(db_session: 
     assert len(daily) == 1
     assert daily[0]["delivered_order_count"] == 1
     assert daily[0]["avg_delivery_days"] == pytest.approx(3.0, abs=0.02)
+
+
+async def test_tracking_unavailable_orders_do_not_affect_delivery_performance(
+    db_session: AsyncSession,
+) -> None:
+    """Delivery calculations only ever use real DELIVERED shipments with both
+    timestamps: Shopify-fulfilled orders with no shipment row add nothing to
+    the delivered count, the averages or the data-gap counter.
+    """
+    user = await _make_reader(db_session, email="dp-tu@example.com")
+    now = datetime.now(UTC)
+    for i in range(2):
+        await make_order(
+            db_session,
+            order_number=f"DP-TU-{i}",
+            status=OrderStatus.CONFIRMED,
+            fulfillment_status=FulfillmentStatus.FULFILLED,
+        )
+    real = await make_order(db_session, order_number="DP-REAL", status=OrderStatus.CONFIRMED)
+    await _add_shipment(
+        db_session,
+        order=real,
+        current_status=ShipmentStatus.DELIVERED,
+        pickup_date=now - timedelta(days=4),
+        actual_delivery_date=now - timedelta(days=1),
+    )
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        delivery = (await client.get("/api/v1/shipments/delivery-performance")).json()["data"]
+        fulfilment = (await client.get("/api/v1/shipments/fulfilment-performance")).json()["data"]
+
+    assert delivery["delivered_order_count"] == 1
+    assert delivery["overall_avg_delivery_days"] == pytest.approx(3.0, abs=0.01)
+    assert delivery["missing_timestamp_count"] == 0
+    # Not pending, not a missing-pickup data gap either.
+    assert fulfilment["pending_fulfilment_count"] == 0
+    assert fulfilment["missing_pickup_timestamp_count"] == 0

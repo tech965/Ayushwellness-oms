@@ -169,10 +169,29 @@ async def _add_shipment(
             "cancelled",
         ),
         (OrderStatus.CANCELLED, FulfillmentStatus.UNFULFILLED, None, None, "cancelled"),
-        # Judgment call (2): Shopify-fulfilled, no local Shipment row.
-        (OrderStatus.SHIPPED, FulfillmentStatus.FULFILLED, None, None, "delivered"),
-        (OrderStatus.DELIVERED, FulfillmentStatus.FULFILLED, None, None, "delivered"),
+        # Judgment call (2): Shopify-fulfilled, no local Shipment row -> its own
+        # bucket (no tracking = no delivery confirmation), never `delivered`.
+        (OrderStatus.SHIPPED, FulfillmentStatus.FULFILLED, None, None, "fulfilled_tracking_unavailable"),
+        (OrderStatus.DELIVERED, FulfillmentStatus.FULFILLED, None, None, "fulfilled_tracking_unavailable"),
         (OrderStatus.SHIPPED, FulfillmentStatus.UNFULFILLED, None, None, "ready_to_ship"),
+        # Regression: Shopify marks the order FULFILLED while `Order.status` is
+        # still CONFIRMED/PROCESSING/PACKED and no local Shipment exists --
+        # it must NOT be reported as awaiting shipment.
+        (OrderStatus.CONFIRMED, FulfillmentStatus.FULFILLED, None, None, "fulfilled_tracking_unavailable"),
+        (OrderStatus.PROCESSING, FulfillmentStatus.FULFILLED, None, None, "fulfilled_tracking_unavailable"),
+        (OrderStatus.PACKED, FulfillmentStatus.FULFILLED, None, None, "fulfilled_tracking_unavailable"),
+        # ...while genuinely unfulfilled (or only partially fulfilled)
+        # confirmed orders stay ready_to_ship.
+        (OrderStatus.CONFIRMED, FulfillmentStatus.PARTIAL, None, None, "ready_to_ship"),
+        (OrderStatus.PACKED, FulfillmentStatus.PARTIAL, None, None, "ready_to_ship"),
+        # A live local shipment still wins over Shopify's fulfilment flag.
+        (
+            OrderStatus.CONFIRMED,
+            FulfillmentStatus.FULFILLED,
+            ShipmentStatus.PENDING,
+            None,
+            "pickup_pending",
+        ),
         # Judgment call (3): live shipment wins over a stale/impossible order status.
         (
             OrderStatus.PENDING,
@@ -198,7 +217,7 @@ def test_classify_unified_status_covers_every_bucket(
 def test_all_12_sow_statuses_are_reachable():
     from app.services.shipment_status import UNIFIED_STATUSES
 
-    assert len(UNIFIED_STATUSES) == 12
+    assert len(UNIFIED_STATUSES) == 13
     assert set(UNIFIED_STATUSES) == {
         "order_placed",
         "ready_to_ship",
@@ -212,6 +231,7 @@ def test_all_12_sow_statuses_are_reachable():
         "rto_delivered",
         "ndr",
         "cancelled",
+        "fulfilled_tracking_unavailable",
     }
 
 
@@ -240,6 +260,14 @@ async def _seed_one_of_each_bucket(db_session: AsyncSession) -> dict[str, uuid.U
         db_session, order=pickup_pending_order, current_status=ShipmentStatus.PENDING
     )
     order_ids["pickup_pending"] = pickup_pending_order.id
+
+    untracked = await make_order(
+        db_session,
+        order_number="SA-FULFILLED-NO-TRACKING",
+        status=OrderStatus.CONFIRMED,
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+    )
+    order_ids["fulfilled_tracking_unavailable"] = untracked.id
 
     bucket_to_shipment_status = {
         "picked_up": (ShipmentStatus.PICKED_UP, None),
@@ -271,6 +299,38 @@ async def test_unified_status_counts_classifies_one_order_per_bucket(
     counts = await OrderRepository(db_session).unified_status_counts()
     for bucket, count in counts.items():
         assert count == 1, f"expected exactly 1 order in {bucket!r}, got {count}"
+
+
+async def test_sql_classifies_shopify_fulfilled_orders_without_shipment_as_tracking_unavailable(
+    db_session: AsyncSession,
+) -> None:
+    """Regression: confirmed + Shopify-FULFILLED + no local Shipment row used
+    to be counted `ready_to_ship` (pending shipment). The SQL case() must
+    agree with the Python classifier: they are `fulfilled_tracking_unavailable`
+    (never `delivered`); confirmed but genuinely unfulfilled (and partially fulfilled) orders stay `ready_to_ship`.
+    """
+    await make_order(
+        db_session,
+        order_number="SA-SHOPIFY-FULFILLED",
+        status=OrderStatus.CONFIRMED,
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+    )
+    await make_order(
+        db_session,
+        order_number="SA-REALLY-UNFULFILLED",
+        status=OrderStatus.CONFIRMED,
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+    )
+    await make_order(
+        db_session,
+        order_number="SA-PARTIAL",
+        status=OrderStatus.PACKED,
+        fulfillment_status=FulfillmentStatus.PARTIAL,
+    )
+    counts = await OrderRepository(db_session).unified_status_counts()
+    assert counts["fulfilled_tracking_unavailable"] == 1
+    assert counts["delivered"] == 0
+    assert counts["ready_to_ship"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +560,7 @@ async def test_status_history_export_returns_xlsx(db_session: AsyncSession) -> N
 # ---------------------------------------------------------------------------
 
 
-async def test_export_xlsx_has_header_row_with_all_12_statuses(
+async def test_export_xlsx_has_header_row_with_all_13_statuses(
     db_session: AsyncSession,
 ) -> None:
     from openpyxl import load_workbook
@@ -517,3 +577,68 @@ async def test_export_xlsx_has_header_row_with_all_12_statuses(
     assert header[0] == "Date"
     assert "order_placed" in header
     assert "cancelled" in header
+    assert "fulfilled_tracking_unavailable" in header
+    assert len(header) == 1 + 13
+
+
+async def test_tracking_unavailable_orders_never_inflate_delivery_or_pickup_kpis(
+    db_session: AsyncSession,
+) -> None:
+    """KPI regression: 3 Shopify-fulfilled orders with no shipment row, next
+    to 1 really-delivered and 1 really-picked-up shipment and 1 genuinely
+    unfulfilled confirmed order. The tracking-unavailable orders must sit
+    outside BOTH denominators (eligible-for-pickup and shipped) and never
+    count as delivered, so Delivery % stays 1/2, not 4/5 or 100%.
+    """
+    user = await _make_shipments_reader(db_session, email="kpi-tu@example.com")
+    for i in range(3):
+        await make_order(
+            db_session,
+            order_number=f"KPI-TU-{i}",
+            status=OrderStatus.CONFIRMED,
+            fulfillment_status=FulfillmentStatus.FULFILLED,
+        )
+    delivered = await make_order(db_session, order_number="KPI-DEL", status=OrderStatus.CONFIRMED)
+    await _add_shipment(db_session, order=delivered, current_status=ShipmentStatus.DELIVERED)
+    picked = await make_order(db_session, order_number="KPI-PICK", status=OrderStatus.CONFIRMED)
+    await _add_shipment(db_session, order=picked, current_status=ShipmentStatus.PICKED_UP)
+    await make_order(db_session, order_number="KPI-READY", status=OrderStatus.CONFIRMED)
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        data = (await client.get("/api/v1/shipments/status-analytics")).json()["data"]
+
+        breakdown = {row["status"]: row["count"] for row in data["status_breakdown"]}
+        assert len(data["status_breakdown"]) == 13
+        assert breakdown["fulfilled_tracking_unavailable"] == 3
+        assert breakdown["delivered"] == 1
+        assert breakdown["ready_to_ship"] == 1
+        assert data["total_orders"] == 6
+        # eligible = ready_to_ship + picked_up + delivered (NOT the 3 untracked).
+        assert data["total_eligible_orders"] == 3
+        # shipped = picked_up + delivered.
+        assert data["total_shipped_orders"] == 2
+        assert data["delivery_rate"] == pytest.approx(50.0, abs=0.01)
+        assert data["pickup_rate"] == pytest.approx(1 / 3 * 100, abs=0.01)
+
+        # Status filter / drilldown for the new bucket returns exactly those orders.
+        drill = await client.get(
+            "/api/v1/shipments/status-analytics/orders",
+            params={"unified_status": "fulfilled_tracking_unavailable", "page": 1, "page_size": 10},
+        )
+        assert drill.status_code == 200
+        numbers = sorted(row["order_number"] for row in drill.json()["data"])
+        assert numbers == ["KPI-TU-0", "KPI-TU-1", "KPI-TU-2"]
+        assert drill.json()["meta"]["total_items"] == 3
+
+        # ...and the Delivered drilldown does NOT include them.
+        delivered_drill = await client.get(
+            "/api/v1/shipments/status-analytics/orders",
+            params={"unified_status": "delivered", "page": 1, "page_size": 10},
+        )
+        assert [r["order_number"] for r in delivered_drill.json()["data"]] == ["KPI-DEL"]
+
+        # Date-wise history carries the new column.
+        daily = (await client.get("/api/v1/shipments/status-analytics/history")).json()["data"][
+            "daily"
+        ]
+        assert sum(point["fulfilled_tracking_unavailable"] for point in daily) == 3

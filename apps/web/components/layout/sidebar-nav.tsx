@@ -1,7 +1,9 @@
 "use client"
 
+import * as React from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
+import { ChevronDown } from "lucide-react"
 
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -30,18 +32,39 @@ import {
  */
 function SidebarNavSkeleton({ collapsed }: { collapsed: boolean }) {
   return (
-    <nav className="flex flex-col gap-1 px-3 py-4" aria-busy="true" aria-label="Loading navigation">
+    <nav
+      className="flex flex-col gap-1 px-3 py-4"
+      aria-busy="true"
+      aria-label="Loading navigation"
+    >
       {!collapsed && <Skeleton className="mx-3 mb-1 h-3 w-16" />}
       {Array.from({ length: 4 }).map((_, i) => (
-        <Skeleton key={i} className={cn("mx-3 h-7 rounded-md", collapsed && "mx-0 size-7")} />
+        <Skeleton
+          key={i}
+          className={cn("mx-3 h-7 rounded-md", collapsed && "mx-0 size-7")}
+        />
       ))}
     </nav>
   )
 }
 
+/** Which nav groups the viewer has folded away this session. All groups
+ * start expanded; a folded group never hides the page being viewed.
+ */
+function useCollapsedGroups() {
+  const [collapsedGroups, setCollapsedGroups] = React.useState<string[]>([])
+  const toggle = React.useCallback((label: string) => {
+    setCollapsedGroups((current) =>
+      current.includes(label) ? current.filter((l) => l !== label) : [...current, label]
+    )
+  }, [])
+  return { collapsedGroups, toggle }
+}
+
 export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
   const pathname = usePathname()
   const { hasRole, hasPermission, isLoading, user } = useAuth()
+  const { collapsedGroups, toggle } = useCollapsedGroups()
 
   // Never fall through to the role-branching below (whose final `else`
   // is the full Admin `navGroups`) before the current user's real roles
@@ -88,65 +111,95 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
 
   return (
     <nav className="flex flex-col gap-1 px-3 py-4">
-      {effectiveGroups.map((group, index) => (
-        <div key={group.label} className="flex flex-col gap-1">
-          {index > 0 && <Separator className="my-2" />}
-          {!collapsed && (
-            <span className="text-muted-foreground px-3 pb-0.5 text-[0.6875rem] font-semibold tracking-widest uppercase">
-              {group.label}
-            </span>
-          )}
-          {group.items.map((item) => {
-            const isActive =
-              pathname === item.href || pathname.startsWith(`${item.href}/`)
-            const Icon = item.icon
+      {effectiveGroups.map((group, index) => {
+        const hasActiveItem = group.items.some(
+          (item) => pathname === item.href || pathname.startsWith(`${item.href}/`)
+        )
+        // A folded group never hides the page the viewer is currently on,
+        // and role-specific navs (a single group) are never foldable.
+        const foldable = effectiveGroups.length > 1
+        const isFolded =
+          foldable &&
+          !collapsed &&
+          collapsedGroups.includes(group.label) &&
+          !hasActiveItem
+        return (
+          <div key={group.label} className="flex flex-col gap-1">
+            {index > 0 && <Separator className="my-2" />}
+            {!collapsed &&
+              (foldable ? (
+                <button
+                  type="button"
+                  onClick={() => toggle(group.label)}
+                  aria-expanded={!isFolded}
+                  className="text-muted-foreground hover:text-foreground flex items-center justify-between px-3 pb-0.5 text-[0.6875rem] font-semibold tracking-widest uppercase"
+                >
+                  {group.label}
+                  <ChevronDown
+                    className={cn(
+                      "size-3 transition-transform",
+                      isFolded && "-rotate-90"
+                    )}
+                  />
+                </button>
+              ) : (
+                <span className="text-muted-foreground px-3 pb-0.5 text-[0.6875rem] font-semibold tracking-widest uppercase">
+                  {group.label}
+                </span>
+              ))}
+            {!isFolded &&
+              group.items.map((item) => {
+                const isActive =
+                  pathname === item.href || pathname.startsWith(`${item.href}/`)
+                const Icon = item.icon
 
-            const link = (
-              <Link
-                key={item.href}
-                href={item.href}
-                // Pre-demo fix: this list renders every one of ~31 nav
-                // destinations simultaneously, all visible in the
-                // persistent sidebar on every dashboard page. Next.js's
-                // default Link behavior auto-prefetches each one as it
-                // enters the viewport, which at this volume produced
-                // Chrome's own "Throttling navigation to prevent the
-                // browser from hanging" warning and the excessive
-                // `?_rsc=` request volume behind the visible navigation
-                // blinking. Disabling automatic prefetch here only stops
-                // that proactive background fetching -- clicking a link
-                // still navigates exactly as before (Next.js fetches the
-                // RSC payload for the clicked destination on click,
-                // same as any non-prefetched Link).
-                prefetch={false}
-                aria-current={isActive ? "page" : undefined}
-                className={cn(
-                  "relative flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                  collapsed && "justify-center px-0",
-                  isActive
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold"
-                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"
-                )}
-              >
-                {isActive && (
-                  <span className="bg-sidebar-primary absolute top-1/2 left-0 h-4 w-0.5 -translate-y-1/2 rounded-r-full" />
-                )}
-                <Icon className="size-4 shrink-0" />
-                {!collapsed && item.label}
-              </Link>
-            )
+                const link = (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    // Pre-demo fix: this list renders every one of ~31 nav
+                    // destinations simultaneously, all visible in the
+                    // persistent sidebar on every dashboard page. Next.js's
+                    // default Link behavior auto-prefetches each one as it
+                    // enters the viewport, which at this volume produced
+                    // Chrome's own "Throttling navigation to prevent the
+                    // browser from hanging" warning and the excessive
+                    // `?_rsc=` request volume behind the visible navigation
+                    // blinking. Disabling automatic prefetch here only stops
+                    // that proactive background fetching -- clicking a link
+                    // still navigates exactly as before (Next.js fetches the
+                    // RSC payload for the clicked destination on click,
+                    // same as any non-prefetched Link).
+                    prefetch={false}
+                    aria-current={isActive ? "page" : undefined}
+                    className={cn(
+                      "relative flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                      collapsed && "justify-center px-0",
+                      isActive
+                        ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold"
+                        : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"
+                    )}
+                  >
+                    {isActive && (
+                      <span className="bg-sidebar-primary absolute top-1/2 left-0 h-4 w-0.5 -translate-y-1/2 rounded-r-full" />
+                    )}
+                    <Icon className="size-4 shrink-0" />
+                    {!collapsed && item.label}
+                  </Link>
+                )
 
-            if (!collapsed) return link
+                if (!collapsed) return link
 
-            return (
-              <Tooltip key={item.href}>
-                <TooltipTrigger asChild>{link}</TooltipTrigger>
-                <TooltipContent side="right">{item.label}</TooltipContent>
-              </Tooltip>
-            )
-          })}
-        </div>
-      ))}
+                return (
+                  <Tooltip key={item.href}>
+                    <TooltipTrigger asChild>{link}</TooltipTrigger>
+                    <TooltipContent side="right">{item.label}</TooltipContent>
+                  </Tooltip>
+                )
+              })}
+          </div>
+        )
+      })}
     </nav>
   )
 }

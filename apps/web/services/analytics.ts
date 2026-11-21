@@ -94,6 +94,7 @@ export function useBreakdowns(
     queryKey: ["analytics", "breakdowns", params],
     queryFn: () => fetchBreakdowns(params),
     placeholderData: (previous) => previous,
+    enabled: options?.enabled ?? true,
     refetchInterval: options?.refetchInterval ?? false,
   })
 }
@@ -118,6 +119,7 @@ export function useTopProducts(
     queryKey: ["analytics", "top-products", params],
     queryFn: () => fetchTopProducts(params),
     placeholderData: (previous) => previous,
+    enabled: options?.enabled ?? true,
     refetchInterval: options?.refetchInterval ?? false,
   })
 }
@@ -140,6 +142,7 @@ export function useCourierPerformance(
     queryKey: ["analytics", "couriers", params],
     queryFn: () => fetchCourierPerformance(params),
     placeholderData: (previous) => previous,
+    enabled: options?.enabled ?? true,
     refetchInterval: options?.refetchInterval ?? false,
   })
 }
@@ -232,6 +235,7 @@ export function useReturnsRefundsSummary(
     queryKey: ["analytics", "returns-refunds", params],
     queryFn: () => fetchReturnsRefundsSummary(params),
     placeholderData: (previous) => previous,
+    enabled: options?.enabled ?? true,
     refetchInterval: options?.refetchInterval ?? false,
   })
 }
@@ -248,6 +252,7 @@ export function useRecentActivity(options?: QueryLifecycleOptions) {
   return useQuery({
     queryKey: ["analytics", "recent-activity"],
     queryFn: fetchRecentActivity,
+    enabled: options?.enabled ?? true,
     refetchInterval: options?.refetchInterval ?? false,
   })
 }

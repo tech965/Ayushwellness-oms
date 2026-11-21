@@ -281,6 +281,7 @@ class UnifiedStatusDailyPoint(BaseModel):
     rto_delivered: int = 0
     ndr: int = 0
     cancelled: int = 0
+    fulfilled_tracking_unavailable: int = 0
 
 
 class ShipmentStatusHistoryResponse(BaseModel):

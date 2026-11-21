@@ -49,9 +49,13 @@ SHIPPED_OR_LATER_STATUSES = frozenset(
 )
 
 # "Eligible for pickup" = already confirmed, i.e. every bucket except the
-# two that sit outside the shipping pipeline entirely — the SOW's
+# three that sit outside this OMS's shipping pipeline entirely (not yet
+# confirmed, cancelled, or fulfilled in Shopify with no local shipment/
+# tracking -- the last can never be picked up in this system) — the SOW's
 # "Total Eligible Orders" denominator for Pickup %.
-_NOT_ELIGIBLE_STATUSES = frozenset({"order_placed", "cancelled"})
+_NOT_ELIGIBLE_STATUSES = frozenset(
+    {"order_placed", "cancelled", "fulfilled_tracking_unavailable"}
+)
 
 RTO_STATUSES = frozenset({"rto_initiated", "rto_in_transit", "rto_delivered"})
 
