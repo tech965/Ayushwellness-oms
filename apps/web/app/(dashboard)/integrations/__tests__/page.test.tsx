@@ -88,4 +88,41 @@ describe("IntegrationsPage", () => {
     expect(screen.getByText("Not Configured")).toBeInTheDocument()
     expect(screen.getAllByText("Never").length).toBeGreaterThan(0)
   })
+
+  it("renders the NimbusPost courier integration with no special-casing", () => {
+    // Regression test: NimbusPost must appear through the exact same
+    // generic row rendering as every other provider -- no NimbusPost-
+    // specific component or column, and status comes from the real
+    // `status` field (never hardcoded "Connected").
+    mockedUseIntegrations.mockReturnValue(
+      baseQueryResult({
+        data: {
+          success: true,
+          message: "Success",
+          data: [
+            {
+              id: "2",
+              name: "NimbusPost",
+              code: "nimbuspost",
+              type: "courier",
+              status: "disconnected",
+              enabled: false,
+              configuration: null,
+              last_sync_at: null,
+              last_successful_sync_at: null,
+              last_failure_at: null,
+              last_failure_message: null,
+              created_at: "2026-01-01T00:00:00Z",
+              updated_at: "2026-01-01T00:00:00Z",
+            },
+          ],
+          meta: { page: 1, page_size: 20, total_items: 1, total_pages: 1 },
+        },
+      })
+    )
+    renderWithProviders(<IntegrationsPage />)
+    expect(screen.getByText("NimbusPost")).toBeInTheDocument()
+    expect(screen.getByText("courier")).toBeInTheDocument()
+    expect(screen.getByText("Not Configured")).toBeInTheDocument()
+  })
 })

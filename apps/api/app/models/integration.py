@@ -35,6 +35,7 @@ class IntegrationCode:
 
     SHOPIFY = "shopify"
     SHIPROCKET = "shiprocket"
+    NIMBUSPOST = "nimbuspost"
     BLUE_DART = "blue_dart"
     DELHIVERY = "delhivery"
     ECOM_EXPRESS = "ecom_express"

@@ -14,6 +14,7 @@ from __future__ import annotations
 import app.integrations.amazon as amazon_integration
 import app.integrations.flipkart as flipkart_integration
 import app.integrations.meesho as meesho_integration
+import app.integrations.nimbuspost as nimbuspost_integration
 import app.integrations.shiprocket as shiprocket_integration
 import app.integrations.shopify as shopify_integration
 
@@ -21,6 +22,7 @@ import app.integrations.shopify as shopify_integration
 def register_all_adapters() -> None:
     shopify_integration.register()
     shiprocket_integration.register()
+    nimbuspost_integration.register()
     # Marketplace Orders module, Phase 1 — stub adapters, always
     # "not configured" until real credentials exist (see each package's
     # own docstring).

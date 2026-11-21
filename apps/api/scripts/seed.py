@@ -234,6 +234,7 @@ COURIERS = [
 INTEGRATIONS = [
     ("Shopify", IntegrationCode.SHOPIFY, IntegrationType.ECOMMERCE),
     ("Shiprocket", IntegrationCode.SHIPROCKET, IntegrationType.COURIER),
+    ("NimbusPost", IntegrationCode.NIMBUSPOST, IntegrationType.COURIER),
     # `IntegrationType` has no dedicated "payment gateway" value (adding
     # one would mean an Alembic `ALTER TYPE ... ADD VALUE` migration for
     # a purely descriptive field — nothing in the app branches on

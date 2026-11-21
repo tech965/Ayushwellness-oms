@@ -196,6 +196,22 @@ class Settings(BaseSettings):
     BLUE_DART_CLIENT_ID: str | None = None
     BLUE_DART_CLIENT_SECRET: str | None = None
 
+    # --- NimbusPost (optional — connected when NIMBUSPOST_EMAIL/
+    # NIMBUSPOST_PASSWORD are present; the API never fails to start
+    # without them). Confirmed live auth (business + NimbusPost's
+    # official SDK source, 2026-11-20): POST users/login with
+    # email+password returns a bearer token, used as
+    # `Authorization: Bearer {token}` against NIMBUSPOST_API_URL.
+    # NIMBUSPOST_API_KEY is already provisioned in this deployment but is
+    # NOT used by that login flow -- kept here, unused, until its actual
+    # purpose (e.g. the SDK's separate legacy NP-API-KEY header scheme,
+    # or a webhook signing secret) is audited; never deleted per
+    # instruction. ---
+    NIMBUSPOST_EMAIL: str | None = None
+    NIMBUSPOST_PASSWORD: str | None = None
+    NIMBUSPOST_API_KEY: str | None = None
+    NIMBUSPOST_API_URL: str = "https://api.nimbuspost.com/v1/"
+
     # --- Cashfree (optional — connected when credentials are present; the
     # API never fails to start without them). Payments API version
     # 2025-01-01; base URL defaults to sandbox so a missing/unset value
