@@ -17,6 +17,7 @@ export default function ShipmentStaffDashboardPage() {
       queueHref="/shipment-staff/orders"
       telecallerRowsClickable={false}
       showShipmentStaffPerformance={false}
+      showFulfilmentPerformance={false}
     />
   )
 }

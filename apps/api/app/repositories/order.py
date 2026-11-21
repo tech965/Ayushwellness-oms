@@ -8,6 +8,7 @@ from sqlalchemy import String, and_, case, exists, func, or_, select
 from sqlalchemy.orm import aliased, selectinload
 
 from app.core.config import settings
+from app.core.timezone import to_ist
 from app.models.customer import Customer
 from app.models.enums import FulfillmentStatus, OrderStatus, ShipmentStatus
 from app.models.order import Order, OrderEvent, OrderItem
@@ -15,6 +16,11 @@ from app.models.shipment import Shipment
 from app.repositories.base import AppendOnlyRepository, BaseRepository
 from app.schemas.common import PageParams
 from app.services.live_orders import apply_live_update, is_live_transient, load_order
+from app.services.shipment_status import (
+    UNIFIED_STATUSES,
+    classify_unified_status,
+    unified_status_sql_case,
+)
 
 
 class OrderRepository(BaseRepository[Order]):
@@ -528,6 +534,293 @@ class OrderRepository(BaseRepository[Order]):
             }
             for tc_id, confirmed, shipped, delivered, ndr, rto in rows
         }
+
+    def unified_status_base_query(
+        self,
+        *,
+        courier_id: uuid.UUID | None = None,
+        payment_type: str | None = None,
+        sku: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        with_eager: bool = False,
+    ):
+        """Every `Order` LEFT JOINed to its "controlling" `Shipment` —
+        simply the most recently created one, if any — for OMS SOW
+        Module 2's unified 12-status classification
+        (`app.services.shipment_status`). Deliberately does NOT exclude
+        a `CANCELLED` shipment: if the order's one and only booking was
+        cancelled and nothing has replaced it, the order's real current
+        tracking status IS `cancelled` (see that module's judgment call
+        (1)); the moment a reshipment creates a newer, non-cancelled row,
+        it naturally becomes the "most recent" one instead, with zero
+        special-casing. Returns `select(Order, active_shipment)`;
+        callers build on top of it for counts, daily trend buckets, or
+        the per-status drill-down list. Filtered on `Order.order_datetime`
+        (not `confirmed_at`, which is `NULL` for the `order_placed`
+        bucket) so date-range filtering works across every bucket, not
+        just post-confirmation ones.
+
+        `with_eager=True` (the drill-down list, which renders full order/
+        shipment rows) adds the `selectinload`s needed to avoid an N+1
+        per row. Counting/bucketing callers leave it `False` — they
+        narrow the `SELECT` to just a few columns via `with_only_columns`
+        afterwards, and an eager-load option for an entity no longer in
+        the `SELECT` list is itself an error.
+        """
+        active_shipment = aliased(Shipment)
+        latest_shipment_id = (
+            select(Shipment.id)
+            .where(Shipment.order_id == Order.id)
+            .order_by(Shipment.created_at.desc())
+            .limit(1)
+            .correlate(Order)
+            .scalar_subquery()
+        )
+        stmt = select(Order, active_shipment).outerjoin(
+            active_shipment, active_shipment.id == latest_shipment_id
+        )
+        if with_eager:
+            stmt = stmt.options(
+                selectinload(Order.customer),
+                selectinload(Order.items),
+                selectinload(active_shipment.courier),
+            )
+        if courier_id:
+            stmt = stmt.where(active_shipment.courier_id == courier_id)
+        if payment_type:
+            stmt = stmt.where(Order.payment_type == payment_type)
+        if sku:
+            stmt = stmt.where(
+                exists(
+                    select(1).where(
+                        and_(OrderItem.order_id == Order.id, OrderItem.sku.ilike(f"%{sku}%"))
+                    )
+                )
+            )
+        if date_from:
+            stmt = stmt.where(Order.order_datetime >= date_from)
+        if date_to:
+            stmt = stmt.where(Order.order_datetime <= date_to)
+        return stmt, active_shipment
+
+    async def unified_status_counts(
+        self,
+        *,
+        courier_id: uuid.UUID | None = None,
+        payment_type: str | None = None,
+        sku: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> dict[str, int]:
+        """Whole-funnel counts across all 12 `UNIFIED_STATUSES`, scoped
+        by the same filters as `unified_status_base_query` — backs the
+        Module 2 analytics endpoint's percentage math.
+        """
+        base_stmt, active_shipment = self.unified_status_base_query(
+            courier_id=courier_id,
+            payment_type=payment_type,
+            sku=sku,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        bucket = unified_status_sql_case(
+            order_status_col=Order.status,
+            fulfillment_status_col=Order.fulfillment_status,
+            shipment_current_status_col=active_shipment.current_status,
+            shipment_rto_status_col=active_shipment.rto_status,
+        )
+        # `with_only_columns` keeps the same FROM/WHERE (the join and
+        # filters above) but narrows the SELECT to just the
+        # classification itself; wrapping THAT in a subquery exports a
+        # single plain `unified_status` column the outer query can
+        # group by, without re-referencing `Order`/`active_shipment`
+        # columns outside the join's scope.
+        classified = base_stmt.order_by(None).with_only_columns(bucket.label("unified_status")).subquery()
+        stmt = select(classified.c.unified_status, func.count()).group_by(classified.c.unified_status)
+        rows = (await self.session.execute(stmt)).all()
+        counts = dict.fromkeys(UNIFIED_STATUSES, 0)
+        for status, count in rows:
+            counts[status] = count
+        return counts
+
+    async def unified_status_counts_by_courier(
+        self,
+        *,
+        courier_id: uuid.UUID | None = None,
+        payment_type: str | None = None,
+        sku: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> list[tuple[uuid.UUID | None, str, str, int]]:
+        """Like `unified_status_counts`, but broken out by `(courier_id,
+        payment_type, unified_status)` instead of collapsed to a single
+        total -- OMS SOW Module 4's per-partner allocation/comparison
+        needs both the courier split (who is this order's allocated
+        shipment with) and the payment-type split (COD vs Prepaid success
+        rate per partner) at once, from one query. `courier_id`/
+        `payment_type` narrow the order population the same as
+        `unified_status_counts` (e.g. "COD orders only"); they do not
+        collapse the per-courier/per-payment-type breakdown itself, which
+        is always returned in full so Module 4 can compare every partner
+        side-by-side.
+        """
+        base_stmt, active_shipment = self.unified_status_base_query(
+            courier_id=courier_id,
+            payment_type=payment_type,
+            sku=sku,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        bucket = unified_status_sql_case(
+            order_status_col=Order.status,
+            fulfillment_status_col=Order.fulfillment_status,
+            shipment_current_status_col=active_shipment.current_status,
+            shipment_rto_status_col=active_shipment.rto_status,
+        )
+        classified = (
+            base_stmt.order_by(None)
+            .with_only_columns(
+                active_shipment.courier_id.label("courier_id"),
+                Order.payment_type.label("payment_type"),
+                bucket.label("unified_status"),
+            )
+            .subquery()
+        )
+        stmt = select(
+            classified.c.courier_id,
+            classified.c.payment_type,
+            classified.c.unified_status,
+            func.count(),
+        ).group_by(classified.c.courier_id, classified.c.payment_type, classified.c.unified_status)
+        rows = (await self.session.execute(stmt)).all()
+        return [
+            (courier_id, payment_type.value, status, count)
+            for courier_id, payment_type, status, count in rows
+        ]
+
+    async def fulfilment_to_delivery_rows(
+        self,
+        *,
+        courier_id: uuid.UUID | None = None,
+        payment_type: str | None = None,
+        sku: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> list[tuple[uuid.UUID | None, str, str, datetime, datetime | None]]:
+        """`(courier_id, payment_type, unified_status, fulfilment_start,
+        actual_delivery_date)` per order -- OMS SOW Module 4 item B.7
+        ("average fulfilment-to-delivery time"), the full order-creation/
+        confirmation -> actual-delivery cycle, as distinct from Module
+        3's pickup -> delivery courier-only leg. Reuses the exact same
+        `fulfilment_start` choice as `FulfilmentPerformanceService`
+        (`confirmed_at` when set, else `order_datetime`) for consistency
+        across the two modules' numbers.
+        """
+        base_stmt, active_shipment = self.unified_status_base_query(
+            courier_id=courier_id,
+            payment_type=payment_type,
+            sku=sku,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        bucket = unified_status_sql_case(
+            order_status_col=Order.status,
+            fulfillment_status_col=Order.fulfillment_status,
+            shipment_current_status_col=active_shipment.current_status,
+            shipment_rto_status_col=active_shipment.rto_status,
+        )
+        stmt = base_stmt.with_only_columns(
+            active_shipment.courier_id,
+            Order.payment_type,
+            bucket.label("unified_status"),
+            func.coalesce(Order.confirmed_at, Order.order_datetime).label("fulfilment_start"),
+            active_shipment.actual_delivery_date,
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return [
+            (courier_id, payment_type.value, status, fulfilment_start, actual_delivery_date)
+            for courier_id, payment_type, status, fulfilment_start, actual_delivery_date in rows
+        ]
+
+    async def unified_status_daily_counts(
+        self,
+        *,
+        date_from: datetime,
+        date_to: datetime,
+        courier_id: uuid.UUID | None = None,
+        payment_type: str | None = None,
+        sku: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Day-bucketed (IST) unified-status distribution over a date
+        range — the SOW's "date-wise shipment status tracking" /
+        "historical shipment status reports". Fetches `(order_datetime,
+        status, fulfillment_status, shipment current_status, shipment
+        rto_status)` rows and buckets/classifies in Python — same
+        dialect-portability rationale as
+        `ShipmentRepository.daily_created_and_delivered` (small result
+        set for a dashboard trend, no Postgres-only `date_trunc`).
+        """
+        base_stmt, active_shipment = self.unified_status_base_query(
+            courier_id=courier_id,
+            payment_type=payment_type,
+            sku=sku,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        stmt = base_stmt.with_only_columns(
+            Order.order_datetime,
+            Order.status,
+            Order.fulfillment_status,
+            active_shipment.current_status,
+            active_shipment.rto_status,
+        )
+        rows = (await self.session.execute(stmt)).all()
+        buckets: dict[str, dict[str, int]] = {}
+        for order_datetime, order_status, fulfillment_status, shipment_status, rto_status in rows:
+            day = to_ist(order_datetime).date().isoformat()
+            unified = classify_unified_status(
+                order_status=order_status.value,
+                fulfillment_status=fulfillment_status.value,
+                shipment_current_status=shipment_status.value if shipment_status else None,
+                shipment_rto_status=rto_status.value if rto_status else None,
+            )
+            day_counts = buckets.setdefault(day, dict.fromkeys(UNIFIED_STATUSES, 0))
+            day_counts[unified] += 1
+        return [{"date": day, **counts} for day, counts in sorted(buckets.items())]
+
+    def unified_status_drilldown_query(
+        self,
+        *,
+        unified_status: str,
+        courier_id: uuid.UUID | None = None,
+        payment_type: str | None = None,
+        sku: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ):
+        """Every order whose derived unified status equals
+        `unified_status` — the SOW's "ability to view individual orders
+        under each status". Same filters/join as the aggregate counts,
+        just with an extra `WHERE` on the classification expression
+        itself (a `case()` is a normal SQL column expression, usable in
+        `WHERE` exactly like any other).
+        """
+        base_stmt, active_shipment = self.unified_status_base_query(
+            courier_id=courier_id,
+            payment_type=payment_type,
+            sku=sku,
+            date_from=date_from,
+            date_to=date_to,
+            with_eager=True,
+        )
+        bucket = unified_status_sql_case(
+            order_status_col=Order.status,
+            fulfillment_status_col=Order.fulfillment_status,
+            shipment_current_status_col=active_shipment.current_status,
+            shipment_rto_status_col=active_shipment.rto_status,
+        )
+        return base_stmt.where(bucket == unified_status), active_shipment
 
     async def list_for_export(self, query, *, limit: int) -> list[Order]:
         """Runs `query` (from `search_query()`, already eager-loading

@@ -2,7 +2,25 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiClient } from "@/lib/api-client"
 import type { ApiResponse, PaginatedResponse } from "@/types/api"
-import type { Shipment, ShipmentEvent, ShipmentListFilters } from "@/types/shipment"
+import type {
+  DeliveryPerformance,
+  DeliveryPerformanceFilters,
+  DeliveryTrend,
+  FulfilmentPerformanceFilters,
+  FulfilmentSummary,
+  FulfilmentTrend,
+  PartnerAllocation,
+  PartnerFilters,
+  PartnerPerformance,
+  Shipment,
+  ShipmentEvent,
+  ShipmentListFilters,
+  ShipmentStatusAnalytics,
+  ShipmentStatusAnalyticsFilters,
+  ShipmentStatusDrilldownRow,
+  ShipmentStatusHistory,
+  UnifiedShipmentStatus,
+} from "@/types/shipment"
 
 interface ListParams extends ShipmentListFilters {
   page: number
@@ -135,6 +153,169 @@ export function useRetryShopifySync(id: string) {
       void queryClient.invalidateQueries({ queryKey: ["shipments"] })
       void queryClient.invalidateQueries({ queryKey: ["shipment-queue"] })
       void queryClient.invalidateQueries({ queryKey: ["orders"] })
+    },
+  })
+}
+
+// --- OMS SOW Module 2: Shipment Tracking & Status Analytics ---------------
+
+export function useShipmentStatusAnalytics(filters: ShipmentStatusAnalyticsFilters) {
+  return useQuery({
+    queryKey: ["shipments", "status-analytics", filters],
+    queryFn: async (): Promise<ShipmentStatusAnalytics> => {
+      const response = await apiClient.get<ApiResponse<ShipmentStatusAnalytics>>(
+        "/shipments/status-analytics",
+        { params: filters }
+      )
+      if (!response.data.data) throw new Error("Shipment status analytics not found.")
+      return response.data.data
+    },
+  })
+}
+
+export function useShipmentStatusHistory(filters: ShipmentStatusAnalyticsFilters) {
+  return useQuery({
+    queryKey: ["shipments", "status-analytics", "history", filters],
+    queryFn: async (): Promise<ShipmentStatusHistory> => {
+      const response = await apiClient.get<ApiResponse<ShipmentStatusHistory>>(
+        "/shipments/status-analytics/history",
+        { params: filters }
+      )
+      if (!response.data.data) throw new Error("Shipment status history not found.")
+      return response.data.data
+    },
+  })
+}
+
+interface DrilldownParams extends ShipmentStatusAnalyticsFilters {
+  unifiedStatus: UnifiedShipmentStatus
+  page: number
+  pageSize: number
+}
+
+export function useShipmentStatusDrilldown(params: DrilldownParams) {
+  const { unifiedStatus, page, pageSize, ...filters } = params
+  return useQuery({
+    queryKey: ["shipments", "status-analytics", "orders", unifiedStatus, page, pageSize, filters],
+    queryFn: async (): Promise<PaginatedResponse<ShipmentStatusDrilldownRow>> => {
+      const response = await apiClient.get<PaginatedResponse<ShipmentStatusDrilldownRow>>(
+        "/shipments/status-analytics/orders",
+        { params: { ...filters, unified_status: unifiedStatus, page, page_size: pageSize } }
+      )
+      return response.data
+    },
+    enabled: Boolean(unifiedStatus),
+    placeholderData: (previous) => previous,
+  })
+}
+
+/** Triggers the browser's native download for the Excel export --
+ * `apiClient` isn't used here since this needs the raw `blob` response
+ * type and a manually constructed anchor click, not a parsed JSON body.
+ */
+export async function downloadShipmentStatusHistory(
+  filters: ShipmentStatusAnalyticsFilters
+): Promise<void> {
+  const response = await apiClient.get("/shipments/status-analytics/history/export", {
+    params: filters,
+    responseType: "blob",
+  })
+  const url = window.URL.createObjectURL(new Blob([response.data]))
+  const link = document.createElement("a")
+  link.href = url
+  link.download = "shipment-status-history.xlsx"
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(url)
+}
+
+// --- OMS SOW Module 3: Fulfilment & Delivery Performance Dashboard --------
+
+export function useFulfilmentPerformance(filters: FulfilmentPerformanceFilters, enabled = true) {
+  return useQuery({
+    queryKey: ["shipments", "fulfilment-performance", filters],
+    queryFn: async (): Promise<FulfilmentSummary> => {
+      const response = await apiClient.get<ApiResponse<FulfilmentSummary>>(
+        "/shipments/fulfilment-performance",
+        { params: filters }
+      )
+      if (!response.data.data) throw new Error("Fulfilment performance not found.")
+      return response.data.data
+    },
+    enabled,
+  })
+}
+
+export function useFulfilmentPerformanceHistory(filters: FulfilmentPerformanceFilters) {
+  return useQuery({
+    queryKey: ["shipments", "fulfilment-performance", "history", filters],
+    queryFn: async (): Promise<FulfilmentTrend> => {
+      const response = await apiClient.get<ApiResponse<FulfilmentTrend>>(
+        "/shipments/fulfilment-performance/history",
+        { params: filters }
+      )
+      if (!response.data.data) throw new Error("Fulfilment performance history not found.")
+      return response.data.data
+    },
+  })
+}
+
+export function useDeliveryPerformance(filters: DeliveryPerformanceFilters, enabled = true) {
+  return useQuery({
+    queryKey: ["shipments", "delivery-performance", filters],
+    queryFn: async (): Promise<DeliveryPerformance> => {
+      const response = await apiClient.get<ApiResponse<DeliveryPerformance>>(
+        "/shipments/delivery-performance",
+        { params: filters }
+      )
+      if (!response.data.data) throw new Error("Delivery performance not found.")
+      return response.data.data
+    },
+    enabled,
+  })
+}
+
+export function useDeliveryPerformanceHistory(filters: DeliveryPerformanceFilters) {
+  return useQuery({
+    queryKey: ["shipments", "delivery-performance", "history", filters],
+    queryFn: async (): Promise<DeliveryTrend> => {
+      const response = await apiClient.get<ApiResponse<DeliveryTrend>>(
+        "/shipments/delivery-performance/history",
+        { params: filters }
+      )
+      if (!response.data.data) throw new Error("Delivery performance history not found.")
+      return response.data.data
+    },
+  })
+}
+
+// --- OMS SOW Module 4: Shipping Partner Allocation & Performance Analysis -
+
+export function usePartnerAllocation(filters: PartnerFilters) {
+  return useQuery({
+    queryKey: ["shipments", "partner-allocation", filters],
+    queryFn: async (): Promise<PartnerAllocation> => {
+      const response = await apiClient.get<ApiResponse<PartnerAllocation>>(
+        "/shipments/partner-allocation",
+        { params: filters }
+      )
+      if (!response.data.data) throw new Error("Partner allocation not found.")
+      return response.data.data
+    },
+  })
+}
+
+export function usePartnerPerformance(filters: PartnerFilters) {
+  return useQuery({
+    queryKey: ["shipments", "partner-performance", filters],
+    queryFn: async (): Promise<PartnerPerformance> => {
+      const response = await apiClient.get<ApiResponse<PartnerPerformance>>(
+        "/shipments/partner-performance",
+        { params: filters }
+      )
+      if (!response.data.data) throw new Error("Partner performance not found.")
+      return response.data.data
     },
   })
 }
