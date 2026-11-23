@@ -319,6 +319,8 @@ export interface DeliveryPerformanceByCourier {
   courier_key?: string | null
   courier_id: string | null
   courier_name: string
+  /** Original courier/service names behind this carrier, most used first. */
+  service_names?: string[]
   avg_delivery_days: number | null
   delivered_order_count: number
 }
@@ -432,6 +434,8 @@ export interface PartnerAllocationRow {
   courier_key: string
   courier_id: string | null
   courier_name: string
+  /** Original courier/service names behind this carrier, most used first. */
+  service_names?: string[]
   orders_allocated: number
   allocation_percent: number
   avg_delivery_days: number | null
@@ -451,6 +455,8 @@ export interface PartnerPerformanceRow {
   courier_key: string
   courier_id: string | null
   courier_name: string
+  /** Original courier/service names behind this carrier, most used first. */
+  service_names?: string[]
   total_allocated: number
   total_picked_up: number
   total_delivered: number

@@ -94,11 +94,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.timezone import to_ist
-from app.models.courier import Courier
 from app.models.enums import ShipmentStatus
 from app.models.order import Order
 from app.repositories.order import OrderRepository
@@ -106,6 +104,7 @@ from app.repositories.shipment_effective import (
     effective_courier_name,
     effective_delivery_date,
     effective_pickup_date,
+    partner_display_name,
     partner_identity,
 )
 from app.services.shipment_status import classify_unified_status
@@ -120,6 +119,20 @@ TEAM_WAREHOUSE_UNAVAILABLE_REASON = (
     "sales/confirmation attribution, not fulfilment-ops attribution. Reported as "
     "unavailable rather than invented, per the SOW's own rule."
 )
+
+
+def _service_names(services: dict[str, int] | None) -> list[str]:
+    """Original courier/service names, most used first."""
+    if not services:
+        return []
+    return [name for name, _ in sorted(services.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def _family_name(services: dict[str, int] | None, key: str | None) -> str:
+    if key is None:
+        return "Unassigned"
+    names = _service_names(services)
+    return partner_display_name(names[0]) if names else "Unknown"
 
 
 def _avg(values: list[float]) -> float | None:
@@ -344,8 +357,8 @@ class FulfilmentPerformanceService:
         overall_days: list[float] = []
         missing_timestamp_count = 0
         by_courier: dict[str | None, list[float]] = {}
-        partner_ids: dict[str | None, uuid.UUID | None] = {}
-        partner_names: dict[str | None, str] = {}
+        partner_ids: dict[str | None, set[uuid.UUID]] = {}
+        partner_services: dict[str | None, dict[str, int]] = {}
         by_zone: dict[str, list[float]] = {}
         unmapped_zone_count = 0
         cod_days: list[float] = []
@@ -373,9 +386,12 @@ class FulfilmentPerformanceService:
             key = partner_identity(row.courier_name, row.courier_id)
             by_courier.setdefault(key, []).append(days)
             if key is not None:
-                partner_names.setdefault(key, (row.courier_name or "").strip() or "Unknown")
+                service = " ".join((row.courier_name or "").split())
+                if service:
+                    services = partner_services.setdefault(key, {})
+                    services[service] = services.get(service, 0) + 1
                 if row.courier_id is not None:
-                    partner_ids.setdefault(key, row.courier_id)
+                    partner_ids.setdefault(key, set()).add(row.courier_id)
             if zone_name is not None:
                 by_zone.setdefault(zone_name, []).append(days)
             else:
@@ -385,13 +401,6 @@ class FulfilmentPerformanceService:
             elif row.payment_type == "prepaid":
                 prepaid_days.append(days)
 
-        linked_ids = [c for c in partner_ids.values() if c is not None]
-        linked_names: dict[uuid.UUID, str] = {}
-        if linked_ids:
-            name_rows = (
-                await self.session.execute(select(Courier.id, Courier.name).where(Courier.id.in_(linked_ids)))
-            ).all()
-            linked_names = dict(name_rows)
 
         return {
             "overall_avg_delivery_days": _avg(overall_days),
@@ -400,14 +409,13 @@ class FulfilmentPerformanceService:
             "by_courier": [
                 {
                     "courier_key": key,
-                    "courier_id": partner_ids.get(key),
-                    "courier_name": (
-                        linked_names.get(partner_ids[key])
-                        if partner_ids.get(key) in linked_names
-                        else partner_names.get(key, "Unknown")
-                    )
-                    if key
-                    else "Unassigned",
+                    # A carrier family can span several Courier rows; only
+                    # expose an id when it is unambiguous.
+                    "courier_id": next(iter(partner_ids[key]))
+                    if len(partner_ids.get(key, ())) == 1
+                    else None,
+                    "courier_name": _family_name(partner_services.get(key), key),
+                    "service_names": _service_names(partner_services.get(key)),
                     "avg_delivery_days": _avg(values),
                     "delivered_order_count": len(values),
                 }

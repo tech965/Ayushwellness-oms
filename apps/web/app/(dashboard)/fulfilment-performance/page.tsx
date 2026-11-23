@@ -6,6 +6,7 @@ import { AlertTriangle, CheckCircle2, Clock, Hourglass, Timer, Truck } from "luc
 import { FilterBar } from "@/components/shared/filter-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
+import { ServiceNames } from "@/components/shared/service-names"
 import { StatTile } from "@/components/shared/stat-tile"
 import { Input } from "@/components/ui/input"
 import {
@@ -270,6 +271,7 @@ function FulfilmentPerformancePageContent() {
                           <TableRow key={row.courier_key ?? row.courier_id ?? "unassigned"}>
                             <TableCell className="font-medium">
                               {row.courier_name}
+                              <ServiceNames names={row.service_names} carrier={row.courier_name} />
                             </TableCell>
                             <TableCell className="text-right tabular-nums">
                               {days(row.avg_delivery_days)}

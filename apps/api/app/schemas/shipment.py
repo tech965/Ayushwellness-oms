@@ -343,6 +343,7 @@ class FulfilmentTrendResponse(BaseModel):
 
 class DeliveryPerformanceByCourier(BaseModel):
     courier_key: str | None = None
+    service_names: list[str] = []
     courier_id: uuid.UUID | None
     courier_name: str
     avg_delivery_days: float | None
@@ -398,6 +399,7 @@ class PartnerAllocationRow(BaseModel):
     courier_key: str
     courier_id: uuid.UUID | None = None
     courier_name: str
+    service_names: list[str] = []
     orders_allocated: int
     allocation_percent: float
     avg_delivery_days: float | None
@@ -422,6 +424,7 @@ class PartnerPerformanceRow(BaseModel):
     courier_key: str
     courier_id: uuid.UUID | None = None
     courier_name: str
+    service_names: list[str] = []
     total_allocated: int
     total_picked_up: int
     total_delivered: int

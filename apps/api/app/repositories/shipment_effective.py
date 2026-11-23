@@ -90,11 +90,58 @@ def partner_key(name: str | None) -> str | None:
     return key or None
 
 
-def partner_identity(name: str | None, courier_id) -> str | None:  # noqa: ANN001
-    """Stable grouping key for a shipping partner: its (normalised) name
-    when any is known, else the linked courier id, else `None` (no
-    partner at all -- the order is not allocated to anyone).
+# Carrier families. Shiprocket reports SERVICE-level names ("Blue Dart
+# Surface", "Bluedart Surface - Select 500gm", "Amazon COD Surface 500gm");
+# the business thinks in carriers. Matching is on the name with spaces,
+# hyphens and punctuation removed, so "Blue Dart" / "Bluedart" / "BLUE-DART"
+# all land on one family. Anything not listed stays its own partner under
+# its own (cleaned) name -- never guessed into a family.
+_CARRIER_FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Blue Dart", ("bluedart",)),
+    ("Delhivery", ("delhivery",)),
+    ("Shadowfax", ("shadowfax",)),
+    ("Xpressbees", ("xpressbees",)),
+    ("DTDC", ("dtdc",)),
+    ("Ekart", ("ekart",)),
+    ("Amazon Shipping", ("amazon",)),
+)
+
+
+def _squash(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def carrier_family(name: str | None) -> str | None:
+    """Display name of the carrier family a service name belongs to, or
+    `None` when the name is empty or matches no known family.
     """
+    if not name or not name.strip():
+        return None
+    squashed = _squash(name)
+    for family, needles in _CARRIER_FAMILIES:
+        if any(n in squashed for n in needles):
+            return family
+    return None
+
+
+def partner_display_name(name: str | None) -> str:
+    """Carrier family when known, else the cleaned original name."""
+    family = carrier_family(name)
+    if family:
+        return family
+    cleaned = " ".join((name or "").split())
+    return cleaned or "Unknown"
+
+
+def partner_identity(name: str | None, courier_id) -> str | None:  # noqa: ANN001
+    """Stable grouping key for a shipping partner: its carrier family when
+    the name matches one, else its normalised name, else the linked courier
+    id, else `None` (no identifiable courier -- the order is not allocated
+    to any partner).
+    """
+    family = carrier_family(name)
+    if family:
+        return f"family:{family.lower()}"
     key = partner_key(name)
     if key is not None:
         return key

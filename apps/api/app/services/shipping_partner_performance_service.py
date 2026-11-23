@@ -77,7 +77,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.courier import Courier
 from app.repositories.order import OrderRepository
-from app.repositories.shipment_effective import partner_identity
+from app.repositories.shipment_effective import partner_display_name, partner_identity
 from app.services.fulfilment_performance_service import FulfilmentPerformanceService
 from app.services.shipment_status_analytics_service import RTO_STATUSES, SHIPPED_OR_LATER_STATUSES
 
@@ -104,8 +104,8 @@ def _pct(numerator: int, denominator: int) -> float | None:
 
 @dataclass
 class _PartnerCounts:
-    courier_id: uuid.UUID | None = None
-    name: str = "Unknown"
+    courier_ids: set[uuid.UUID] = field(default_factory=set)
+    services: dict[str, int] = field(default_factory=dict)
     allocated: int = 0
     shipped: int = 0
     delivered: int = 0
@@ -155,10 +155,11 @@ class ShippingPartnerPerformanceService:
                 # "allocated" to any partner, so excluded from totals.
                 continue
             agg = by_courier.setdefault(key, _PartnerCounts())
-            if agg.courier_id is None and c_id is not None:
-                agg.courier_id = c_id
-            if agg.name == "Unknown" and c_name and c_name.strip():
-                agg.name = c_name.strip()
+            if c_id is not None:
+                agg.courier_ids.add(c_id)
+            service = " ".join((c_name or "").split())
+            if service:
+                agg.services[service] = agg.services.get(service, 0) + count
             agg.allocated += count
             is_shipped = status in SHIPPED_OR_LATER_STATUSES
             is_delivered = status == "delivered"
@@ -226,6 +227,22 @@ class ShippingPartnerPerformanceService:
         return dict(rows)
 
     @staticmethod
+    def _partner_fields(agg: _PartnerCounts) -> dict[str, object]:
+        """Identity fields shared by the allocation and performance rows:
+        the carrier-family display name, the original service names (detail
+        view), and a courier id only when exactly one `Courier` row backs
+        the family.
+        """
+        services = [
+            name for name, _ in sorted(agg.services.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        return {
+            "courier_id": next(iter(agg.courier_ids)) if len(agg.courier_ids) == 1 else None,
+            "courier_name": partner_display_name(services[0]) if services else "Unknown",
+            "service_names": services,
+        }
+
+    @staticmethod
     def _allocation_percentages(allocations: dict[str, int]) -> dict[str, float]:
         """Rounds each partner's share to 2dp such that the rounded
         values sum to EXACTLY 100.00 (the SOW's own example table shows
@@ -275,13 +292,10 @@ class ShippingPartnerPerformanceService:
         allocations = {key: agg.allocated for key, agg in counts.items()}
         total_allocated = sum(allocations.values())
         pcts = self._allocation_percentages(allocations) if total_allocated else {}
-        names = await self._courier_names([a.courier_id for a in counts.values() if a.courier_id])
-
         rows = [
             {
                 "courier_key": key,
-                "courier_id": agg.courier_id,
-                "courier_name": names.get(agg.courier_id, agg.name) if agg.courier_id else agg.name,
+                **self._partner_fields(agg),
                 "orders_allocated": agg.allocated,
                 "allocation_percent": pcts.get(key, 0.0),
                 "avg_delivery_days": avg_delivery_by_courier.get(key),
@@ -324,18 +338,13 @@ class ShippingPartnerPerformanceService:
             date_from=date_from,
             date_to=date_to,
         )
-        names = await self._courier_names([a.courier_id for a in counts.values() if a.courier_id])
-
         partners = []
         for key, agg in sorted(counts.items(), key=lambda kv: -kv[1].allocated):
             ftd = fulfilment_to_delivery.get(key)
             partners.append(
                 {
                     "courier_key": key,
-                    "courier_id": agg.courier_id,
-                    "courier_name": names.get(agg.courier_id, agg.name)
-                    if agg.courier_id
-                    else agg.name,
+                    **self._partner_fields(agg),
                     "total_allocated": agg.allocated,
                     "total_picked_up": agg.shipped,
                     "total_delivered": agg.delivered,

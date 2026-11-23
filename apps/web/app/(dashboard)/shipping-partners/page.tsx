@@ -6,6 +6,7 @@ import { AlertTriangle, PackageCheck, Percent, Truck } from "lucide-react"
 import { FilterBar } from "@/components/shared/filter-bar"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
+import { ServiceNames } from "@/components/shared/service-names"
 import { StatTile } from "@/components/shared/stat-tile"
 import { Input } from "@/components/ui/input"
 import {
@@ -131,7 +132,10 @@ function ShippingPartnersPageContent() {
                   <TableBody>
                     {data.partners.map((row) => (
                       <TableRow key={row.courier_key}>
-                        <TableCell className="font-medium">{row.courier_name}</TableCell>
+                        <TableCell className="font-medium">
+                          {row.courier_name}
+                          <ServiceNames names={row.service_names} carrier={row.courier_name} />
+                        </TableCell>
                         <TableCell className="text-right tabular-nums">
                           {row.orders_allocated}
                         </TableCell>
@@ -208,7 +212,10 @@ function ShippingPartnersPageContent() {
                   <TableBody>
                     {data.partners.map((row) => (
                       <TableRow key={row.courier_key}>
-                        <TableCell className="font-medium">{row.courier_name}</TableCell>
+                        <TableCell className="font-medium">
+                          {row.courier_name}
+                          <ServiceNames names={row.service_names} carrier={row.courier_name} />
+                        </TableCell>
                         <TableCell className="text-right tabular-nums">
                           {row.total_allocated}
                         </TableCell>
