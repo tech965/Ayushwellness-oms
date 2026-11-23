@@ -199,7 +199,7 @@ describe("Shipping Partner Performance — CEO view", () => {
     expect(
       within(alloc).getByText("Blue Dart Surface · Bluedart Air")
     ).toBeInTheDocument()
-    expect(within(alloc).getByText("60%")).toBeInTheDocument()
+    expect(within(alloc).getByText("60.0%")).toBeInTheDocument()
   })
 
   it("clicking an allocation row lists that partner's orders", async () => {
@@ -362,5 +362,163 @@ describe("Shipping Partner Performance — CEO view", () => {
     await user.click(screen.getByRole("button", { name: /Clear selection/ }))
     expect(screen.queryByTestId("order-drilldown")).not.toBeInTheDocument()
     expect(lastOrdersArgs().enabled).toBe(false)
+  })
+
+  describe("percentages", () => {
+    it("shows each partner's share of allocated orders, success % and RTO % in the allocation table", () => {
+      renderWithProviders(<ShippingPartnersPage />)
+      const alloc = section("Order allocation")
+      const blue = within(alloc).getByText("Blue Dart").closest("tr") as HTMLElement
+      expect(blue).toHaveTextContent("60.0%")
+      expect(blue).toHaveTextContent("80.0%")
+      expect(blue).toHaveTextContent("10.0%")
+      expect(blue).toHaveTextContent("of 50 picked up")
+      const delhivery = within(alloc).getByText("Delhivery").closest("tr") as HTMLElement
+      expect(delhivery).toHaveTextContent("40.0%")
+    })
+
+    it("shows a dash instead of 0% when a partner has no picked-up orders", () => {
+      renderWithProviders(<ShippingPartnersPage />)
+      const delhivery = within(section("Order allocation"))
+        .getByText("Delhivery")
+        .closest("tr") as HTMLElement
+      expect(delhivery).toHaveTextContent("of 0 picked up")
+      const cells = delhivery.querySelectorAll("td")
+      // Delivery success % and RTO % columns: undefined, not 0%.
+      expect(cells[3]).toHaveTextContent("—")
+      expect(cells[4]).toHaveTextContent("—")
+      expect(cells[3].textContent).not.toMatch(/^0/)
+      expect(document.body.textContent).not.toMatch(/NaN|Infinity/)
+    })
+
+    it("adds a share-of-allocated column to the comparison table with its denominator", () => {
+      renderWithProviders(<ShippingPartnersPage />)
+      const table = section("Partner performance comparison")
+      expect(within(table).getByText("Share of allocated")).toBeInTheDocument()
+      const blue = within(table).getByText("Blue Dart").closest("tr") as HTMLElement
+      expect(blue).toHaveTextContent("60.0%")
+      expect(blue).toHaveTextContent("of 100 allocated")
+      expect(blue).toHaveTextContent("80.0%")
+      expect(blue).toHaveTextContent("of 50 picked up")
+    })
+
+    it("explains the denominators in the UI", () => {
+      renderWithProviders(<ShippingPartnersPage />)
+      expect(
+        screen.getByText(/share of all allocated orders; delivery success/)
+      ).toBeInTheDocument()
+      expect(
+        screen.getByText(/measured against the orders the courier has picked up/)
+      ).toBeInTheDocument()
+    })
+
+    it("computes the share from the counts, not from fixed or pre-rounded values", () => {
+      vi.mocked(usePartnerAllocation).mockReturnValue(
+        ok({
+          total_orders_allocated: 3,
+          total_allocation_percent: 100,
+          partners: [
+            {
+              courier_key: BLUE,
+              courier_id: null,
+              courier_name: "Blue Dart",
+              service_names: [],
+              orders_allocated: 1,
+              allocation_percent: 99,
+              avg_delivery_days: null,
+            },
+            {
+              courier_key: DELHIVERY,
+              courier_id: null,
+              courier_name: "Delhivery",
+              service_names: [],
+              orders_allocated: 2,
+              allocation_percent: 1,
+              avg_delivery_days: null,
+            },
+          ],
+        }) as never
+      )
+      renderWithProviders(<ShippingPartnersPage />)
+      const alloc = section("Order allocation")
+      expect(within(alloc).getByText("Blue Dart").closest("tr")).toHaveTextContent(
+        "33.3%"
+      )
+      expect(within(alloc).getByText("Delhivery").closest("tr")).toHaveTextContent(
+        "66.7%"
+      )
+    })
+
+    it("formats backend rates to one decimal", () => {
+      vi.mocked(usePartnerPerformance).mockReturnValue(
+        ok({
+          shipping_cost_available: false,
+          shipping_cost_unavailable_reason: "x",
+          partners: [
+            {
+              courier_key: BLUE,
+              courier_id: null,
+              courier_name: "Blue Dart",
+              service_names: [],
+              total_allocated: 11,
+              total_picked_up: 11,
+              total_delivered: 7,
+              delivery_success_rate: 63.6364,
+              rto_percentage: 22.7273,
+              avg_delivery_days: 2.9166,
+              avg_fulfilment_to_delivery_days: null,
+              missing_delivery_timestamp_count: 0,
+              cod_delivery_success_rate: 50,
+              prepaid_delivery_success_rate: 33.3333,
+              avg_shipping_cost_per_delivered_order: null,
+              avg_shipping_cost_per_rto_order: null,
+            },
+          ],
+        }) as never
+      )
+      renderWithProviders(<ShippingPartnersPage />)
+      const row = within(section("Partner performance comparison"))
+        .getByText("Blue Dart")
+        .closest("tr") as HTMLElement
+      expect(row).toHaveTextContent("63.6%")
+      expect(row).toHaveTextContent("22.7%")
+      expect(row).toHaveTextContent("50.0%")
+      expect(row).toHaveTextContent("33.3%")
+      expect(row.textContent).not.toMatch(/\d\.\d\d+%/)
+    })
+
+    it("shows the rates under the partner name for small screens, with the denominator", () => {
+      renderWithProviders(<ShippingPartnersPage />)
+      const alloc = section("Order allocation")
+      const blue = within(alloc).getByText("Blue Dart").closest("tr") as HTMLElement
+      const line = within(blue).getByTestId("partner-rates-mobile")
+      expect(line).toHaveTextContent("Delivery success 80.0%")
+      expect(line).toHaveTextContent("RTO 10.0%")
+      expect(line).toHaveTextContent("of 50 picked up")
+      expect(line.className).toContain("md:hidden")
+      const delhivery = within(alloc).getByText("Delhivery").closest("tr") as HTMLElement
+      expect(within(delhivery).getByTestId("partner-rates-mobile")).toHaveTextContent(
+        "Delivery success — · RTO —"
+      )
+    })
+
+    it("uses the same filters for the allocation shares and the performance rates", async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<ShippingPartnersPage />)
+      await user.type(screen.getByPlaceholderText("Filter by SKU"), "XY")
+      const alloc = vi.mocked(usePartnerAllocation).mock.calls.at(-1)![0]
+      const perf = vi.mocked(usePartnerPerformance).mock.calls.at(-1)![0]
+      expect(alloc).toEqual(perf)
+      expect(alloc.sku).toBe("XY")
+    })
+
+    it("keeps the rows and metric figures clickable with percentages shown", async () => {
+      const user = userEvent.setup()
+      renderWithProviders(<ShippingPartnersPage />)
+      await user.click(
+        screen.getByRole("button", { name: "Blue Dart delivered orders (success rate)" })
+      )
+      expect(lastOrdersArgs()).toMatchObject({ metric: "delivered", partner: BLUE })
+    })
   })
 })

@@ -10,6 +10,7 @@ import {
   useFulfilmentOrders,
   useFulfilmentPerformance,
   useFulfilmentPerformanceHistory,
+  useShipmentStatusAnalytics,
 } from "@/services/shipments"
 
 const push = vi.fn()
@@ -25,6 +26,7 @@ vi.mock("@/services/shipments", () => ({
   useDeliveryPerformance: vi.fn(),
   useDeliveryPerformanceHistory: vi.fn(),
   useFulfilmentOrders: vi.fn(),
+  useShipmentStatusAnalytics: vi.fn(),
 }))
 // recharts cannot size itself in jsdom; stand each bar in with a button so the
 // page click -> filter wiring is what gets tested.
@@ -53,8 +55,21 @@ const ok = <T,>(data: T) => ({ data, isLoading: false, isError: false, refetch: 
 const PAGE_META = { page: 1, page_size: 20, total_items: 1, total_pages: 1 }
 
 function setup(
-  overrides: { fulfilment?: object; delivery?: object; orders?: unknown } = {}
+  overrides: {
+    fulfilment?: object
+    delivery?: object
+    orders?: unknown
+    /** Total orders under the same filters; `null` = not loaded yet. */
+    totalOrders?: number | null
+  } = {}
 ) {
+  vi.mocked(useShipmentStatusAnalytics).mockReturnValue(
+    ok(
+      overrides.totalOrders === null
+        ? undefined
+        : { total_orders: overrides.totalOrders ?? 1000 }
+    ) as never
+  )
   vi.mocked(useFulfilmentPerformance).mockReturnValue(
     ok({
       avg_fulfilment_days: 1.5,
@@ -352,5 +367,106 @@ describe("Fulfilment & Delivery Performance — CEO view", () => {
   it("keeps original service names under each carrier family", () => {
     renderWithProviders(<FulfilmentPerformancePage />)
     expect(screen.getByText("Blue Dart Surface · Bluedart Air")).toBeInTheDocument()
+  })
+
+  describe("percentages", () => {
+    const SPEC = {
+      totalOrders: 9493,
+      fulfilment: {
+        fulfilled_order_count: 5144,
+        pending_fulfilment_count: 1106,
+        pending_over_24h_count: 1009,
+        pending_over_48h_count: 894,
+      },
+      delivery: {
+        delivered_order_count: 2346,
+        cod_delivered_order_count: 869,
+        prepaid_delivered_order_count: 1320,
+      },
+    }
+    const card = (label: string) =>
+      screen.getByRole("button", { name: new RegExp(`^${label}`) })
+
+    it("shows each average's sample coverage as a one-decimal share of all orders", () => {
+      setup(SPEC)
+      renderWithProviders(<FulfilmentPerformancePage />)
+      expect(card("Average Fulfilment Time")).toHaveTextContent(
+        "Based on 5,144 orders (54.2%)"
+      )
+      expect(card("Average Delivery Time")).toHaveTextContent(
+        "Based on 2,346 orders (24.7%)"
+      )
+      expect(card("COD Average Delivery Time")).toHaveTextContent(
+        "Based on 869 orders (9.2%)"
+      )
+      expect(card("Prepaid Average Delivery Time")).toHaveTextContent(
+        "Based on 1,320 orders (13.9%)"
+      )
+    })
+
+    it("keeps the average days unchanged next to the coverage", () => {
+      setup(SPEC)
+      renderWithProviders(<FulfilmentPerformancePage />)
+      expect(card("Average Delivery Time")).toHaveTextContent("4.3 days")
+      expect(card("Average Fulfilment Time")).toHaveTextContent("1.5 days")
+    })
+
+    it("shows each pending card as a share of all orders", () => {
+      setup(SPEC)
+      renderWithProviders(<FulfilmentPerformancePage />)
+      expect(card("Pending Fulfilment")).toHaveTextContent("11.7% of all 9,493 orders")
+      expect(card("Pending for More Than 24 Hours")).toHaveTextContent(
+        "10.6% of all 9,493 orders"
+      )
+      expect(card("Pending for More Than 48 Hours")).toHaveTextContent(
+        "9.4% of all 9,493 orders"
+      )
+      expect(card("Pending Fulfilment")).toHaveTextContent("1106")
+    })
+
+    it("explains that the percentage is sample coverage, not efficiency", () => {
+      setup(SPEC)
+      renderWithProviders(<FulfilmentPerformancePage />)
+      expect(
+        screen.getByText(/sample coverage, not delivery efficiency/)
+      ).toBeInTheDocument()
+      expect(screen.getByText(/share of all 9,493 orders/)).toBeInTheDocument()
+    })
+
+    it("computes from the response, not from fixed numbers", () => {
+      setup({
+        totalOrders: 400,
+        fulfilment: { fulfilled_order_count: 100, pending_fulfilment_count: 10 },
+        delivery: { delivered_order_count: 50 },
+      })
+      renderWithProviders(<FulfilmentPerformancePage />)
+      expect(card("Average Fulfilment Time")).toHaveTextContent("(25.0%)")
+      expect(card("Average Delivery Time")).toHaveTextContent("(12.5%)")
+      expect(card("Pending Fulfilment")).toHaveTextContent("2.5% of all 400 orders")
+    })
+
+    it("omits percentages safely when there are no orders or the total is unknown", () => {
+      for (const totalOrders of [0, null]) {
+        setup({ ...SPEC, totalOrders })
+        const { unmount } = renderWithProviders(<FulfilmentPerformancePage />)
+        const text = document.body.textContent ?? ""
+        expect(text).not.toMatch(/NaN|Infinity/)
+        expect(text).not.toMatch(/\(\d+\.\d%\)/)
+        expect(text).not.toMatch(/% of all/)
+        expect(card("Average Delivery Time")).toHaveTextContent("Based on 2,346 orders")
+        unmount()
+      }
+    })
+
+    it("uses the same filters for the total as for the counts", async () => {
+      const user = userEvent.setup()
+      setup(SPEC)
+      renderWithProviders(<FulfilmentPerformancePage />)
+      await user.type(screen.getByPlaceholderText("Filter by SKU"), "AB")
+      const totals = vi.mocked(useShipmentStatusAnalytics).mock.calls.at(-1)![0]
+      const counts = vi.mocked(useFulfilmentPerformance).mock.calls.at(-1)![0]
+      expect(totals).toEqual(counts)
+      expect(totals.sku).toBe("AB")
+    })
   })
 })
