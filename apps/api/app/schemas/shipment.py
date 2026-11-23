@@ -240,6 +240,16 @@ class UnifiedStatusCount(BaseModel):
     percent_of_total: float
 
 
+class StatusGroupCount(BaseModel):
+    """One management-friendly category over the technical statuses."""
+
+    key: str
+    label: str
+    statuses: list[str]
+    count: int
+    percent_of_total: float
+
+
 class ShipmentStatusAnalyticsResponse(BaseModel):
     """OMS SOW Module 2 — unified 12-status breakdown plus the 5 KPI
     percentages, computed per `app.services.shipment_analytics_service`.
@@ -254,6 +264,10 @@ class ShipmentStatusAnalyticsResponse(BaseModel):
     total_orders: int
     total_eligible_orders: int
     total_shipped_orders: int
+    total_fulfilled: int = 0
+    total_delivered: int = 0
+    total_rto: int = 0
+    status_groups: list[StatusGroupCount] = []
     status_breakdown: list[UnifiedStatusCount]
     pickup_rate: float
     in_transit_rate: float
@@ -308,6 +322,35 @@ class ShipmentStatusDrilldownRowResponse(BaseModel):
     courier_name: str | None = None
     expected_delivery_date: datetime | None = None
     actual_delivery_date: datetime | None = None
+    # Original (technical) shipment status, tracking details and pickup date,
+    # shown inside the order details.
+    shipment_status: str | None = None
+    current_location: str | None = None
+    last_tracking_update_at: datetime | None = None
+    pickup_date: datetime | None = None
+
+
+class PerformanceOrderRowResponse(BaseModel):
+    """One order behind a Module 3 / Module 4 KPI, chart bar or partner row
+    (`GET /shipments/fulfilment-performance/orders`, `/partner-orders`).
+    Durations are computed server-side from the same timestamps and rules
+    as the aggregate that opened the list.
+    """
+
+    order_id: uuid.UUID
+    order_number: str
+    order_datetime: datetime
+    payment_type: PaymentType
+    sku_summary: str | None = None
+    unified_status: str
+    shipment_status: str | None = None
+    awb: str | None = None
+    courier_name: str | None = None
+    pickup_date: datetime | None = None
+    actual_delivery_date: datetime | None = None
+    fulfilment_days: float | None = None
+    delivery_days: float | None = None
+    pending_hours: float | None = None
 
 
 # --- OMS SOW Module 3: Fulfilment & Delivery Performance Dashboard -------

@@ -23,13 +23,18 @@ from datetime import datetime
 from io import BytesIO
 
 from openpyxl import Workbook
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.order import Order
 from app.repositories.order import OrderRepository
+from app.repositories.shipment_effective import (
+    effective_courier_name,
+    effective_delivery_date,
+    effective_pickup_date,
+)
 from app.schemas.common import PageParams
-from app.services.shipment_status import UNIFIED_STATUSES
+from app.services.shipment_status import UNIFIED_STATUSES, classify_unified_status
 
 # Buckets that only exist once a courier has actually scanned a pickup —
 # the SOW's "Total Shipped Orders" denominator for In-Transit/OFD/
@@ -53,11 +58,42 @@ SHIPPED_OR_LATER_STATUSES = frozenset(
 # confirmed, cancelled, or fulfilled in Shopify with no local shipment/
 # tracking -- the last can never be picked up in this system) — the SOW's
 # "Total Eligible Orders" denominator for Pickup %.
-_NOT_ELIGIBLE_STATUSES = frozenset(
-    {"order_placed", "cancelled", "fulfilled_tracking_unavailable"}
-)
+_NOT_ELIGIBLE_STATUSES = frozenset({"order_placed", "cancelled", "fulfilled_tracking_unavailable"})
 
 RTO_STATUSES = frozenset({"rto_initiated", "rto_in_transit", "rto_delivered"})
+
+
+# Management-friendly categories over the 13 technical statuses, in display
+# order. Every unified status belongs to exactly one category, so category
+# counts always add up to `total_orders`. Defined once here so the headline
+# cards, the breakdown, the chart and every drilldown agree.
+STATUS_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("new_orders", "New Orders", ("order_placed",)),
+    ("ready_for_shipping", "Ready for Shipping", ("ready_to_ship",)),
+    ("awaiting_pickup", "Awaiting Courier Pickup", ("pickup_pending",)),
+    ("picked_up", "Picked Up by Courier", ("picked_up",)),
+    ("in_transit", "In Transit", ("in_transit", "rto_in_transit")),
+    ("out_for_delivery", "Out for Delivery", ("out_for_delivery",)),
+    ("delivered", "Successfully Delivered", ("delivered",)),
+    ("return_to_origin", "Return to Origin", ("rto_initiated", "rto_delivered")),
+    ("delivery_issue", "Delivery Issue", ("ndr",)),
+    ("cancelled", "Cancelled Orders", ("cancelled",)),
+    ("tracking_pending", "Fulfilled – Tracking Pending", ("fulfilled_tracking_unavailable",)),
+)
+_GROUP_STATUSES = {key: statuses for key, _label, statuses in STATUS_GROUPS}
+STATUS_GROUP_KEYS = tuple(_GROUP_STATUSES)
+
+# Headline KPI -> the unified statuses it counts ("total" = every order).
+# Fulfilled = handed to a courier (picked up or any later state) plus orders
+# already marked fulfilled in Shopify that have no local tracking.
+FULFILLED_STATUSES = SHIPPED_OR_LATER_STATUSES | {"fulfilled_tracking_unavailable"}
+KPI_STATUSES: dict[str, frozenset[str] | None] = {
+    "total": None,
+    "fulfilled": frozenset(FULFILLED_STATUSES),
+    "delivered": frozenset({"delivered"}),
+    "rto": frozenset(RTO_STATUSES),
+}
+KPI_KEYS = tuple(KPI_STATUSES)
 
 
 def _pct(numerator: int, denominator: int) -> float:
@@ -89,13 +125,28 @@ class ShipmentStatusAnalyticsService:
         total_eligible = sum(
             c for status, c in counts.items() if status not in _NOT_ELIGIBLE_STATUSES
         )
-        total_shipped = sum(c for status, c in counts.items() if status in SHIPPED_OR_LATER_STATUSES)
+        total_shipped = sum(
+            c for status, c in counts.items() if status in SHIPPED_OR_LATER_STATUSES
+        )
         rto_count = sum(counts[status] for status in RTO_STATUSES)
 
         return {
             "total_orders": total_orders,
             "total_eligible_orders": total_eligible,
             "total_shipped_orders": total_shipped,
+            "total_fulfilled": sum(c for st, c in counts.items() if st in FULFILLED_STATUSES),
+            "total_delivered": counts["delivered"],
+            "total_rto": rto_count,
+            "status_groups": [
+                {
+                    "key": key,
+                    "label": label,
+                    "statuses": list(statuses),
+                    "count": sum(counts[st] for st in statuses),
+                    "percent_of_total": _pct(sum(counts[st] for st in statuses), total_orders),
+                }
+                for key, label, statuses in STATUS_GROUPS
+            ],
             "status_breakdown": [
                 {
                     "status": status,
@@ -132,32 +183,56 @@ class ShipmentStatusAnalyticsService:
     async def get_status_drilldown(
         self,
         *,
-        unified_status: str,
         page_params: PageParams,
+        unified_status: str | None = None,
+        group: str | None = None,
+        kpi: str | None = None,
+        q: str | None = None,
         courier_id: uuid.UUID | None = None,
         payment_type: str | None = None,
         sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> tuple[list[dict[str, object]], int]:
-        stmt, _active_shipment = self.orders.unified_status_drilldown_query(
+        """Orders behind one headline KPI (`kpi`), one management category
+        (`group`) or one exact unified status (`unified_status`) -- same
+        filters and same join as the counts, so a drilldown total always
+        equals the number on the card/row that opened it. Each order
+        appears once (the controlling shipment is a single LEFT JOINed row).
+        """
+        statuses: list[str] | None = None
+        if group is not None:
+            statuses = list(_GROUP_STATUSES[group])
+        elif kpi is not None:
+            kpi_set = KPI_STATUSES[kpi]
+            statuses = None if kpi_set is None else [s for s in UNIFIED_STATUSES if s in kpi_set]
+        stmt, active_shipment = self.orders.unified_status_drilldown_query(
             unified_status=unified_status,
+            unified_statuses=statuses if unified_status is None else None,
             courier_id=courier_id,
             payment_type=payment_type,
             sku=sku,
             date_from=date_from,
             date_to=date_to,
         )
+        if q and q.strip():
+            term = f"%{q.strip()}%"
+            stmt = stmt.where(or_(Order.order_number.ilike(term), active_shipment.awb.ilike(term)))
         total = await self.session.scalar(select(func.count()).select_from(stmt.subquery()))
         paged = (
-            stmt.order_by(Order.order_datetime.desc())
+            stmt.add_columns(
+                effective_courier_name(active_shipment).label("courier_name"),
+                effective_pickup_date(active_shipment).label("pickup_date"),
+                effective_delivery_date(active_shipment).label("delivery_date"),
+            )
+            .order_by(Order.order_datetime.desc(), Order.id)
             .offset(page_params.offset)
             .limit(page_params.page_size)
         )
         rows = (await self.session.execute(paged)).all()
 
         results = []
-        for order, shipment in rows:
+        for order, shipment, courier_name, pickup_date, delivery_date in rows:
             sku_summary = ", ".join(i.sku for i in order.items if i.sku) or None
             results.append(
                 {
@@ -168,12 +243,27 @@ class ShipmentStatusAnalyticsService:
                     "payment_type": order.payment_type,
                     "sku_summary": sku_summary,
                     "total_amount": order.total_amount,
-                    "unified_status": unified_status,
+                    "unified_status": classify_unified_status(
+                        order_status=order.status.value,
+                        fulfillment_status=order.fulfillment_status.value,
+                        shipment_current_status=(
+                            shipment.current_status.value if shipment else None
+                        ),
+                        shipment_rto_status=(
+                            shipment.rto_status.value if shipment and shipment.rto_status else None
+                        ),
+                    ),
                     "shipment_id": shipment.id if shipment else None,
+                    "shipment_status": shipment.current_status.value if shipment else None,
                     "awb": shipment.awb if shipment else None,
-                    "courier_name": shipment.courier.name if shipment and shipment.courier else None,
+                    "courier_name": courier_name,
+                    "current_location": shipment.current_location if shipment else None,
+                    "last_tracking_update_at": (
+                        shipment.last_tracking_update_at if shipment else None
+                    ),
                     "expected_delivery_date": shipment.expected_delivery_date if shipment else None,
-                    "actual_delivery_date": shipment.actual_delivery_date if shipment else None,
+                    "pickup_date": pickup_date,
+                    "actual_delivery_date": delivery_date,
                 }
             )
         return results, total or 0

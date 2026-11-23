@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
@@ -804,7 +805,8 @@ class OrderRepository(BaseRepository[Order]):
     def unified_status_drilldown_query(
         self,
         *,
-        unified_status: str,
+        unified_status: str | None = None,
+        unified_statuses: Sequence[str] | None = None,
         courier_id: uuid.UUID | None = None,
         payment_type: str | None = None,
         sku: str | None = None,
@@ -832,7 +834,11 @@ class OrderRepository(BaseRepository[Order]):
             shipment_current_status_col=active_shipment.current_status,
             shipment_rto_status_col=active_shipment.rto_status,
         )
-        return base_stmt.where(bucket == unified_status), active_shipment
+        if unified_status is not None:
+            base_stmt = base_stmt.where(bucket == unified_status)
+        elif unified_statuses is not None:
+            base_stmt = base_stmt.where(bucket.in_(list(unified_statuses)))
+        return base_stmt, active_shipment
 
     async def list_for_export(self, query, *, limit: int) -> list[Order]:
         """Runs `query` (from `search_query()`, already eager-loading

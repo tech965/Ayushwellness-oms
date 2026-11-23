@@ -233,10 +233,38 @@ export interface UnifiedStatusCount {
   percent_of_total: number
 }
 
+/** A management-friendly category over the technical unified statuses. */
+export interface StatusGroupCount {
+  key: StatusGroupKey
+  label: string
+  statuses: UnifiedShipmentStatus[]
+  count: number
+  percent_of_total: number
+}
+
+export type StatusGroupKey =
+  | "new_orders"
+  | "ready_for_shipping"
+  | "awaiting_pickup"
+  | "picked_up"
+  | "in_transit"
+  | "out_for_delivery"
+  | "delivered"
+  | "return_to_origin"
+  | "delivery_issue"
+  | "cancelled"
+  | "tracking_pending"
+
+export type StatusKpiKey = "total" | "fulfilled" | "delivered" | "rto"
+
 export interface ShipmentStatusAnalytics {
   total_orders: number
   total_eligible_orders: number
   total_shipped_orders: number
+  total_fulfilled?: number
+  total_delivered?: number
+  total_rto?: number
+  status_groups?: StatusGroupCount[]
   status_breakdown: UnifiedStatusCount[]
   pickup_rate: number
   in_transit_rate: number
@@ -280,7 +308,42 @@ export interface ShipmentStatusDrilldownRow {
   courier_name: string | null
   expected_delivery_date: string | null
   actual_delivery_date: string | null
+  /** Original technical shipment status (e.g. "in_transit"). */
+  shipment_status?: string | null
+  current_location?: string | null
+  last_tracking_update_at?: string | null
+  pickup_date?: string | null
 }
+
+/** One order behind a Module 3 / Module 4 KPI, chart bar or partner row. */
+export interface PerformanceOrderRow {
+  order_id: string
+  order_number: string
+  order_datetime: string
+  payment_type: string
+  sku_summary: string | null
+  unified_status: UnifiedShipmentStatus
+  shipment_status: string | null
+  awb: string | null
+  courier_name: string | null
+  pickup_date: string | null
+  actual_delivery_date: string | null
+  fulfilment_days: number | null
+  delivery_days: number | null
+  pending_hours: number | null
+}
+
+export type FulfilmentScope =
+  | "fulfilled"
+  | "delivered"
+  | "cod_delivered"
+  | "prepaid_delivered"
+  | "pending"
+  | "pending_24h"
+  | "pending_48h"
+
+export type PartnerMetric =
+  "allocated" | "picked_up" | "delivered" | "rto" | "cod_success" | "prepaid_success"
 
 export interface ShipmentStatusAnalyticsFilters {
   courier_id?: string

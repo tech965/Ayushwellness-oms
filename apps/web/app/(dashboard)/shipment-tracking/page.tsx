@@ -1,14 +1,15 @@
 "use client"
 
 import * as React from "react"
-import { CheckCircle2, PackageCheck, RotateCcw, Timer, Truck } from "lucide-react"
 
-import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
+import { ClickableDonut } from "@/components/shared/clickable-charts"
+import type { DataTableColumn } from "@/components/shared/data-table"
 import { FilterBar } from "@/components/shared/filter-bar"
+import { OrderDrilldown, useDebouncedValue } from "@/components/shared/order-drilldown"
 import { PageHeader } from "@/components/shared/page-header"
-import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
-import { StatTile } from "@/components/shared/stat-tile"
+import { SelectableStatCard } from "@/components/shared/selectable-stat-card"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -26,7 +27,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { formatDate, formatMoney, formatRate } from "@/lib/format"
+import { formatDate, formatDateTime } from "@/lib/format"
+import {
+  groupOfStatus,
+  paymentLabel,
+  STATUS_GROUP_META,
+  technicalStatusLabel,
+} from "@/lib/shipment-labels"
+import { STATUS_TONE_CLASSES } from "@/lib/status-styles"
+import { cn } from "@/lib/utils"
 import { useDateRangeFilter } from "@/lib/use-date-range-filter"
 import { usePaginationState } from "@/lib/use-pagination"
 import { useCouriers } from "@/services/couriers"
@@ -36,21 +45,141 @@ import {
   useShipmentStatusDrilldown,
   useShipmentStatusHistory,
 } from "@/services/shipments"
-import {
-  UNIFIED_SHIPMENT_STATUS_OPTIONS,
-  type ShipmentStatusDrilldownRow,
-  type UnifiedShipmentStatus,
+import type {
+  ShipmentStatusAnalytics,
+  ShipmentStatusDrilldownRow,
+  StatusGroupCount,
+  StatusGroupKey,
+  StatusKpiKey,
+  UnifiedShipmentStatus,
 } from "@/types/shipment"
 
 const ALL_COURIERS = "__all__"
 
-/** OMS SOW Module 2 — Shipment Tracking & Status Analytics. Reads
- * entirely from locally stored, already-synced order/shipment data (the
- * existing Shiprocket webhook/pull pipeline); this is a "stored data"
- * screen, same as `/shipments`, `/ndr`, `/rto` -- no `LiveModeGate` is
- * needed because nothing here is replaced in live-data mode (the
- * backend endpoints 403 with a clear reason in that mode instead; see
- * `QueryStates`' error rendering below).
+type Selection =
+  { type: "kpi"; key: StatusKpiKey } | { type: "group"; key: StatusGroupKey }
+
+const KPI_TITLES: Record<StatusKpiKey, string> = {
+  total: "All orders",
+  fulfilled: "Fulfilled orders",
+  delivered: "Delivered orders",
+  rto: "Return-to-origin (RTO) orders",
+}
+
+/** Use the backend's category counts; if an older API (no `status_groups`)
+ * answers during a staged deploy, derive the same grouping from the
+ * technical breakdown so the page never shows empty cards.
+ */
+function groupsOf(data: ShipmentStatusAnalytics): StatusGroupCount[] {
+  if (data.status_groups && data.status_groups.length > 0) return data.status_groups
+  const order = Object.keys(STATUS_GROUP_META) as StatusGroupKey[]
+  return order.map((key) => {
+    const rows = data.status_breakdown.filter((row) => groupOfStatus(row.status) === key)
+    const count = rows.reduce((sum, row) => sum + row.count, 0)
+    return {
+      key,
+      label: STATUS_GROUP_META[key].label,
+      statuses: rows.map((row) => row.status),
+      count,
+      percent_of_total: data.total_orders
+        ? Math.round((count / data.total_orders) * 10000) / 100
+        : 0,
+    }
+  })
+}
+
+function headline(data: ShipmentStatusAnalytics) {
+  const countOf = (statuses: string[]) =>
+    data.status_breakdown
+      .filter((row) => statuses.includes(row.status))
+      .reduce((sum, row) => sum + row.count, 0)
+  return {
+    total: data.total_orders,
+    fulfilled:
+      data.total_fulfilled ??
+      data.total_shipped_orders + countOf(["fulfilled_tracking_unavailable"]),
+    delivered: data.total_delivered ?? countOf(["delivered"]),
+    rto: data.total_rto ?? countOf(["rto_initiated", "rto_in_transit", "rto_delivered"]),
+  }
+}
+
+function StatusPill({
+  status,
+}: {
+  status: ShipmentStatusDrilldownRow["unified_status"]
+}) {
+  const meta = STATUS_GROUP_META[groupOfStatus(status)]
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "rounded-md border-transparent font-semibold",
+        STATUS_TONE_CLASSES[meta.tone]
+      )}
+    >
+      {meta.label}
+    </Badge>
+  )
+}
+
+const drilldownColumns: DataTableColumn<ShipmentStatusDrilldownRow>[] = [
+  {
+    id: "order_number",
+    header: "Order",
+    cell: (row) => (
+      <span className="font-medium">
+        {row.order_number}
+        <span className="text-muted-foreground block text-xs font-normal">
+          {formatDate(row.order_datetime)}
+        </span>
+      </span>
+    ),
+  },
+  { id: "customer", header: "Customer", cell: (row) => row.customer_name ?? "—" },
+  {
+    id: "sku",
+    header: "Product (SKU)",
+    cell: (row) => (
+      <span className="line-clamp-2 max-w-48 text-xs">{row.sku_summary ?? "—"}</span>
+    ),
+  },
+  { id: "payment", header: "Payment", cell: (row) => paymentLabel(row.payment_type) },
+  { id: "partner", header: "Shipping partner", cell: (row) => row.courier_name ?? "—" },
+  {
+    id: "status",
+    header: "Status",
+    cell: (row) => (
+      <div className="space-y-0.5">
+        <StatusPill status={row.unified_status} />
+        <span className="text-muted-foreground block text-xs">
+          Original status: {technicalStatusLabel(row.unified_status)}
+        </span>
+      </div>
+    ),
+  },
+  {
+    id: "tracking",
+    header: "Tracking",
+    cell: (row) => (
+      <div className="text-xs">
+        <span className="block font-medium">{row.awb ?? "No tracking number"}</span>
+        {row.current_location && (
+          <span className="text-muted-foreground block">{row.current_location}</span>
+        )}
+        {row.last_tracking_update_at && (
+          <span className="text-muted-foreground block">
+            Updated {formatDateTime(row.last_tracking_update_at)}
+          </span>
+        )}
+      </div>
+    ),
+  },
+]
+
+/** OMS SOW Module 2 — Shipment Tracking & Status Analytics, laid out for
+ * management: four headline numbers, one chart and one plain-language
+ * breakdown; every card, bar, segment and row opens the exact orders behind
+ * it. Counts come from the backend unchanged (same formulas/denominators).
  */
 function ShipmentTrackingPageContent() {
   const {
@@ -63,8 +192,10 @@ function ShipmentTrackingPageContent() {
   const [courierId, setCourierId] = React.useState<string | undefined>(undefined)
   const [paymentType, setPaymentType] = React.useState<string | undefined>(undefined)
   const [sku, setSku] = React.useState("")
-  const [selectedStatus, setSelectedStatus] =
-    React.useState<UnifiedShipmentStatus | null>(null)
+  const [selection, setSelection] = React.useState<Selection | null>(null)
+  const [search, setSearch] = React.useState("")
+  const debouncedSearch = useDebouncedValue(search)
+  const drilldownRef = React.useRef<HTMLDivElement>(null)
 
   const filters = {
     courier_id: courierId,
@@ -80,56 +211,53 @@ function ShipmentTrackingPageContent() {
 
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const drilldownQuery = useShipmentStatusDrilldown({
-    unifiedStatus: selectedStatus ?? "ready_to_ship",
+    kpi: selection?.type === "kpi" ? selection.key : undefined,
+    group: selection?.type === "group" ? selection.key : undefined,
+    q: debouncedSearch || undefined,
     page,
     pageSize,
-    enabled: selectedStatus !== null,
+    enabled: selection !== null,
     ...filters,
   })
 
-  function selectStatus(status: UnifiedShipmentStatus) {
-    setSelectedStatus(status)
+  function select(next: Selection) {
+    const same = selection?.type === next.type && selection.key === next.key
+    setSelection(same ? null : next)
+    setSearch("")
+    resetPage()
+    if (!same) {
+      window.setTimeout(
+        () =>
+          drilldownRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" }),
+        50
+      )
+    }
+  }
+
+  function clear() {
+    setSelection(null)
+    setSearch("")
     resetPage()
   }
 
-  const drilldownColumns: DataTableColumn<ShipmentStatusDrilldownRow>[] = [
-    { id: "order_number", header: "Order #", cell: (row) => row.order_number },
-    {
-      id: "order_datetime",
-      header: "Order Date",
-      cell: (row) => formatDate(row.order_datetime),
-    },
-    { id: "customer_name", header: "Customer", cell: (row) => row.customer_name ?? "—" },
-    { id: "sku_summary", header: "SKU", cell: (row) => row.sku_summary ?? "—" },
-    { id: "payment_type", header: "Payment", cell: (row) => row.payment_type },
-    { id: "courier_name", header: "Courier", cell: (row) => row.courier_name ?? "—" },
-    { id: "awb", header: "AWB", cell: (row) => row.awb ?? "—" },
-    {
-      id: "total_amount",
-      header: "Amount",
-      cell: (row) => formatMoney(row.total_amount),
-    },
-  ]
+  function changeFilter(update: () => void) {
+    update()
+    resetPage()
+  }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <PageHeader
         title="Shipment Tracking & Status Analytics"
-        description="Unified status funnel across every shipping partner — pickup, in-transit, delivery and RTO rates, filterable by date, partner, payment mode and SKU."
+        description="Where every order stands today. Click any number, chart section or status to see the orders behind it."
       />
 
       <FilterBar
         dateRangeIsDefault={isDefaultRange}
         dateRange={dateRange}
-        onDateRangeChange={(range) => {
-          setDateRange(range)
-          resetPage()
-        }}
+        onDateRangeChange={(range) => changeFilter(() => setDateRange(range))}
         statusValue={paymentType}
-        onStatusChange={(value) => {
-          setPaymentType(value)
-          resetPage()
-        }}
+        onStatusChange={(value) => changeFilter(() => setPaymentType(value))}
         statusOptions={[
           { label: "COD", value: "cod" },
           { label: "Prepaid", value: "prepaid" },
@@ -139,10 +267,11 @@ function ShipmentTrackingPageContent() {
           <>
             <Select
               value={courierId ?? ALL_COURIERS}
-              onValueChange={(value) => {
-                setCourierId(value === ALL_COURIERS ? undefined : value)
-                resetPage()
-              }}
+              onValueChange={(value) =>
+                changeFilter(() =>
+                  setCourierId(value === ALL_COURIERS ? undefined : value)
+                )
+              }
             >
               <SelectTrigger className="w-[180px]">
                 <SelectValue placeholder="Shipping partner" />
@@ -158,10 +287,7 @@ function ShipmentTrackingPageContent() {
             </Select>
             <Input
               value={sku}
-              onChange={(event) => {
-                setSku(event.target.value)
-                resetPage()
-              }}
+              onChange={(event) => changeFilter(() => setSku(event.target.value))}
               placeholder="Filter by SKU"
               className="w-[160px]"
             />
@@ -177,137 +303,188 @@ function ShipmentTrackingPageContent() {
         onRetry={() => analyticsQuery.refetch()}
       >
         {(data) => {
+          const groups = groupsOf(data)
+          const kpis = headline(data)
           const untrackedCount =
-            data.status_breakdown.find(
-              (row) => row.status === "fulfilled_tracking_unavailable"
-            )?.count ?? 0
+            groups.find((g) => g.key === "tracking_pending")?.count ?? 0
+          const isKpi = (key: StatusKpiKey) =>
+            selection?.type === "kpi" && selection.key === key
           return (
             <>
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-                <StatTile
-                  label="Pickup %"
-                  value={formatRate(data.pickup_rate, data.total_eligible_orders)}
-                  icon={Truck}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <SelectableStatCard
+                  label="Total Orders"
+                  value={kpis.total}
+                  description="Every order placed in this period"
                   accent="blue"
-                  subtext={`of ${data.total_eligible_orders} eligible orders`}
+                  selected={isKpi("total")}
+                  onClick={() => select({ type: "kpi", key: "total" })}
                 />
-                <StatTile
-                  label="In-Transit %"
-                  value={formatRate(data.in_transit_rate, data.total_shipped_orders)}
-                  icon={Timer}
-                  accent="amber"
-                  subtext={`of ${data.total_shipped_orders} shipped orders`}
-                />
-                <StatTile
-                  label="Out for Delivery %"
-                  value={formatRate(
-                    data.out_for_delivery_rate,
-                    data.total_shipped_orders
-                  )}
-                  icon={PackageCheck}
+                <SelectableStatCard
+                  label="Total Fulfilled"
+                  value={kpis.fulfilled}
+                  description="Handed to a courier or already fulfilled in Shopify"
                   accent="violet"
-                  subtext={`of ${data.total_shipped_orders} shipped orders`}
+                  selected={isKpi("fulfilled")}
+                  onClick={() => select({ type: "kpi", key: "fulfilled" })}
                 />
-                <StatTile
-                  label="Delivery %"
-                  value={formatRate(data.delivery_rate, data.total_shipped_orders)}
-                  icon={CheckCircle2}
-                  accent="emerald"
-                  subtext={`of ${data.total_shipped_orders} shipped orders`}
+                <SelectableStatCard
+                  label="Total Delivered"
+                  value={kpis.delivered}
+                  description="Successfully reached the customer"
+                  accent="green"
+                  selected={isKpi("delivered")}
+                  onClick={() => select({ type: "kpi", key: "delivered" })}
                 />
-                <StatTile
-                  label="RTO %"
-                  value={formatRate(data.rto_rate, data.total_shipped_orders)}
-                  icon={RotateCcw}
+                <SelectableStatCard
+                  label="Total RTO"
+                  value={kpis.rto}
+                  description="Being returned, or returned, to the warehouse"
                   accent="orange"
-                  subtext={`of ${data.total_shipped_orders} shipped orders`}
+                  selected={isKpi("rto")}
+                  onClick={() => select({ type: "kpi", key: "rto" })}
                 />
               </div>
 
-              {untrackedCount > 0 && (
-                <p className="text-muted-foreground text-xs">
-                  {untrackedCount} order(s) are marked fulfilled in Shopify but have no
-                  shipment record here, so there is no tracking or delivery confirmation.
-                  They are shown as “Fulfilled – Tracking Unavailable” and are excluded
-                  from the Pickup, In-Transit, Delivery and RTO percentages.
-                </p>
-              )}
-              <div className="bg-card overflow-hidden rounded-lg border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Status</TableHead>
-                      <TableHead className="text-right">Orders</TableHead>
-                      <TableHead className="text-right">% of Total</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {data.status_breakdown.map((row) => {
-                      const option = UNIFIED_SHIPMENT_STATUS_OPTIONS.find(
-                        (o) => o.value === row.status
-                      )
-                      return (
-                        <TableRow
-                          key={row.status}
-                          className="hover:bg-muted/50 cursor-pointer"
-                          onClick={() => selectStatus(row.status)}
-                          aria-selected={selectedStatus === row.status}
-                        >
-                          <TableCell className="font-medium">
-                            {option?.label ?? row.status}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {row.count}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {row.percent_of_total}%
-                          </TableCell>
+              <div className="grid gap-4 xl:grid-cols-2">
+                <section className="bg-card space-y-3 rounded-xl border p-4">
+                  <div>
+                    <h3 className="text-base font-semibold">Orders by shipment status</h3>
+                    <p className="text-muted-foreground text-xs">
+                      Click a section to list those orders.
+                    </p>
+                  </div>
+                  <ClickableDonut
+                    ariaLabel="Orders by shipment status"
+                    centerLabel="orders"
+                    selectedKey={selection?.type === "group" ? selection.key : null}
+                    onSelect={(key) =>
+                      select({ type: "group", key: key as StatusGroupKey })
+                    }
+                    data={groups.map((g) => ({
+                      key: g.key,
+                      label: g.label,
+                      value: g.count,
+                      color: STATUS_GROUP_META[g.key]?.color,
+                    }))}
+                  />
+                </section>
+
+                <section className="bg-card space-y-3 rounded-xl border p-4">
+                  <div>
+                    <h3 className="text-base font-semibold">Status breakdown</h3>
+                    <p className="text-muted-foreground text-xs">
+                      Every order is counted once. Click a row to list its orders.
+                    </p>
+                  </div>
+                  <div className="overflow-hidden rounded-lg border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Status</TableHead>
+                          <TableHead className="text-right">Orders</TableHead>
+                          <TableHead className="text-right">% of total</TableHead>
                         </TableRow>
-                      )
-                    })}
-                  </TableBody>
-                </Table>
+                      </TableHeader>
+                      <TableBody>
+                        {groups.map((group) => {
+                          const active =
+                            selection?.type === "group" && selection.key === group.key
+                          return (
+                            <TableRow
+                              key={group.key}
+                              tabIndex={0}
+                              role="button"
+                              aria-pressed={active}
+                              className={cn(
+                                "hover:bg-muted/50 cursor-pointer",
+                                active && "bg-primary/10"
+                              )}
+                              onClick={() => select({ type: "group", key: group.key })}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter" || event.key === " ") {
+                                  event.preventDefault()
+                                  select({ type: "group", key: group.key })
+                                }
+                              }}
+                            >
+                              <TableCell className="font-medium">
+                                <span className="flex items-center gap-2">
+                                  <span
+                                    className="size-2.5 shrink-0 rounded-sm"
+                                    style={{
+                                      backgroundColor:
+                                        STATUS_GROUP_META[group.key]?.color,
+                                    }}
+                                  />
+                                  {group.label}
+                                </span>
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {group.count}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {group.percent_of_total}%
+                              </TableCell>
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </section>
+              </div>
+
+              <div className="text-muted-foreground space-y-1 text-xs">
+                <p>
+                  “Return to Origin” counts RTO Initiated and RTO Delivered; an RTO that
+                  is still travelling back appears under “In Transit”, while “Total RTO”
+                  above includes all three.
+                </p>
+                {untrackedCount > 0 && (
+                  <p>
+                    {untrackedCount} order(s) are marked fulfilled in Shopify but have no
+                    shipment record here, so there is no tracking or delivery
+                    confirmation. They are shown as “Fulfilled – Tracking Pending”.
+                  </p>
+                )}
               </div>
             </>
           )
         }}
       </QueryStates>
 
-      {selectedStatus && (
-        <div className="space-y-3">
-          <h3 className="text-sm font-semibold">
-            Orders —{" "}
-            {
-              UNIFIED_SHIPMENT_STATUS_OPTIONS.find((o) => o.value === selectedStatus)
-                ?.label
+      <div ref={drilldownRef}>
+        {selection && (
+          <OrderDrilldown
+            title={
+              selection.type === "kpi"
+                ? KPI_TITLES[selection.key]
+                : (STATUS_GROUP_META[selection.key]?.label ?? selection.key)
             }
-          </h3>
-          <QueryStates
-            isLoading={drilldownQuery.isLoading}
-            isError={drilldownQuery.isError}
-            error={drilldownQuery.error}
-            data={drilldownQuery.data}
-            onRetry={() => drilldownQuery.refetch()}
-            isEmpty={(d) => d.data.length === 0}
-            emptyTitle="No orders in this status"
-          >
-            {(result) => (
-              <>
-                <DataTable
-                  columns={drilldownColumns}
-                  data={result.data}
-                  rowKey={(row) => row.order_id}
-                />
-                <PaginationBar meta={result.meta} onPageChange={setPage} />
-              </>
-            )}
-          </QueryStates>
-        </div>
-      )}
+            description="Same date range, shipping partner, payment type and SKU filters as the numbers above."
+            query={drilldownQuery}
+            columns={drilldownColumns}
+            search={search}
+            onSearchChange={(value) => {
+              setSearch(value)
+              resetPage()
+            }}
+            onPageChange={setPage}
+            onClear={clear}
+            emptyTitle="No orders in this selection"
+          />
+        )}
+      </div>
 
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Historical Shipment Status Report</h3>
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-base font-semibold">Daily status history</h3>
+            <p className="text-muted-foreground text-xs">
+              Orders placed each day, grouped by where they stand now.
+            </p>
+          </div>
           <Button
             variant="outline"
             size="sm"
@@ -325,36 +502,47 @@ function ShipmentTrackingPageContent() {
           isEmpty={(d) => d.daily.length === 0}
           emptyTitle="No shipment activity in this range"
         >
-          {(history) => (
-            <div className="bg-card overflow-x-auto rounded-lg border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Date</TableHead>
-                    {UNIFIED_SHIPMENT_STATUS_OPTIONS.map((option) => (
-                      <TableHead key={option.value} className="text-right">
-                        {option.label}
-                      </TableHead>
-                    ))}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {history.daily.map((point) => (
-                    <TableRow key={point.date}>
-                      <TableCell>{formatDate(point.date)}</TableCell>
-                      {UNIFIED_SHIPMENT_STATUS_OPTIONS.map((option) => (
-                        <TableCell key={option.value} className="text-right tabular-nums">
-                          {point[option.value]}
-                        </TableCell>
+          {(history) => {
+            const order = Object.keys(STATUS_GROUP_META) as StatusGroupKey[]
+            const dayTotal = (point: unknown, key: StatusGroupKey) =>
+              Object.entries(point as Record<string, unknown>)
+                .filter(
+                  ([field]) =>
+                    field !== "date" &&
+                    groupOfStatus(field as UnifiedShipmentStatus) === key
+                )
+                .reduce((sum, [, value]) => sum + Number(value ?? 0), 0)
+            return (
+              <div className="bg-card overflow-x-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      {order.map((key) => (
+                        <TableHead key={key} className="text-right">
+                          {STATUS_GROUP_META[key].label}
+                        </TableHead>
                       ))}
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
+                  </TableHeader>
+                  <TableBody>
+                    {history.daily.map((point) => (
+                      <TableRow key={point.date}>
+                        <TableCell>{formatDate(point.date)}</TableCell>
+                        {order.map((key) => (
+                          <TableCell key={key} className="text-right tabular-nums">
+                            {dayTotal(point, key)}
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )
+          }}
         </QueryStates>
-      </div>
+      </section>
     </div>
   )
 }

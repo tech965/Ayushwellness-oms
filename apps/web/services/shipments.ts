@@ -9,9 +9,14 @@ import type {
   FulfilmentPerformanceFilters,
   FulfilmentSummary,
   FulfilmentTrend,
+  FulfilmentScope,
   PartnerAllocation,
   PartnerFilters,
+  PartnerMetric,
   PartnerPerformance,
+  PerformanceOrderRow,
+  StatusGroupKey,
+  StatusKpiKey,
   Shipment,
   ShipmentEvent,
   ShipmentListFilters,
@@ -188,25 +193,56 @@ export function useShipmentStatusHistory(filters: ShipmentStatusAnalyticsFilters
 }
 
 interface DrilldownParams extends ShipmentStatusAnalyticsFilters {
-  unifiedStatus: UnifiedShipmentStatus
+  /** Exactly one of these selects what to list. */
+  unifiedStatus?: UnifiedShipmentStatus
+  group?: StatusGroupKey
+  kpi?: StatusKpiKey
+  q?: string
   page: number
   pageSize: number
-  /** Only fetch once a status row has actually been selected. */
+  /** Only fetch once a KPI / category has actually been selected. */
   enabled?: boolean
 }
 
 export function useShipmentStatusDrilldown(params: DrilldownParams) {
-  const { unifiedStatus, page, pageSize, enabled = true, ...filters } = params
+  const {
+    unifiedStatus,
+    group,
+    kpi,
+    q,
+    page,
+    pageSize,
+    enabled = true,
+    ...filters
+  } = params
+  const selector = { unified_status: unifiedStatus, group, kpi }
   return useQuery({
-    queryKey: ["shipments", "status-analytics", "orders", unifiedStatus, page, pageSize, filters],
+    queryKey: [
+      "shipments",
+      "status-analytics",
+      "orders",
+      selector,
+      q,
+      page,
+      pageSize,
+      filters,
+    ],
     queryFn: async (): Promise<PaginatedResponse<ShipmentStatusDrilldownRow>> => {
       const response = await apiClient.get<PaginatedResponse<ShipmentStatusDrilldownRow>>(
         "/shipments/status-analytics/orders",
-        { params: { ...filters, unified_status: unifiedStatus, page, page_size: pageSize } }
+        {
+          params: {
+            ...filters,
+            ...selector,
+            q: q || undefined,
+            page,
+            page_size: pageSize,
+          },
+        }
       )
       return response.data
     },
-    enabled: enabled && Boolean(unifiedStatus),
+    enabled: enabled && Boolean(unifiedStatus || group || kpi),
     placeholderData: (previous) => previous,
   })
 }
@@ -234,7 +270,10 @@ export async function downloadShipmentStatusHistory(
 
 // --- OMS SOW Module 3: Fulfilment & Delivery Performance Dashboard --------
 
-export function useFulfilmentPerformance(filters: FulfilmentPerformanceFilters, enabled = true) {
+export function useFulfilmentPerformance(
+  filters: FulfilmentPerformanceFilters,
+  enabled = true
+) {
   return useQuery({
     queryKey: ["shipments", "fulfilment-performance", filters],
     queryFn: async (): Promise<FulfilmentSummary> => {
@@ -257,13 +296,17 @@ export function useFulfilmentPerformanceHistory(filters: FulfilmentPerformanceFi
         "/shipments/fulfilment-performance/history",
         { params: filters }
       )
-      if (!response.data.data) throw new Error("Fulfilment performance history not found.")
+      if (!response.data.data)
+        throw new Error("Fulfilment performance history not found.")
       return response.data.data
     },
   })
 }
 
-export function useDeliveryPerformance(filters: DeliveryPerformanceFilters, enabled = true) {
+export function useDeliveryPerformance(
+  filters: DeliveryPerformanceFilters,
+  enabled = true
+) {
   return useQuery({
     queryKey: ["shipments", "delivery-performance", filters],
     queryFn: async (): Promise<DeliveryPerformance> => {
@@ -319,5 +362,90 @@ export function usePartnerPerformance(filters: PartnerFilters) {
       if (!response.data.data) throw new Error("Partner performance not found.")
       return response.data.data
     },
+  })
+}
+
+// --- Order lists behind Module 3 / Module 4 cards, bars and rows ----------
+
+interface PerformanceOrdersParams {
+  page: number
+  pageSize: number
+  q?: string
+  /** Only fetch once something has actually been selected. */
+  enabled?: boolean
+}
+
+export function useFulfilmentOrders(
+  params: PerformanceOrdersParams &
+    FulfilmentPerformanceFilters & { scope: FulfilmentScope | null; day?: string }
+) {
+  const { scope, day, q, page, pageSize, enabled = true, ...filters } = params
+  return useQuery({
+    queryKey: [
+      "shipments",
+      "fulfilment-performance",
+      "orders",
+      scope,
+      day,
+      q,
+      page,
+      pageSize,
+      filters,
+    ],
+    queryFn: async (): Promise<PaginatedResponse<PerformanceOrderRow>> => {
+      const response = await apiClient.get<PaginatedResponse<PerformanceOrderRow>>(
+        "/shipments/fulfilment-performance/orders",
+        {
+          params: {
+            ...filters,
+            scope,
+            day,
+            q: q || undefined,
+            page,
+            page_size: pageSize,
+          },
+        }
+      )
+      return response.data
+    },
+    enabled: enabled && scope !== null,
+    placeholderData: (previous) => previous,
+  })
+}
+
+export function usePartnerOrders(
+  params: PerformanceOrdersParams &
+    PartnerFilters & { metric: PartnerMetric | null; partner?: string }
+) {
+  const { metric, partner, q, page, pageSize, enabled = true, ...filters } = params
+  return useQuery({
+    queryKey: [
+      "shipments",
+      "partner-orders",
+      metric,
+      partner,
+      q,
+      page,
+      pageSize,
+      filters,
+    ],
+    queryFn: async (): Promise<PaginatedResponse<PerformanceOrderRow>> => {
+      const response = await apiClient.get<PaginatedResponse<PerformanceOrderRow>>(
+        "/shipments/partner-orders",
+        {
+          params: {
+            ...filters,
+            metric,
+            partner,
+            q: q || undefined,
+            page,
+            page_size: pageSize,
+          },
+        }
+      )
+      return response.data
+    },
+    enabled: enabled && metric !== null,
+    placeholderData: (previous) => previous,
   })
 }

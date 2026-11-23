@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from app.schemas.shipment import (
     FulfilmentTrendResponse,
     PartnerAllocationResponse,
     PartnerPerformanceResponse,
+    PerformanceOrderRowResponse,
     ShipmentAnalyticsResponse,
     ShipmentCreateRequest,
     ShipmentEventResponse,
@@ -45,9 +46,18 @@ from app.schemas.shiprocket import (
     ShiprocketAssignAwbRequest,
 )
 from app.services.fulfilment_performance_service import FulfilmentPerformanceService
+from app.services.performance_orders_service import (
+    FULFILMENT_SCOPES,
+    PARTNER_METRICS,
+    PerformanceOrdersService,
+)
 from app.services.shipment_service import ShipmentService
 from app.services.shipment_status import UNIFIED_STATUSES
-from app.services.shipment_status_analytics_service import ShipmentStatusAnalyticsService
+from app.services.shipment_status_analytics_service import (
+    KPI_KEYS,
+    STATUS_GROUP_KEYS,
+    ShipmentStatusAnalyticsService,
+)
 from app.services.shipping_partner_performance_service import ShippingPartnerPerformanceService
 from app.services.shiprocket_service import (
     ShiprocketOperationsService,
@@ -253,20 +263,60 @@ async def export_shipment_status_history(
     dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
 )
 async def get_shipment_status_drilldown(
-    unified_status: str = Query(..., pattern=f"^({'|'.join(UNIFIED_STATUSES)})$"),
+    unified_status: str | None = Query(default=None, pattern=f"^({'|'.join(UNIFIED_STATUSES)})$"),
+    group: str | None = Query(default=None, pattern=f"^({'|'.join(STATUS_GROUP_KEYS)})$"),
+    kpi: str | None = Query(default=None, pattern=f"^({'|'.join(KPI_KEYS)})$"),
+    q: str | None = Query(default=None, max_length=100),
     filters: dict = Depends(_status_analytics_filters),
     page_params: PageParams = Depends(pagination_params),
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission("shipments.read")),
 ) -> PaginatedResponse[ShipmentStatusDrilldownRowResponse]:
-    """Individual orders under one of the 13 unified statuses — the
-    SOW's "ability to view individual orders under each status".
+    """Individual orders behind a headline KPI (`kpi`), a management
+    category (`group`) or one exact unified status (`unified_status`) --
+    exactly one of the three. Same filters as the counts, so totals match.
     """
+    if sum(v is not None for v in (unified_status, group, kpi)) != 1:
+        raise HTTPException(
+            status_code=422, detail="Provide exactly one of unified_status, group or kpi."
+        )
     rows, total = await ShipmentStatusAnalyticsService(session).get_status_drilldown(
-        unified_status=unified_status, page_params=page_params, **filters
+        unified_status=unified_status,
+        group=group,
+        kpi=kpi,
+        q=q,
+        page_params=page_params,
+        **filters,
     )
     return PaginatedResponse(
         data=[ShipmentStatusDrilldownRowResponse(**row) for row in rows],
+        meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
+
+
+@router.get(
+    "/fulfilment-performance/orders",
+    response_model=PaginatedResponse[PerformanceOrderRowResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_fulfilment_performance_orders(
+    scope: str = Query(..., pattern=f"^({'|'.join(FULFILMENT_SCOPES)})$"),
+    day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    q: str | None = Query(default=None, max_length=100),
+    filters: dict = Depends(_status_analytics_filters),
+    page_params: PageParams = Depends(pagination_params),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> PaginatedResponse[PerformanceOrderRowResponse]:
+    """Orders behind a Module 3 KPI card, pending card or daily-chart bar,
+    under the same filters as the aggregates (see
+    `PerformanceOrdersService`'s docstring for the matching rules).
+    """
+    rows, total = await PerformanceOrdersService(session).fulfilment_orders(
+        scope=scope, day=day, q=q, page_params=page_params, **filters
+    )
+    return PaginatedResponse(
+        data=[PerformanceOrderRowResponse(**row) for row in rows],
         meta=build_pagination_meta(total_items=total, page_params=page_params),
     )
 
@@ -413,6 +463,33 @@ async def get_partner_performance(
     """
     data = await ShippingPartnerPerformanceService(session).get_partner_performance(**filters)
     return ApiResponse(data=PartnerPerformanceResponse(**data))
+
+
+@router.get(
+    "/partner-orders",
+    response_model=PaginatedResponse[PerformanceOrderRowResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_partner_orders(
+    metric: str = Query(default="allocated", pattern=f"^({'|'.join(PARTNER_METRICS)})$"),
+    partner: str | None = Query(default=None, max_length=200),
+    q: str | None = Query(default=None, max_length=100),
+    filters: dict = Depends(_partner_filters),
+    page_params: PageParams = Depends(pagination_params),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> PaginatedResponse[PerformanceOrderRowResponse]:
+    """Orders behind a Module 4 partner row, metric cell or chart bar.
+    `partner` is a row's `courier_key` (omit for all partners); `metric`
+    follows the comparison table's columns.
+    """
+    rows, total = await PerformanceOrdersService(session).partner_orders(
+        metric=metric, partner=partner, q=q, page_params=page_params, **filters
+    )
+    return PaginatedResponse(
+        data=[PerformanceOrderRowResponse(**row) for row in rows],
+        meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
 
 
 def _to_shipment_list_response(shipment: Shipment) -> ShipmentListResponse:
