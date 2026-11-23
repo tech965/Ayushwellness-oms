@@ -248,7 +248,7 @@ function FulfilmentPerformancePageContent() {
         }
       />
 
-      <section className="space-y-3">
+      <section className="min-w-0 space-y-3">
         <div>
           <h3 className="text-base font-semibold">Average times</h3>
           <p className="text-muted-foreground text-xs">
@@ -388,7 +388,7 @@ function FulfilmentPerformancePageContent() {
       </section>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <section className="bg-card space-y-3 rounded-xl border p-4">
+        <section className="bg-card min-w-0 space-y-3 rounded-xl border p-4">
           <div>
             <h3 className="text-base font-semibold">Daily Fulfilment Performance</h3>
             <p className="text-muted-foreground text-xs">
@@ -430,7 +430,7 @@ function FulfilmentPerformancePageContent() {
           </QueryStates>
         </section>
 
-        <section className="bg-card space-y-3 rounded-xl border p-4">
+        <section className="bg-card min-w-0 space-y-3 rounded-xl border p-4">
           <div>
             <h3 className="text-base font-semibold">Delivery Performance</h3>
             <p className="text-muted-foreground text-xs">
@@ -499,7 +499,7 @@ function FulfilmentPerformancePageContent() {
         onRetry={() => deliveryQuery.refetch()}
       >
         {(data) => (
-          <section className="space-y-3">
+          <section className="min-w-0 space-y-3">
             <div>
               <h3 className="text-base font-semibold">
                 Delivery time by partner and region

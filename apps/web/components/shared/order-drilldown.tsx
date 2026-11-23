@@ -55,7 +55,7 @@ export function OrderDrilldown<TRow extends { order_id: string }>({
 
   return (
     <section
-      className="bg-card space-y-3 rounded-xl border p-4"
+      className="bg-card min-w-0 space-y-3 rounded-xl border p-4"
       aria-label={title}
       data-testid="order-drilldown"
     >

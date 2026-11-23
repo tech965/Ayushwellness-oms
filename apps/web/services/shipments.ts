@@ -192,6 +192,19 @@ export function useShipmentStatusHistory(filters: ShipmentStatusAnalyticsFilters
   })
 }
 
+/** Keeps the previous page on screen only while paging or searching inside
+ * the SAME selection and filters; any change of card, category, partner,
+ * date or filter drops it, so rows from a different selection are never
+ * shown under a new title.
+ */
+function keepPreviousForSameScope<T>(scope: unknown) {
+  return (previous: T | undefined, previousQuery?: { queryKey: readonly unknown[] }) =>
+    previousQuery &&
+    JSON.stringify(previousQuery.queryKey.at(-2)) === JSON.stringify(scope)
+      ? previous
+      : undefined
+}
+
 interface DrilldownParams extends ShipmentStatusAnalyticsFilters {
   /** Exactly one of these selects what to list. */
   unifiedStatus?: UnifiedShipmentStatus
@@ -221,11 +234,8 @@ export function useShipmentStatusDrilldown(params: DrilldownParams) {
       "shipments",
       "status-analytics",
       "orders",
-      selector,
-      q,
-      page,
-      pageSize,
-      filters,
+      { selector, filters },
+      { q, page, pageSize },
     ],
     queryFn: async (): Promise<PaginatedResponse<ShipmentStatusDrilldownRow>> => {
       const response = await apiClient.get<PaginatedResponse<ShipmentStatusDrilldownRow>>(
@@ -243,7 +253,9 @@ export function useShipmentStatusDrilldown(params: DrilldownParams) {
       return response.data
     },
     enabled: enabled && Boolean(unifiedStatus || group || kpi),
-    placeholderData: (previous) => previous,
+    placeholderData: keepPreviousForSameScope<
+      PaginatedResponse<ShipmentStatusDrilldownRow>
+    >({ selector, filters }),
   })
 }
 
@@ -385,12 +397,8 @@ export function useFulfilmentOrders(
       "shipments",
       "fulfilment-performance",
       "orders",
-      scope,
-      day,
-      q,
-      page,
-      pageSize,
-      filters,
+      { scope, day, filters },
+      { q, page, pageSize },
     ],
     queryFn: async (): Promise<PaginatedResponse<PerformanceOrderRow>> => {
       const response = await apiClient.get<PaginatedResponse<PerformanceOrderRow>>(
@@ -409,7 +417,11 @@ export function useFulfilmentOrders(
       return response.data
     },
     enabled: enabled && scope !== null,
-    placeholderData: (previous) => previous,
+    placeholderData: keepPreviousForSameScope<PaginatedResponse<PerformanceOrderRow>>({
+      scope,
+      day,
+      filters,
+    }),
   })
 }
 
@@ -422,12 +434,8 @@ export function usePartnerOrders(
     queryKey: [
       "shipments",
       "partner-orders",
-      metric,
-      partner,
-      q,
-      page,
-      pageSize,
-      filters,
+      { metric, partner, filters },
+      { q, page, pageSize },
     ],
     queryFn: async (): Promise<PaginatedResponse<PerformanceOrderRow>> => {
       const response = await apiClient.get<PaginatedResponse<PerformanceOrderRow>>(
@@ -446,6 +454,10 @@ export function usePartnerOrders(
       return response.data
     },
     enabled: enabled && metric !== null,
-    placeholderData: (previous) => previous,
+    placeholderData: keepPreviousForSameScope<PaginatedResponse<PerformanceOrderRow>>({
+      metric,
+      partner,
+      filters,
+    }),
   })
 }

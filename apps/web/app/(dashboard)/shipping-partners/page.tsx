@@ -277,7 +277,7 @@ function ShippingPartnersPageContent() {
         }
       />
 
-      <section className="space-y-3">
+      <section className="min-w-0 space-y-3">
         <div>
           <h3 className="text-base font-semibold">Order allocation</h3>
           <p className="text-muted-foreground text-xs">
@@ -380,7 +380,7 @@ function ShippingPartnersPageContent() {
         </QueryStates>
       </section>
 
-      <section className="space-y-3">
+      <section className="min-w-0 space-y-3">
         <div>
           <h3 className="text-base font-semibold">Partner comparison charts</h3>
           <p className="text-muted-foreground text-xs">
@@ -505,7 +505,7 @@ function ShippingPartnersPageContent() {
         </QueryStates>
       </section>
 
-      <section className="space-y-3">
+      <section className="min-w-0 space-y-3">
         <div>
           <h3 className="text-base font-semibold">Partner performance comparison</h3>
           <p className="text-muted-foreground text-xs">
@@ -538,7 +538,9 @@ function ShippingPartnersPageContent() {
                       <TableHead className="text-right">Allocated</TableHead>
                       <TableHead className="text-right">Picked up</TableHead>
                       <TableHead className="text-right">Delivered</TableHead>
-                      <TableHead className="text-right">Delivery success %</TableHead>
+                      <TableHead className="text-right whitespace-normal">
+                        Delivery success %
+                      </TableHead>
                       <TableHead className="text-right">RTO %</TableHead>
                       <TableHead className="text-right">Avg. delivery days</TableHead>
                       <TableHead className="text-right">
@@ -546,8 +548,12 @@ function ShippingPartnersPageContent() {
                       </TableHead>
                       <TableHead className="text-right">COD success %</TableHead>
                       <TableHead className="text-right">Prepaid success %</TableHead>
-                      <TableHead className="text-right">Cost / delivered order</TableHead>
-                      <TableHead className="text-right">Cost / RTO order</TableHead>
+                      <TableHead className="text-right whitespace-normal">
+                        Cost / delivered order
+                      </TableHead>
+                      <TableHead className="text-right whitespace-normal">
+                        Cost / RTO order
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>

@@ -99,7 +99,14 @@ export function ClickableBarChart({
               <XAxis dataKey="label" fontSize={12} interval="preserveStartEnd" />
               <YAxis yAxisId="left" allowDecimals={false} fontSize={12} width={40} />
               {hasSecondary && (
-                <YAxis yAxisId="right" orientation="right" fontSize={12} width={40} />
+                <YAxis
+                  yAxisId="right"
+                  orientation="right"
+                  fontSize={12}
+                  width={40}
+                  domain={[0, "auto"]}
+                  tickFormatter={(v) => String(Math.round(Number(v) * 10) / 10)}
+                />
               )}
             </>
           )}
@@ -215,7 +222,7 @@ export function ClickableDonut({
           <span className="text-muted-foreground text-xs">{centerLabel}</span>
         </div>
       </div>
-      <ul className="grid w-full min-w-0 flex-1 gap-1 sm:grid-cols-2">
+      <ul className="grid w-full min-w-0 flex-1 gap-1">
         {visible.map((d) => {
           const pct = Math.round(((d.value ?? 0) / total) * 1000) / 10
           return (
