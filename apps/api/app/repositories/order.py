@@ -14,6 +14,10 @@ from app.models.enums import FulfillmentStatus, OrderStatus, ShipmentStatus
 from app.models.order import Order, OrderEvent, OrderItem
 from app.models.shipment import Shipment
 from app.repositories.base import AppendOnlyRepository, BaseRepository
+from app.repositories.shipment_effective import (
+    effective_courier_name,
+    effective_delivery_date,
+)
 from app.schemas.common import PageParams
 from app.services.live_orders import apply_live_update, is_live_transient, load_order
 from app.services.shipment_status import (
@@ -652,7 +656,7 @@ class OrderRepository(BaseRepository[Order]):
         sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
-    ) -> list[tuple[uuid.UUID | None, str, str, int]]:
+    ) -> list[tuple[uuid.UUID | None, str | None, str, str, int]]:
         """Like `unified_status_counts`, but broken out by `(courier_id,
         payment_type, unified_status)` instead of collapsed to a single
         total -- OMS SOW Module 4's per-partner allocation/comparison
@@ -682,6 +686,7 @@ class OrderRepository(BaseRepository[Order]):
             base_stmt.order_by(None)
             .with_only_columns(
                 active_shipment.courier_id.label("courier_id"),
+                effective_courier_name(active_shipment).label("courier_name"),
                 Order.payment_type.label("payment_type"),
                 bucket.label("unified_status"),
             )
@@ -689,14 +694,20 @@ class OrderRepository(BaseRepository[Order]):
         )
         stmt = select(
             classified.c.courier_id,
+            classified.c.courier_name,
             classified.c.payment_type,
             classified.c.unified_status,
             func.count(),
-        ).group_by(classified.c.courier_id, classified.c.payment_type, classified.c.unified_status)
+        ).group_by(
+            classified.c.courier_id,
+            classified.c.courier_name,
+            classified.c.payment_type,
+            classified.c.unified_status,
+        )
         rows = (await self.session.execute(stmt)).all()
         return [
-            (courier_id, payment_type.value, status, count)
-            for courier_id, payment_type, status, count in rows
+            (courier_id, courier_name, payment_type.value, status, count)
+            for courier_id, courier_name, payment_type, status, count in rows
         ]
 
     async def fulfilment_to_delivery_rows(
@@ -707,7 +718,7 @@ class OrderRepository(BaseRepository[Order]):
         sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
-    ) -> list[tuple[uuid.UUID | None, str, str, datetime, datetime | None]]:
+    ) -> list[tuple[uuid.UUID | None, str | None, str, str, datetime, datetime | None]]:
         """`(courier_id, payment_type, unified_status, fulfilment_start,
         actual_delivery_date)` per order -- OMS SOW Module 4 item B.7
         ("average fulfilment-to-delivery time"), the full order-creation/
@@ -732,15 +743,16 @@ class OrderRepository(BaseRepository[Order]):
         )
         stmt = base_stmt.with_only_columns(
             active_shipment.courier_id,
+            effective_courier_name(active_shipment).label("courier_name"),
             Order.payment_type,
             bucket.label("unified_status"),
             func.coalesce(Order.confirmed_at, Order.order_datetime).label("fulfilment_start"),
-            active_shipment.actual_delivery_date,
+            effective_delivery_date(active_shipment).label("actual_delivery_date"),
         )
         rows = (await self.session.execute(stmt)).all()
         return [
-            (courier_id, payment_type.value, status, fulfilment_start, actual_delivery_date)
-            for courier_id, payment_type, status, fulfilment_start, actual_delivery_date in rows
+            (courier_id, courier_name, payment_type.value, status, fulfilment_start, actual_delivery_date)
+            for courier_id, courier_name, payment_type, status, fulfilment_start, actual_delivery_date in rows
         ]
 
     async def unified_status_daily_counts(

@@ -424,7 +424,7 @@ function FulfillmentDashboardContent({
                       </p>
                       {deliveryQuery.data.by_courier.map((row) => (
                         <div
-                          key={row.courier_id ?? "unassigned"}
+                          key={row.courier_key ?? row.courier_id ?? "unassigned"}
                           className="flex items-center justify-between"
                         >
                           <span className="text-muted-foreground">

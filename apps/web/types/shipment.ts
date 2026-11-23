@@ -315,6 +315,8 @@ export interface FulfilmentTrend {
 }
 
 export interface DeliveryPerformanceByCourier {
+  /** Name-based partner identity; `courier_id` is null for partners known only from tracking events. */
+  courier_key?: string | null
   courier_id: string | null
   courier_name: string
   avg_delivery_days: number | null
@@ -427,7 +429,8 @@ export interface PartnerFilters {
 }
 
 export interface PartnerAllocationRow {
-  courier_id: string
+  courier_key: string
+  courier_id: string | null
   courier_name: string
   orders_allocated: number
   allocation_percent: number
@@ -445,7 +448,8 @@ export interface PartnerAllocation {
  * `null` -- see `PartnerPerformance.shipping_cost_unavailable_reason`.
  */
 export interface PartnerPerformanceRow {
-  courier_id: string
+  courier_key: string
+  courier_id: string | null
   courier_name: string
   total_allocated: number
   total_picked_up: number

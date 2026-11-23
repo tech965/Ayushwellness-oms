@@ -102,6 +102,12 @@ from app.models.courier import Courier
 from app.models.enums import ShipmentStatus
 from app.models.order import Order
 from app.repositories.order import OrderRepository
+from app.repositories.shipment_effective import (
+    effective_courier_name,
+    effective_delivery_date,
+    effective_pickup_date,
+    partner_identity,
+)
 from app.services.shipment_status import classify_unified_status
 from app.services.supply_intelligence_service import normalize_state
 
@@ -131,6 +137,7 @@ class _FulfilmentRow:
 @dataclass
 class _DeliveryRow:
     courier_id: uuid.UUID | None
+    courier_name: str | None
     delivered: bool
     pickup_date: datetime | None
     actual_delivery_date: datetime | None
@@ -164,7 +171,7 @@ class FulfilmentPerformanceService:
             Order.confirmed_at,
             Order.status,
             Order.fulfillment_status,
-            active_shipment.pickup_date,
+            effective_pickup_date(active_shipment).label("pickup_date"),
             active_shipment.current_status,
             active_shipment.rto_status,
         )
@@ -292,18 +299,20 @@ class FulfilmentPerformanceService:
         )
         stmt = base_stmt.with_only_columns(
             active_shipment.courier_id,
+            effective_courier_name(active_shipment).label("courier_name"),
             active_shipment.current_status,
-            active_shipment.pickup_date,
-            active_shipment.actual_delivery_date,
+            effective_pickup_date(active_shipment).label("pickup_date"),
+            effective_delivery_date(active_shipment).label("actual_delivery_date"),
             Order.payment_type,
             Order.shipping_address,
         )
         rows = (await self.session.execute(stmt)).all()
         out = []
-        for c_id, status, pickup_date, delivery_date, pay_type, shipping_address in rows:
+        for c_id, c_name, status, pickup_date, delivery_date, pay_type, shipping_address in rows:
             out.append(
                 _DeliveryRow(
                     courier_id=c_id,
+                    courier_name=c_name,
                     delivered=status is not None and status.value == ShipmentStatus.DELIVERED.value,
                     pickup_date=pickup_date,
                     actual_delivery_date=delivery_date,
@@ -334,7 +343,9 @@ class FulfilmentPerformanceService:
 
         overall_days: list[float] = []
         missing_timestamp_count = 0
-        by_courier: dict[uuid.UUID | None, list[float]] = {}
+        by_courier: dict[str | None, list[float]] = {}
+        partner_ids: dict[str | None, uuid.UUID | None] = {}
+        partner_names: dict[str | None, str] = {}
         by_zone: dict[str, list[float]] = {}
         unmapped_zone_count = 0
         cod_days: list[float] = []
@@ -347,13 +358,24 @@ class FulfilmentPerformanceService:
                 missing_timestamp_count += 1
                 continue
             days = (row.actual_delivery_date - row.pickup_date).total_seconds() / 86400
+            if days < 0:
+                # Delivery stamped before pickup is corrupt data, not a
+                # (negative) delivery time -- excluded and counted, never
+                # averaged in.
+                missing_timestamp_count += 1
+                continue
 
             zone_name = normalize_state(row.state_raw)
             if zone_filter is not None and zone_name != zone_filter:
                 continue
 
             overall_days.append(days)
-            by_courier.setdefault(row.courier_id, []).append(days)
+            key = partner_identity(row.courier_name, row.courier_id)
+            by_courier.setdefault(key, []).append(days)
+            if key is not None:
+                partner_names.setdefault(key, (row.courier_name or "").strip() or "Unknown")
+                if row.courier_id is not None:
+                    partner_ids.setdefault(key, row.courier_id)
             if zone_name is not None:
                 by_zone.setdefault(zone_name, []).append(days)
             else:
@@ -363,13 +385,13 @@ class FulfilmentPerformanceService:
             elif row.payment_type == "prepaid":
                 prepaid_days.append(days)
 
-        courier_ids = [c for c in by_courier if c is not None]
-        courier_names: dict[uuid.UUID, str] = {}
-        if courier_ids:
+        linked_ids = [c for c in partner_ids.values() if c is not None]
+        linked_names: dict[uuid.UUID, str] = {}
+        if linked_ids:
             name_rows = (
-                await self.session.execute(select(Courier.id, Courier.name).where(Courier.id.in_(courier_ids)))
+                await self.session.execute(select(Courier.id, Courier.name).where(Courier.id.in_(linked_ids)))
             ).all()
-            courier_names = dict(name_rows)
+            linked_names = dict(name_rows)
 
         return {
             "overall_avg_delivery_days": _avg(overall_days),
@@ -377,12 +399,19 @@ class FulfilmentPerformanceService:
             "missing_timestamp_count": missing_timestamp_count,
             "by_courier": [
                 {
-                    "courier_id": c_id,
-                    "courier_name": courier_names.get(c_id, "Unknown") if c_id else "Unassigned",
+                    "courier_key": key,
+                    "courier_id": partner_ids.get(key),
+                    "courier_name": (
+                        linked_names.get(partner_ids[key])
+                        if partner_ids.get(key) in linked_names
+                        else partner_names.get(key, "Unknown")
+                    )
+                    if key
+                    else "Unassigned",
                     "avg_delivery_days": _avg(values),
                     "delivered_order_count": len(values),
                 }
-                for c_id, values in sorted(by_courier.items(), key=lambda kv: -len(kv[1]))
+                for key, values in sorted(by_courier.items(), key=lambda kv: -len(kv[1]))
             ],
             "by_zone": [
                 {"zone": zone_name, "avg_delivery_days": _avg(values), "delivered_order_count": len(values)}
@@ -416,8 +445,10 @@ class FulfilmentPerformanceService:
         for row in rows:
             if not row.delivered or row.pickup_date is None or row.actual_delivery_date is None:
                 continue
-            day = to_ist(row.actual_delivery_date).date().isoformat()
             days = (row.actual_delivery_date - row.pickup_date).total_seconds() / 86400
+            if days < 0:
+                continue
+            day = to_ist(row.actual_delivery_date).date().isoformat()
             buckets.setdefault(day, []).append(days)
         daily = [
             {"date": day, "avg_delivery_days": _avg(values), "delivered_order_count": len(values)}

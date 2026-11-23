@@ -77,6 +77,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.courier import Courier
 from app.repositories.order import OrderRepository
+from app.repositories.shipment_effective import partner_identity
 from app.services.fulfilment_performance_service import FulfilmentPerformanceService
 from app.services.shipment_status_analytics_service import RTO_STATUSES, SHIPPED_OR_LATER_STATUSES
 
@@ -103,6 +104,8 @@ def _pct(numerator: int, denominator: int) -> float | None:
 
 @dataclass
 class _PartnerCounts:
+    courier_id: uuid.UUID | None = None
+    name: str = "Unknown"
     allocated: int = 0
     shipped: int = 0
     delivered: int = 0
@@ -135,7 +138,7 @@ class ShippingPartnerPerformanceService:
         sku: str | None,
         date_from: datetime | None,
         date_to: datetime | None,
-    ) -> dict[uuid.UUID | None, _PartnerCounts]:
+    ) -> dict[str, _PartnerCounts]:
         rows = await self.orders.unified_status_counts_by_courier(
             courier_id=courier_id,
             payment_type=payment_type,
@@ -143,13 +146,19 @@ class ShippingPartnerPerformanceService:
             date_from=date_from,
             date_to=date_to,
         )
-        by_courier: dict[uuid.UUID | None, _PartnerCounts] = {}
-        for c_id, pay_type, status, count in rows:
-            if c_id is None:
-                # No shipment / no courier assigned yet -- not "allocated"
-                # to any partner, so excluded from every partner's totals.
+        by_courier: dict[str, _PartnerCounts] = {}
+        for c_id, c_name, pay_type, status, count in rows:
+            key = partner_identity(c_name, c_id)
+            if key is None:
+                # No shipment / no courier (neither a linked Courier nor
+                # any courier name on its tracking events) -- not
+                # "allocated" to any partner, so excluded from totals.
                 continue
-            agg = by_courier.setdefault(c_id, _PartnerCounts())
+            agg = by_courier.setdefault(key, _PartnerCounts())
+            if agg.courier_id is None and c_id is not None:
+                agg.courier_id = c_id
+            if agg.name == "Unknown" and c_name and c_name.strip():
+                agg.name = c_name.strip()
             agg.allocated += count
             is_shipped = status in SHIPPED_OR_LATER_STATUSES
             is_delivered = status == "delivered"
@@ -182,7 +191,7 @@ class ShippingPartnerPerformanceService:
         sku: str | None,
         date_from: datetime | None,
         date_to: datetime | None,
-    ) -> dict[uuid.UUID | None, _FulfilmentToDeliveryAgg]:
+    ) -> dict[str, _FulfilmentToDeliveryAgg]:
         rows = await self.orders.fulfilment_to_delivery_rows(
             courier_id=courier_id,
             payment_type=payment_type,
@@ -190,15 +199,19 @@ class ShippingPartnerPerformanceService:
             date_from=date_from,
             date_to=date_to,
         )
-        out: dict[uuid.UUID | None, _FulfilmentToDeliveryAgg] = {}
-        for c_id, _pay_type, status, fulfilment_start, actual_delivery_date in rows:
-            if c_id is None or status != "delivered":
+        out: dict[str, _FulfilmentToDeliveryAgg] = {}
+        for c_id, c_name, _pay_type, status, fulfilment_start, actual_delivery_date in rows:
+            key = partner_identity(c_name, c_id)
+            if key is None or status != "delivered":
                 continue
-            agg = out.setdefault(c_id, _FulfilmentToDeliveryAgg())
+            agg = out.setdefault(key, _FulfilmentToDeliveryAgg())
             if actual_delivery_date is None:
                 agg.missing_delivery_timestamp_count += 1
                 continue
             days = (actual_delivery_date - fulfilment_start).total_seconds() / 86400
+            if days < 0:
+                agg.missing_delivery_timestamp_count += 1
+                continue
             agg.days.append(days)
         return out
 
@@ -213,7 +226,7 @@ class ShippingPartnerPerformanceService:
         return dict(rows)
 
     @staticmethod
-    def _allocation_percentages(allocations: dict[uuid.UUID, int]) -> dict[uuid.UUID, float]:
+    def _allocation_percentages(allocations: dict[str, int]) -> dict[str, float]:
         """Rounds each partner's share to 2dp such that the rounded
         values sum to EXACTLY 100.00 (the SOW's own example table shows
         a `Total` row of `100%`) -- largest-remainder method: round every
@@ -256,23 +269,24 @@ class ShippingPartnerPerformanceService:
             payment_type=payment_type, sku=sku, date_from=date_from, date_to=date_to
         )
         avg_delivery_by_courier = {
-            row["courier_id"]: row["avg_delivery_days"] for row in delivery_perf["by_courier"]
+            row["courier_key"]: row["avg_delivery_days"] for row in delivery_perf["by_courier"]
         }
 
-        allocations = {c_id: agg.allocated for c_id, agg in counts.items()}
+        allocations = {key: agg.allocated for key, agg in counts.items()}
         total_allocated = sum(allocations.values())
         pcts = self._allocation_percentages(allocations) if total_allocated else {}
-        names = await self._courier_names(list(counts.keys()))
+        names = await self._courier_names([a.courier_id for a in counts.values() if a.courier_id])
 
         rows = [
             {
-                "courier_id": c_id,
-                "courier_name": names.get(c_id, "Unknown"),
+                "courier_key": key,
+                "courier_id": agg.courier_id,
+                "courier_name": names.get(agg.courier_id, agg.name) if agg.courier_id else agg.name,
                 "orders_allocated": agg.allocated,
-                "allocation_percent": pcts.get(c_id, 0.0),
-                "avg_delivery_days": avg_delivery_by_courier.get(c_id),
+                "allocation_percent": pcts.get(key, 0.0),
+                "avg_delivery_days": avg_delivery_by_courier.get(key),
             }
-            for c_id, agg in sorted(counts.items(), key=lambda kv: -kv[1].allocated)
+            for key, agg in sorted(counts.items(), key=lambda kv: -kv[1].allocated)
         ]
         return {
             "partners": rows,
@@ -301,7 +315,7 @@ class ShippingPartnerPerformanceService:
             payment_type=payment_type, sku=sku, date_from=date_from, date_to=date_to
         )
         avg_delivery_by_courier = {
-            row["courier_id"]: row["avg_delivery_days"] for row in delivery_perf["by_courier"]
+            row["courier_key"]: row["avg_delivery_days"] for row in delivery_perf["by_courier"]
         }
         fulfilment_to_delivery = await self._fulfilment_to_delivery_by_courier(
             courier_id=None,
@@ -310,21 +324,24 @@ class ShippingPartnerPerformanceService:
             date_from=date_from,
             date_to=date_to,
         )
-        names = await self._courier_names(list(counts.keys()))
+        names = await self._courier_names([a.courier_id for a in counts.values() if a.courier_id])
 
         partners = []
-        for c_id, agg in sorted(counts.items(), key=lambda kv: -kv[1].allocated):
-            ftd = fulfilment_to_delivery.get(c_id)
+        for key, agg in sorted(counts.items(), key=lambda kv: -kv[1].allocated):
+            ftd = fulfilment_to_delivery.get(key)
             partners.append(
                 {
-                    "courier_id": c_id,
-                    "courier_name": names.get(c_id, "Unknown"),
+                    "courier_key": key,
+                    "courier_id": agg.courier_id,
+                    "courier_name": names.get(agg.courier_id, agg.name)
+                    if agg.courier_id
+                    else agg.name,
                     "total_allocated": agg.allocated,
                     "total_picked_up": agg.shipped,
                     "total_delivered": agg.delivered,
                     "delivery_success_rate": _pct(agg.delivered, agg.shipped),
                     "rto_percentage": _pct(agg.rto, agg.shipped),
-                    "avg_delivery_days": avg_delivery_by_courier.get(c_id),
+                    "avg_delivery_days": avg_delivery_by_courier.get(key),
                     "avg_fulfilment_to_delivery_days": _avg(ftd.days) if ftd else None,
                     "missing_delivery_timestamp_count": ftd.missing_delivery_timestamp_count
                     if ftd

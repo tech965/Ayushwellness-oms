@@ -130,7 +130,7 @@ function ShippingPartnersPageContent() {
                   </TableHeader>
                   <TableBody>
                     {data.partners.map((row) => (
-                      <TableRow key={row.courier_id}>
+                      <TableRow key={row.courier_key}>
                         <TableCell className="font-medium">{row.courier_name}</TableCell>
                         <TableCell className="text-right tabular-nums">
                           {row.orders_allocated}
@@ -207,7 +207,7 @@ function ShippingPartnersPageContent() {
                   </TableHeader>
                   <TableBody>
                     {data.partners.map((row) => (
-                      <TableRow key={row.courier_id}>
+                      <TableRow key={row.courier_key}>
                         <TableCell className="font-medium">{row.courier_name}</TableCell>
                         <TableCell className="text-right tabular-nums">
                           {row.total_allocated}

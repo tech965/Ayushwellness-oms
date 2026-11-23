@@ -267,7 +267,7 @@ function FulfilmentPerformancePageContent() {
                         </TableRow>
                       ) : (
                         data.by_courier.map((row) => (
-                          <TableRow key={row.courier_id ?? "unassigned"}>
+                          <TableRow key={row.courier_key ?? row.courier_id ?? "unassigned"}>
                             <TableCell className="font-medium">
                               {row.courier_name}
                             </TableCell>

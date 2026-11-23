@@ -363,6 +363,7 @@ async def test_delivery_performance_by_courier(db_session: AsyncSession) -> None
     assert data["delivered_order_count"] == 1
     assert data["by_courier"] == [
         {
+            "courier_key": "shiprocket",
             "courier_id": str(courier_a.id),
             "courier_name": "Shiprocket",
             "avg_delivery_days": pytest.approx(2.0, abs=0.02),
