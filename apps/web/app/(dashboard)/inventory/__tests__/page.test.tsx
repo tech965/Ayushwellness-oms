@@ -333,12 +333,10 @@ describe("InventoryPage — movement history", () => {
     setMovements([])
     renderWithProviders(<InventoryPage />)
 
-    const searchInputs = screen.getAllByPlaceholderText(/search/i)
-    const skuSearch = searchInputs.find((el) =>
-      el.getAttribute("placeholder")?.toLowerCase().includes("sku")
-    )
-    expect(skuSearch).toBeTruthy()
-    await userEvent.type(skuSearch as HTMLElement, "VJR")
+    // The products table above also has a box mentioning SKU ("Search by product
+    // name or SKU..."); the movement history's own box is the one that says only SKU.
+    const skuSearch = screen.getByPlaceholderText("Search by SKU...")
+    await userEvent.type(skuSearch, "VJR")
 
     const lastCall = mockedUseInventoryMovements.mock.calls.at(-1)?.[0]
     expect(lastCall?.sku).toBe("VJR")
