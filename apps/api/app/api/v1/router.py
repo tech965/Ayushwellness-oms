@@ -42,6 +42,7 @@ from app.api.v1.endpoints import (
     reconciliation,
     remittance_reconciliation,
     revenue_reconciliation,
+    shiprocket_finance,
     shiprocket_wallet,
     refunds,
     retention,
@@ -190,6 +191,9 @@ api_router.include_router(
 )
 api_router.include_router(
     shiprocket_wallet.router, prefix="/shiprocket-wallet", tags=["shiprocket-wallet"]
+)
+api_router.include_router(
+    shiprocket_finance.router, prefix="/shiprocket-finance", tags=["shiprocket-finance"]
 )
 api_router.include_router(retention.router, prefix="/admin/retention", tags=["admin:retention"])
 api_router.include_router(webhook_events.router, prefix="/webhook-events", tags=["webhook-events"])

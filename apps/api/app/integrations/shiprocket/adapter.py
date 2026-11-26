@@ -69,6 +69,7 @@ def _is_non_increasing(values: list[datetime]) -> bool:
     """
     return all(earlier >= later for earlier, later in zip(values, values[1:], strict=False))
 
+
 # Round 10 diagnostic (temporary, until a real /shipments payload has
 # been confirmed and this logging is no longer needed): 150/150 real
 # shipments failed with "channel_order_id=None" — `ShiprocketShipment
@@ -383,7 +384,12 @@ class ShiprocketAdapter(IntegrationAdapter):
             raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
 
     async def fetch_wallet_statement(
-        self, *, page: int = 1, per_page: int = 100
+        self,
+        *,
+        page: int = 1,
+        per_page: int = 100,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """One page of wallet transactions from `SHIPROCKET_WALLET_STATEMENT_PATH`.
         Disabled (raises) until that path is set from a verified source."""
@@ -400,7 +406,13 @@ class ShiprocketAdapter(IntegrationAdapter):
             data = await client.request(
                 "GET",
                 settings.SHIPROCKET_WALLET_STATEMENT_PATH,
-                params={"page": page, "per_page": per_page},
+                params={
+                    "page": page,
+                    "per_page": per_page,
+                    # documented optional window, YYYY-MM-DD
+                    **({"from": date_from} if date_from else {}),
+                    **({"to": date_to} if date_to else {}),
+                },
             )
         except ShiprocketApiError as exc:
             raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc

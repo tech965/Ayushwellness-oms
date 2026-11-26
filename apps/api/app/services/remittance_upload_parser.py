@@ -114,12 +114,51 @@ _BANK = {
     "narration": ("Narration", "Narration", []),
 }
 
-SPECS = {"cod": _COD, "prepaid": _PREPAID, "bank": _BANK}
+# Shiprocket COD payout (CRF cycle) report. Shiprocket publishes no column
+# list for its dashboard export, so only OMS template headers and keys already
+# used by this repository map automatically; anything else is mapped by hand.
+_SR_PAYOUT = {
+    "crf_id": ("CRF / payout ID", "CRF ID", ["crf_id", "remittance_id"]),
+    "utr": ("UTR", "UTR", ["utr_no", "remittance_utr"]),
+    "payout_date": ("Payout date", "Payout Date", ["remittance_date"]),
+    "status": ("Status", "Status", ["remittance_status"]),
+    "cod_amount": ("COD amount (optional)", "COD Amount", ["cod_amount"]),
+    "freight_deduction": ("Freight deducted (optional)", "Freight Deduction", []),
+    "other_deductions": ("Other deductions (optional)", "Other Deductions", []),
+    "net_amount": (
+        "Remittance amount",
+        "Remittance Amount",
+        ["remittance_amount", "remitted_amount"],
+    ),
+}
+# Wallet passbook export. The extra keys are the field names of Shiprocket's
+# documented statement API.
+_SR_WALLET = {
+    "transaction_id": ("Transaction ID", "Transaction ID", ["transaction_id"]),
+    "created_at": ("Date", "Date", ["created_at"]),
+    "action": ("Type / action", "Action", ["action"]),
+    "debit_amount": ("Debit amount", "Debit Amount", ["debit_amount"]),
+    "credit_amount": ("Credit amount", "Credit Amount", ["credit_amount"]),
+    "balance_amount": ("Balance", "Balance Amount", ["balance_amount"]),
+    "awb_code": ("AWB", "AWB", ["awb_code"]),
+    "channel_order_id": ("Order number", "Order Number", ["channel_order_id"]),
+    "description": ("Description", "Description", ["description"]),
+}
+
+SPECS = {
+    "cod": _COD,
+    "prepaid": _PREPAID,
+    "bank": _BANK,
+    "sr_payout": _SR_PAYOUT,
+    "sr_wallet": _SR_WALLET,
+}
 # Each inner list: at least one of those fields must be mapped.
 REQUIRED_GROUPS = {
     "cod": [["remittance_amount"], ["awb", "order_ref"]],
     "prepaid": [["net_amount"], ["gateway_transaction_id", "order_ref"]],
     "bank": [["amount"]],
+    "sr_payout": [["net_amount"], ["crf_id", "utr"]],
+    "sr_wallet": [["created_at"], ["debit_amount", "credit_amount"]],
 }
 
 
@@ -506,6 +545,87 @@ def parse_gateway_settlements(
                 "raw_row": {str(i): _jsonable(c) for i, c in enumerate(row)},
             }
         )
+    return out
+
+
+def parse_shiprocket_payouts(
+    filename: str, data: bytes, column_map: dict[str, str] | None = None
+) -> ParsedFile:
+    analysis, body, out = _prepare("sr_payout", filename, data, column_map)
+    idx = analysis.mapping
+    seen: set[str] = set()
+    for offset, row in enumerate(body):
+        line_no = analysis.header_row + offset + 2
+        if not any(str(c or "").strip() for c in row):
+            continue
+        out.total_rows += 1
+        try:
+            money = {
+                name: parse_money(_get(row, idx, name))
+                for name in ("cod_amount", "freight_deduction", "other_deductions", "net_amount")
+            }
+            paid_on = parse_date(_get(row, idx, "payout_date"))
+        except ValueError as exc:
+            out.errors.append({"row": line_no, "error": str(exc)})
+            continue
+        crf = _clean(_get(row, idx, "crf_id"), 64)
+        utr = _clean(_get(row, idx, "utr"), 128)
+        if money["net_amount"] is None:
+            out.errors.append({"row": line_no, "error": "Remittance amount is missing."})
+            continue
+        if not crf and not utr:
+            out.errors.append({"row": line_no, "error": "Neither a CRF / payout ID nor a UTR."})
+            continue
+        # One payout per CRF id; without one, per UTR.
+        key = dedupe_key("sr_payout", "crf" if crf else "utr", crf or utr)
+        if key in seen:
+            out.errors.append({"row": line_no, "error": "This payout appears twice in the file."})
+            continue
+        seen.add(key)
+        out.rows.append(
+            {
+                "dedupe_key": key,
+                "crf_id": crf,
+                "utr": utr,
+                "payout_date": paid_on,
+                "status": _clean(_get(row, idx, "status"), 64),
+                **money,
+                "raw_row": {str(i): _jsonable(c) for i, c in enumerate(row)},
+            }
+        )
+    return out
+
+
+def parse_shiprocket_wallet(
+    filename: str, data: bytes, column_map: dict[str, str] | None = None
+) -> ParsedFile:
+    """Rows keyed by the documented statement-API field names, so the same
+    normaliser (and duplicate keys) serve both the API and the report."""
+    analysis, body, out = _prepare("sr_wallet", filename, data, column_map)
+    idx = analysis.mapping
+    for offset, row in enumerate(body):
+        line_no = analysis.header_row + offset + 2
+        if not any(str(c or "").strip() for c in row):
+            continue
+        out.total_rows += 1
+        try:
+            when = parse_date(_get(row, idx, "created_at"))
+            amounts = {
+                name: parse_money(_get(row, idx, name))
+                for name in ("debit_amount", "credit_amount", "balance_amount")
+            }
+        except ValueError as exc:
+            out.errors.append({"row": line_no, "error": str(exc)})
+            continue
+        if when is None:
+            out.errors.append({"row": line_no, "error": "Date is missing."})
+            continue
+        record: dict = {"created_at": when.isoformat(), "_row": line_no}
+        for name, value in amounts.items():
+            record[name] = None if value is None else str(value)
+        for name in ("transaction_id", "action", "awb_code", "channel_order_id", "description"):
+            record[name] = _clean(_get(row, idx, name), 500)
+        out.rows.append(record)
     return out
 
 

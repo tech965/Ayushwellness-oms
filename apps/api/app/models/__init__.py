@@ -13,6 +13,7 @@ from app.models.audit_log import AuditLog
 from app.models.auth import RefreshToken, User
 from app.models.cashfree_settlement import CashfreeSettlement
 from app.models.cod_remittance import CodRemittance
+from app.models.shiprocket_finance import ShiprocketPayout, ShiprocketShipmentCharge
 from app.models.shiprocket_wallet import (
     ShiprocketWalletCheck,
     ShiprocketWalletSnapshot,
@@ -149,6 +150,8 @@ __all__ = [
     "GatewaySyncState",
     "ReconciliationAdjustment",
     "SettlementFile",
+    "ShiprocketPayout",
+    "ShiprocketShipmentCharge",
     "ShiprocketWalletCheck",
     "ShiprocketWalletSnapshot",
     "ShiprocketWalletTransaction",

@@ -60,7 +60,8 @@ def _sqlite_friendly(module):
 
 def test_single_alembic_head_and_revision_chain():
     script = ScriptDirectory.from_config(Config(str(API_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["e7a1c3b5d9f4"]
+    assert script.get_heads() == ["f2b8d4a6c0e1"]
+    assert script.get_revision("f2b8d4a6c0e1").down_revision == "e7a1c3b5d9f4"
     assert script.get_revision("e7a1c3b5d9f4").down_revision == "d3b5f7a9c1e2"
     assert script.get_revision("c9e1a5d3f7b2").down_revision == "b4d8e2a6c1f7"
     assert script.get_revision("d3b5f7a9c1e2").down_revision == "c9e1a5d3f7b2"
@@ -70,7 +71,8 @@ def test_migration_matches_models_and_is_reversible():
     module = _load()
     _sqlite_friendly(module)
     engine = sa.create_engine("sqlite://")
-    existing = [t for t in Base.metadata.sorted_tables if t.name not in NEW_TABLES]
+    later = {"shiprocket_payouts"}  # needs settlement_files, from this migration
+    existing = [t for t in Base.metadata.sorted_tables if t.name not in NEW_TABLES | later]
     Base.metadata.create_all(engine, tables=existing)
     before = set(sa.inspect(engine).get_table_names())
 
@@ -146,7 +148,7 @@ def test_gateway_sync_migration_matches_models_and_is_reversible():
     _sqlite_friendly(base_module)
 
     engine = sa.create_engine("sqlite://")
-    skip = NEW_TABLES | {"gateway_sync_states"}
+    skip = NEW_TABLES | {"gateway_sync_states", "shiprocket_payouts"}
     Base.metadata.create_all(
         engine, tables=[t for t in Base.metadata.sorted_tables if t.name not in skip]
     )
@@ -219,7 +221,10 @@ def test_all_three_migrations_upgrade_downgrade_and_upgrade_again_in_order():
     third = load("e7a1c3b5d9f4_manual_bank_verification.py")
     ours = NEW_TABLES | {"gateway_sync_states"}
     # cod_remittances predates these migrations: create it without the new column.
-    existing = [t for t in Base.metadata.sorted_tables if t.name not in ours | {"cod_remittances"}]
+    later = {"shiprocket_shipment_charges", "shiprocket_payouts"}  # f2b8d4a6c0e1
+    existing = [
+        t for t in Base.metadata.sorted_tables if t.name not in ours | later | {"cod_remittances"}
+    ]
     engine = sa.create_engine("sqlite://")
     Base.metadata.create_all(engine, tables=existing)
     with engine.begin() as conn:
@@ -244,3 +249,41 @@ def test_all_three_migrations_upgrade_downgrade_and_upgrade_again_in_order():
                 for step in (third, second, first):
                     step.downgrade()
                 assert set(sa.inspect(conn).get_table_names()) == before
+
+
+def test_shiprocket_finance_migration_matches_models_and_is_reversible():
+    spec = importlib.util.spec_from_file_location(
+        "sr_finance", API_ROOT / "alembic" / "versions" / "f2b8d4a6c0e1_shiprocket_finance.py"
+    )
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    new = {"shiprocket_shipment_charges", "shiprocket_payouts"}
+    # SQLite has no now() server default.
+    migration._base = lambda: [
+        sa.Column("id", migration.GUID, nullable=False),
+        sa.Column("created_at", migration.DT, nullable=False),
+        sa.Column("updated_at", migration.DT, nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+    ]
+    engine = sa.create_engine("sqlite://")
+    Base.metadata.create_all(
+        engine, tables=[t for t in Base.metadata.sorted_tables if t.name not in new]
+    )
+    with engine.begin() as conn:
+        before = set(sa.inspect(conn).get_table_names())
+        ctx = MigrationContext.configure(conn, opts={"compare_type": False})
+        with Operations.context(ctx):
+            migration.upgrade()
+        assert set(sa.inspect(conn).get_table_names()) == before | new
+        diffs = []
+        for diff in compare_metadata(ctx, Base.metadata):
+            for op in diff if isinstance(diff, list) else [diff]:
+                name = getattr(op[1], "name", None) or getattr(
+                    getattr(op[1], "table", None), "name", None
+                )
+                if name in new:
+                    diffs.append(op)
+        assert diffs == [], diffs
+        with Operations.context(ctx):
+            migration.downgrade()
+        assert set(sa.inspect(conn).get_table_names()) == before

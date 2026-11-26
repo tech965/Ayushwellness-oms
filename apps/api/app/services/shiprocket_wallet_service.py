@@ -55,10 +55,74 @@ ALL_TYPES = ("recharge", *EXPENSE_TYPES, *CREDIT_BACK_TYPES)
 
 # Rows that count toward totals: posted by Shiprocket, or a manual claim
 # that was confirmed by balance evidence. Unverified claims never count.
+# A row from an imported passbook report is Shiprocket's own statement too.
+REPORT_SOURCE = "report_import"
+COUNTED_SOURCES = ("shiprocket_api", "balance_confirmed", REPORT_SOURCE)
 _COUNTED = (
     ShiprocketWalletTransaction.status == "confirmed",
-    ShiprocketWalletTransaction.source.in_(("shiprocket_api", "balance_confirmed")),
+    ShiprocketWalletTransaction.source.in_(COUNTED_SOURCES),
 )
+
+
+def money_equal(stored: Decimal, wanted: Decimal) -> bool:
+    return Decimal(str(stored)).quantize(Decimal("0.01")) == Decimal(str(wanted)).quantize(
+        Decimal("0.01")
+    )
+
+
+async def find_same_movement(
+    session: AsyncSession,
+    values: dict[str, Any],
+    *,
+    consumed: set[uuid.UUID],
+    sources: tuple[str, ...] = ("shiprocket_api", REPORT_SOURCE),
+) -> ShiprocketWalletTransaction | None:
+    """The same wallet movement stored from the other source (API vs report),
+    when their duplicate keys differ: same direction, amount, AWB, order and
+    day, and no two different transaction ids. Each stored row is matched once,
+    so two equal movements stay two.
+    """
+    T = ShiprocketWalletTransaction
+    day = values["txn_date"].astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    candidates = (
+        (
+            await session.execute(
+                select(T)
+                .where(
+                    T.source.in_(sources),
+                    T.direction == values["direction"],
+                    T.txn_date >= day - timedelta(days=1),
+                    T.txn_date < day + timedelta(days=2),
+                )
+                .order_by(T.txn_date, T.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    ist = timedelta(hours=5, minutes=30)
+    wanted_day = (values["txn_date"].astimezone(UTC) + ist).date()
+    for row in candidates:
+        if money_equal(row.amount, values["amount"]) is False:
+            continue
+        stored = row.txn_date if row.txn_date.tzinfo else row.txn_date.replace(tzinfo=UTC)
+        if row.id in consumed or (stored.astimezone(UTC) + ist).date() != wanted_day:
+            continue
+        if (row.awb or None) != (values["awb"] or None):
+            continue
+        # The API names the order by Shiprocket's numeric id, a report by the shop's
+        # order number, so they can only be compared when there is no AWB.
+        if not values["awb"] and (row.order_number or "").lstrip("#") != (
+            values["order_number"] or ""
+        ).lstrip("#"):
+            continue
+        if row.transaction_ref and values["transaction_ref"]:
+            if row.transaction_ref != values["transaction_ref"]:
+                continue
+        elif not values["awb"] and (row.description or "") != (values["description"] or ""):
+            continue  # nothing else identifies it: the description must agree
+        return row
+    return None
 
 
 def _money(v: float | Decimal) -> Decimal:
@@ -302,6 +366,7 @@ class WalletService:
     async def sync_transactions(self, adapter: ShiprocketAdapter) -> dict[str, int]:
         now = datetime.now(UTC)
         created = updated = skipped = unparsed = seen = 0
+        adopted: set[uuid.UUID] = set()
         page = 1
         while page <= SYNC_MAX_PAGES:
             records, has_more = await adapter.fetch_wallet_statement(page=page)
@@ -318,6 +383,14 @@ class WalletService:
                         )
                     )
                 ).scalar_one_or_none()
+                if existing is None:
+                    # Already imported from a report: the API row takes it over.
+                    existing = await find_same_movement(
+                        self.session, values, consumed=adopted, sources=(REPORT_SOURCE,)
+                    )
+                    if existing is not None:
+                        adopted.add(existing.id)
+                        existing.source = "shiprocket_api"
                 if existing is None:
                     self.session.add(
                         ShiprocketWalletTransaction(
@@ -493,7 +566,8 @@ class WalletService:
                 await self.session.execute(
                     self._range(
                         select(func.count(T.id), func.coalesce(func.sum(T.amount), 0)).where(
-                            T.status == status, T.source == "shiprocket_api"
+                            T.status == status,
+                            T.source.in_(("shiprocket_api", REPORT_SOURCE)),
                         ),
                         date_from,
                         date_to,
@@ -667,7 +741,7 @@ class WalletService:
             .scalars()
             .all()
         )
-        counted = [t for t in txns if t.status == "confirmed" and t.source != "manual_claim"]
+        counted = [t for t in txns if t.status == "confirmed" and t.source in COUNTED_SOURCES]
         actual_debits = sum((t.amount for t in counted if t.direction == "debit"), ZERO)
         actual_credits = sum((t.amount for t in counted if t.direction == "credit"), ZERO)
         checks = []
