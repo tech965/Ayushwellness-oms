@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
@@ -129,6 +129,15 @@ def _template(kind: str, name: str) -> Response:
     )
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    """A date with no timezone (`2026-10-28`, `2026-10-28T00:00:00`) parses as a
+    naive datetime; the services compare it in Python with timezone-aware stored
+    timestamps, which raises TypeError (HTTP 500). Treat naive input as UTC."""
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
 def _cod_filters(
     date_from: datetime | None = Query(default=None),
     date_to: datetime | None = Query(default=None),
@@ -136,7 +145,7 @@ def _cod_filters(
     status: str | None = Query(default=None, pattern=f"^({COD_STATUS})$"),
     q: str | None = Query(default=None, max_length=100),
 ) -> cod_mod.Filters:
-    return cod_mod.Filters(date_from, date_to, partner, status, q)
+    return cod_mod.Filters(_as_utc(date_from), _as_utc(date_to), partner, status, q)
 
 
 def _prepaid_filters(
@@ -146,7 +155,7 @@ def _prepaid_filters(
     status: str | None = Query(default=None, pattern=f"^({PREPAID_STATUS})$"),
     q: str | None = Query(default=None, max_length=100),
 ) -> prepaid_mod.Filters:
-    return prepaid_mod.Filters(date_from, date_to, gateway, status, q)
+    return prepaid_mod.Filters(_as_utc(date_from), _as_utc(date_to), gateway, status, q)
 
 
 def _drill_page(rows: list, total: int, totals: dict, page_params: PageParams, model):  # noqa: ANN001, ANN202
