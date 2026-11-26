@@ -30,6 +30,31 @@ them; see
 **No live direct-courier (Blue Dart/Delhivery/Ecom Express outside
 Shiprocket) API call happens anywhere yet — that's a later phase.**
 
+## Payment reconciliation (Modules 6 and 7)
+
+Two dashboards compare what is owed, what a courier or payment gateway
+**reports** as settled, and what the **bank** confirms. Reported and
+bank-confirmed amounts are always shown separately. Every KPI card opens the
+records behind it, with Excel export.
+
+- **COD Remittance Reconciliation** (`/reconciliation/cod`): delivered COD
+  orders against courier remittances and bank credits, showing pending, short,
+  excess, unmatched and reconciled amounts.
+- **Prepaid Remittance Reconciliation** (`/reconciliation/prepaid`): captured
+  prepaid payments against settlements from Cashfree and from other gateways'
+  uploaded reports, including charges, GST and refunds. Only recognised success
+  statuses count as settled.
+
+Partial bank credits count the amount actually credited, and a credit is never
+allocated beyond its value. Viewing needs `reconciliation.read`, uploading
+needs `reconciliation.upload`, and manual matching, bank verification and
+adjustments need `reconciliation.adjust` (see
+[permissions](docs/security/reconciliation-permissions.md)).
+
+These modules need their database migrations applied before the code that uses
+them is deployed. The Cashfree API sync has not yet been validated against a
+Cashfree sandbox; see [`docs/integrations/cashfree.md`](docs/integrations/cashfree.md).
+
 ## Stack
 
 - **Frontend**: Next.js 16 (App Router), TypeScript, Tailwind CSS v4,
