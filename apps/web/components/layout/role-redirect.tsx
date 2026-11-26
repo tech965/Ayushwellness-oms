@@ -48,7 +48,15 @@ export function RoleRedirect() {
     if (hasRole("FULFILLMENT"))
       return {
         home: "/fulfillment/dashboard",
-        allowed: ["/fulfillment", "/orders", "/shipments", "/ndr", "/rto"],
+        allowed: [
+          "/fulfillment",
+          "/orders",
+          "/shipments",
+          "/shipment-tracking",
+          "/fulfilment-performance",
+          "/ndr",
+          "/rto",
+        ],
       }
     // Unlike FULFILLMENT, every Shipment Staff page (including shipment
     // processing/tracking) lives entirely under its own `/shipment-staff`

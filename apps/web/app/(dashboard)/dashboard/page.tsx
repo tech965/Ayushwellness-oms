@@ -100,7 +100,13 @@ function StoredDataDashboardPage() {
 }
 
 function DashboardContent() {
-  const { hasRole } = useAuth()
+  const { hasRole, hasPermission } = useAuth()
+  // Every KPI/chart below reads `/analytics/*`, which needs `analytics.read`.
+  // Roles without it (Telecaller, Team Leader, Fulfillment, Shipment Staff...)
+  // are redirected to their own home -- but not before this page's first
+  // render, which used to fire all of these requests and collect 403s. Gate
+  // them so a restricted role never sends an unauthorized request.
+  const canViewAnalytics = hasPermission("analytics.read")
   const settings = useAppSettings()
   const { filters, setFilters } = useUrlFilters(FILTER_DEFAULTS)
   const [intervalOverride, setIntervalOverride] = React.useState<TimeseriesInterval>()
@@ -141,7 +147,8 @@ function DashboardContent() {
   // 0 (the default) means "no auto-refresh," matching the setting's own
   // description (Administration -> Settings -> Dashboard).
   const refreshSeconds = settings?.dashboard.refresh_interval_seconds ?? 0
-  const refetchInterval: number | false = refreshSeconds > 0 ? refreshSeconds * 1000 : false
+  const refetchInterval: number | false =
+    refreshSeconds > 0 ? refreshSeconds * 1000 : false
 
   // "Today" and "Yesterday" each get a dedicated hourly comparison view
   // (spec: the selected day's data prominent, the previous calendar day
@@ -153,15 +160,21 @@ function DashboardContent() {
   const isTodayRange = isSameIstDay(resolvedFrom, now) && isSameIstDay(resolvedTo, now)
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
   const isYesterdayRange =
-    !isTodayRange && isSameIstDay(resolvedFrom, yesterday) && isSameIstDay(resolvedTo, yesterday)
+    !isTodayRange &&
+    isSameIstDay(resolvedFrom, yesterday) &&
+    isSameIstDay(resolvedTo, yesterday)
   const isSingleDayComparisonRange = isTodayRange || isYesterdayRange
-  const effectiveInterval: TimeseriesInterval = isSingleDayComparisonRange ? "hour" : interval
+  const effectiveInterval: TimeseriesInterval = isSingleDayComparisonRange
+    ? "hour"
+    : interval
 
   // The day being compared against is always the calendar day immediately
   // before whichever single day is selected -- `now - 1` when Today is
   // selected, `now - 2` when Yesterday is selected.
   const comparisonPrimaryDay = isYesterdayRange ? yesterday : now
-  const comparisonPreviousDay = new Date(comparisonPrimaryDay.getTime() - 24 * 60 * 60 * 1000)
+  const comparisonPreviousDay = new Date(
+    comparisonPrimaryDay.getTime() - 24 * 60 * 60 * 1000
+  )
   const comparisonPreviousParams = {
     date_from: istStartOfDay(comparisonPreviousDay).toISOString(),
     date_to: istEndOfDay(comparisonPreviousDay).toISOString(),
@@ -175,22 +188,40 @@ function DashboardContent() {
     ? "Yesterday"
     : format(istCalendarDateAsLocalMidnight(comparisonPreviousDay), "d MMM")
 
-  const summaryQuery = useAnalyticsSummary(dateParams, { refetchInterval })
+  const summaryQuery = useAnalyticsSummary(dateParams, {
+    refetchInterval,
+    enabled: canViewAnalytics,
+  })
   const timeseriesQuery = useOrdersTimeseries(
     { ...dateParams, interval: effectiveInterval },
-    { refetchInterval }
+    { refetchInterval, enabled: canViewAnalytics }
   )
   const comparisonPreviousTimeseriesQuery = useOrdersTimeseries(
     { ...comparisonPreviousParams, interval: "hour" },
     // Only needed for the Today/Yesterday comparison chart -- skip the
     // request entirely for every other date range.
-    { enabled: isSingleDayComparisonRange, refetchInterval }
+    { enabled: canViewAnalytics && isSingleDayComparisonRange, refetchInterval }
   )
-  const breakdownsQuery = useBreakdowns(dateParams, { refetchInterval })
-  const topProductsQuery = useTopProducts({ ...dateParams, limit: 10 }, { refetchInterval })
-  const courierQuery = useCourierPerformance(dateParams, { refetchInterval })
-  const returnsRefundsQuery = useReturnsRefundsSummary(dateParams, { refetchInterval })
-  const recentActivityQuery = useRecentActivity({ refetchInterval })
+  const breakdownsQuery = useBreakdowns(dateParams, {
+    refetchInterval,
+    enabled: canViewAnalytics,
+  })
+  const topProductsQuery = useTopProducts(
+    { ...dateParams, limit: 10 },
+    { refetchInterval, enabled: canViewAnalytics }
+  )
+  const courierQuery = useCourierPerformance(dateParams, {
+    refetchInterval,
+    enabled: canViewAnalytics,
+  })
+  const returnsRefundsQuery = useReturnsRefundsSummary(dateParams, {
+    refetchInterval,
+    enabled: canViewAnalytics,
+  })
+  const recentActivityQuery = useRecentActivity({
+    refetchInterval,
+    enabled: canViewAnalytics,
+  })
 
   const orderQueryString = new URLSearchParams(dateParams).toString()
 
@@ -326,7 +357,9 @@ function DashboardContent() {
             format={count}
             href="/customers?view=repeat"
             accent="violet"
-            subtitle={summary ? `${repeatCustomerPct.toFixed(1)}% of customers` : undefined}
+            subtitle={
+              summary ? `${repeatCustomerPct.toFixed(1)}% of customers` : undefined
+            }
           />
           <KpiCard
             label="Total Products"

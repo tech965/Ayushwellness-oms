@@ -70,8 +70,11 @@ describe("AmazonSalesView", () => {
 })
 
 describe("navigation", () => {
-  it("has Marketplaces > Amazon Sales Analytics", () => {
-    const g = navGroups.find((x) => x.label === "Marketplaces")
-    expect(g?.items[0].href).toBe("/marketplaces/amazon/sales-analytics")
+  it("keeps Amazon Sales Analytics in the sidebar (now under Intelligence)", () => {
+    const item = navGroups
+      .flatMap((g) => g.items)
+      .find((i) => i.href === "/marketplaces/amazon/sales-analytics")
+    expect(item?.label).toBe("Amazon · Sales Analytics")
+    expect(item?.permission).toBe("analytics.read")
   })
 })

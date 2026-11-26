@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -20,12 +21,22 @@ from app.repositories.order import OrderRepository
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.response import ApiResponse, PaginatedResponse
 from app.schemas.shipment import (
+    DeliveryPerformanceResponse,
+    DeliveryTrendResponse,
+    FulfilmentSummaryResponse,
+    FulfilmentTrendResponse,
+    PartnerAllocationResponse,
+    PartnerPerformanceResponse,
+    PerformanceOrderRowResponse,
     ShipmentAnalyticsResponse,
     ShipmentCreateRequest,
     ShipmentEventResponse,
     ShipmentListResponse,
     ShipmentQueueRowResponse,
     ShipmentResponse,
+    ShipmentStatusAnalyticsResponse,
+    ShipmentStatusDrilldownRowResponse,
+    ShipmentStatusHistoryResponse,
     ShipmentSummaryResponse,
     ShipmentUpdateRequest,
 )
@@ -34,7 +45,20 @@ from app.schemas.shiprocket import (
     LocateShiprocketOrderResult,
     ShiprocketAssignAwbRequest,
 )
+from app.services.fulfilment_performance_service import FulfilmentPerformanceService
+from app.services.performance_orders_service import (
+    FULFILMENT_SCOPES,
+    PARTNER_METRICS,
+    PerformanceOrdersService,
+)
 from app.services.shipment_service import ShipmentService
+from app.services.shipment_status import UNIFIED_STATUSES
+from app.services.shipment_status_analytics_service import (
+    KPI_KEYS,
+    STATUS_GROUP_KEYS,
+    ShipmentStatusAnalyticsService,
+)
+from app.services.shipping_partner_performance_service import ShippingPartnerPerformanceService
 from app.services.shiprocket_service import (
     ShiprocketOperationsService,
     locate_shiprocket_orders,
@@ -143,6 +167,329 @@ async def get_shipment_analytics(
 ) -> ApiResponse[ShipmentAnalyticsResponse]:
     analytics = await ShipmentService(session).get_analytics(date_from=date_from, date_to=date_to)
     return ApiResponse(data=ShipmentAnalyticsResponse(**analytics))
+
+
+def _status_analytics_filters(
+    courier_id: uuid.UUID | None = Query(default=None),
+    payment_type: str | None = Query(default=None),
+    sku: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+) -> dict:
+    return {
+        "courier_id": courier_id,
+        "payment_type": payment_type,
+        "sku": sku,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+
+
+@router.get(
+    "/status-analytics",
+    response_model=ApiResponse[ShipmentStatusAnalyticsResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_shipment_status_analytics(
+    filters: dict = Depends(_status_analytics_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[ShipmentStatusAnalyticsResponse]:
+    """OMS SOW Module 2 — unified 12-status funnel breakdown plus the 5
+    KPI percentages (Pickup/In-Transit/OFD/Delivery/RTO %), filterable
+    by date range, shipping partner, COD/Prepaid and SKU. Registered
+    before `GET /{shipment_id}` so "status-analytics" is never parsed as
+    a shipment id, same as `/queue` above.
+    """
+    data = await ShipmentStatusAnalyticsService(session).get_status_analytics(**filters)
+    return ApiResponse(data=ShipmentStatusAnalyticsResponse(**data))
+
+
+@router.get(
+    "/status-analytics/history",
+    response_model=ApiResponse[ShipmentStatusHistoryResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_shipment_status_history(
+    filters: dict = Depends(_status_analytics_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[ShipmentStatusHistoryResponse]:
+    """Date-wise (IST) unified-status distribution — the SOW's
+    "date-wise shipment status tracking" / "historical shipment status
+    reports". Defaults to the last 30 days, same window as `GET
+    /shipments/analytics`, when no range is given.
+    """
+    resolved_to = filters["date_to"] or datetime.now(UTC)
+    resolved_from = filters["date_from"] or (resolved_to - timedelta(days=30))
+    data = await ShipmentStatusAnalyticsService(session).get_status_history(
+        date_from=resolved_from,
+        date_to=resolved_to,
+        courier_id=filters["courier_id"],
+        payment_type=filters["payment_type"],
+        sku=filters["sku"],
+    )
+    return ApiResponse(data=ShipmentStatusHistoryResponse(**data))
+
+
+@router.get(
+    "/status-analytics/history/export",
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def export_shipment_status_history(
+    filters: dict = Depends(_status_analytics_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> StreamingResponse:
+    resolved_to = filters["date_to"] or datetime.now(UTC)
+    resolved_from = filters["date_from"] or (resolved_to - timedelta(days=30))
+    workbook = await ShipmentStatusAnalyticsService(session).export_status_history_xlsx(
+        date_from=resolved_from,
+        date_to=resolved_to,
+        courier_id=filters["courier_id"],
+        payment_type=filters["payment_type"],
+        sku=filters["sku"],
+    )
+    return StreamingResponse(
+        iter([workbook]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=shipment-status-history.xlsx"},
+    )
+
+
+@router.get(
+    "/status-analytics/orders",
+    response_model=PaginatedResponse[ShipmentStatusDrilldownRowResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_shipment_status_drilldown(
+    unified_status: str | None = Query(default=None, pattern=f"^({'|'.join(UNIFIED_STATUSES)})$"),
+    group: str | None = Query(default=None, pattern=f"^({'|'.join(STATUS_GROUP_KEYS)})$"),
+    kpi: str | None = Query(default=None, pattern=f"^({'|'.join(KPI_KEYS)})$"),
+    q: str | None = Query(default=None, max_length=100),
+    filters: dict = Depends(_status_analytics_filters),
+    page_params: PageParams = Depends(pagination_params),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> PaginatedResponse[ShipmentStatusDrilldownRowResponse]:
+    """Individual orders behind a headline KPI (`kpi`), a management
+    category (`group`) or one exact unified status (`unified_status`) --
+    exactly one of the three. Same filters as the counts, so totals match.
+    """
+    if sum(v is not None for v in (unified_status, group, kpi)) != 1:
+        raise HTTPException(
+            status_code=422, detail="Provide exactly one of unified_status, group or kpi."
+        )
+    rows, total = await ShipmentStatusAnalyticsService(session).get_status_drilldown(
+        unified_status=unified_status,
+        group=group,
+        kpi=kpi,
+        q=q,
+        page_params=page_params,
+        **filters,
+    )
+    return PaginatedResponse(
+        data=[ShipmentStatusDrilldownRowResponse(**row) for row in rows],
+        meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
+
+
+@router.get(
+    "/fulfilment-performance/orders",
+    response_model=PaginatedResponse[PerformanceOrderRowResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_fulfilment_performance_orders(
+    scope: str = Query(..., pattern=f"^({'|'.join(FULFILMENT_SCOPES)})$"),
+    day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    q: str | None = Query(default=None, max_length=100),
+    filters: dict = Depends(_status_analytics_filters),
+    page_params: PageParams = Depends(pagination_params),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> PaginatedResponse[PerformanceOrderRowResponse]:
+    """Orders behind a Module 3 KPI card, pending card or daily-chart bar,
+    under the same filters as the aggregates (see
+    `PerformanceOrdersService`'s docstring for the matching rules).
+    """
+    rows, total = await PerformanceOrdersService(session).fulfilment_orders(
+        scope=scope, day=day, q=q, page_params=page_params, **filters
+    )
+    return PaginatedResponse(
+        data=[PerformanceOrderRowResponse(**row) for row in rows],
+        meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
+
+
+@router.get(
+    "/fulfilment-performance",
+    response_model=ApiResponse[FulfilmentSummaryResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_fulfilment_performance(
+    filters: dict = Depends(_status_analytics_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[FulfilmentSummaryResponse]:
+    """OMS SOW Module 3, Section A -- average fulfilment time, pending
+    fulfilment counts (>24h/>48h), and the by-team/warehouse breakdown
+    (always empty -- see `FulfilmentPerformanceService`'s module
+    docstring for why that attribution genuinely doesn't exist in this
+    data model). Reuses Module 2's filter set; `unified_status` isn't
+    accepted here, this endpoint has its own status grouping.
+    """
+    data = await FulfilmentPerformanceService(session).get_fulfilment_summary(**filters)
+    return ApiResponse(data=FulfilmentSummaryResponse(**data))
+
+
+@router.get(
+    "/fulfilment-performance/history",
+    response_model=ApiResponse[FulfilmentTrendResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_fulfilment_performance_history(
+    filters: dict = Depends(_status_analytics_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[FulfilmentTrendResponse]:
+    """Date-wise (IST, bucketed by pickup day) average fulfilment time."""
+    data = await FulfilmentPerformanceService(session).get_fulfilment_trend(**filters)
+    return ApiResponse(data=FulfilmentTrendResponse(**data))
+
+
+def _delivery_performance_filters(
+    courier_id: uuid.UUID | None = Query(default=None),
+    payment_type: str | None = Query(default=None),
+    sku: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+    zone: str | None = Query(default=None, description="Indian state name (normalized server-side)."),
+) -> dict:
+    return {
+        "courier_id": courier_id,
+        "payment_type": payment_type,
+        "sku": sku,
+        "date_from": date_from,
+        "date_to": date_to,
+        "zone": zone,
+    }
+
+
+@router.get(
+    "/delivery-performance",
+    response_model=ApiResponse[DeliveryPerformanceResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_delivery_performance(
+    filters: dict = Depends(_delivery_performance_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[DeliveryPerformanceResponse]:
+    """OMS SOW Module 3, Section B -- average delivery days (pickup ->
+    delivery, successfully-delivered shipments only -- see the service
+    module's docstring for why RTO/cancelled shipments can't pollute
+    this), overall and split by courier, zone (state-based -- see
+    `zone_is_state_based`), and COD/Prepaid.
+    """
+    data = await FulfilmentPerformanceService(session).get_delivery_performance(**filters)
+    return ApiResponse(data=DeliveryPerformanceResponse(**data))
+
+
+@router.get(
+    "/delivery-performance/history",
+    response_model=ApiResponse[DeliveryTrendResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_delivery_performance_history(
+    filters: dict = Depends(_status_analytics_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[DeliveryTrendResponse]:
+    """Date-wise (IST, bucketed by delivery day) average delivery days --
+    the SOW's "delivery performance trends".
+    """
+    data = await FulfilmentPerformanceService(session).get_delivery_trend(**filters)
+    return ApiResponse(data=DeliveryTrendResponse(**data))
+
+
+def _partner_filters(
+    payment_type: str | None = Query(default=None),
+    sku: str | None = Query(default=None),
+    date_from: datetime | None = Query(default=None),
+    date_to: datetime | None = Query(default=None),
+) -> dict:
+    return {"payment_type": payment_type, "sku": sku, "date_from": date_from, "date_to": date_to}
+
+
+@router.get(
+    "/partner-allocation",
+    response_model=ApiResponse[PartnerAllocationResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_partner_allocation(
+    filters: dict = Depends(_partner_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[PartnerAllocationResponse]:
+    """OMS SOW Module 4, Section A -- orders allocated and allocation %
+    per registered shipping partner (percentages sum to exactly 100%),
+    plus avg delivery days reused directly from Module 3. Only couriers
+    with at least one allocated order appear; unintegrated partners
+    (NimbusPost/Blue Dart/D2DC -- see Module 5) have no `Courier` row and
+    so simply don't appear, rather than being shown with fabricated
+    figures.
+    """
+    data = await ShippingPartnerPerformanceService(session).get_partner_allocation(**filters)
+    return ApiResponse(data=PartnerAllocationResponse(**data))
+
+
+@router.get(
+    "/partner-performance",
+    response_model=ApiResponse[PartnerPerformanceResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_partner_performance(
+    filters: dict = Depends(_partner_filters),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> ApiResponse[PartnerPerformanceResponse]:
+    """OMS SOW Module 4, Sections B & C -- full per-partner comparison
+    (allocation, pickup, delivery, delivery success rate, RTO %, avg
+    delivery days, avg fulfilment-to-delivery days, COD/Prepaid success
+    rates). Shipping cost per delivered/RTO order (B.10/B.11) is always
+    `None` -- see `shipping_cost_unavailable_reason`. The frontend's
+    Decision-Making Dashboard (Section C) renders this same response as
+    a sortable comparison table rather than a separate call.
+    """
+    data = await ShippingPartnerPerformanceService(session).get_partner_performance(**filters)
+    return ApiResponse(data=PartnerPerformanceResponse(**data))
+
+
+@router.get(
+    "/partner-orders",
+    response_model=PaginatedResponse[PerformanceOrderRowResponse],
+    dependencies=[Depends(unavailable_in_live_mode_for(_TOTALS_UNAVAILABLE))],
+)
+async def get_partner_orders(
+    metric: str = Query(default="allocated", pattern=f"^({'|'.join(PARTNER_METRICS)})$"),
+    partner: str | None = Query(default=None, max_length=200),
+    q: str | None = Query(default=None, max_length=100),
+    filters: dict = Depends(_partner_filters),
+    page_params: PageParams = Depends(pagination_params),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("shipments.read")),
+) -> PaginatedResponse[PerformanceOrderRowResponse]:
+    """Orders behind a Module 4 partner row, metric cell or chart bar.
+    `partner` is a row's `courier_key` (omit for all partners); `metric`
+    follows the comparison table's columns.
+    """
+    rows, total = await PerformanceOrdersService(session).partner_orders(
+        metric=metric, partner=partner, q=q, page_params=page_params, **filters
+    )
+    return PaginatedResponse(
+        data=[PerformanceOrderRowResponse(**row) for row in rows],
+        meta=build_pagination_meta(total_items=total, page_params=page_params),
+    )
 
 
 def _to_shipment_list_response(shipment: Shipment) -> ShipmentListResponse:

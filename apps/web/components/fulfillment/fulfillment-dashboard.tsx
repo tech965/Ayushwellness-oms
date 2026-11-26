@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import {
   AlertCircle,
@@ -31,6 +32,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { getApiErrorMessage } from "@/lib/api-client"
+import { useDeliveryPerformance, useFulfilmentPerformance } from "@/services/shipments"
 import { useShipmentAnalytics, useShipmentSummary } from "@/services/shipment-queue"
 import { useShipmentStaffPerformance } from "@/services/shipment-staff"
 import type { ShipmentAnalytics, ShipmentSummary } from "@/types/shipment"
@@ -66,6 +68,14 @@ interface FulfillmentDashboardProps {
    * people's performance, not their own scope).
    */
   showShipmentStaffPerformance?: boolean
+  /** OMS SOW Module 3 (Fulfilment & Delivery Performance) -- org-wide
+   * aggregates, same as `/shipments/status-analytics`. Off on the scoped
+   * Shipment Staff dashboard (`/shipment-staff/dashboard`), same reason
+   * `showShipmentStaffPerformance` is: this isn't scoped to the caller's
+   * own assigned Telecallers, so it would show company-wide figures on
+   * what's meant to be a personal-scope view.
+   */
+  showFulfilmentPerformance?: boolean
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -101,6 +111,7 @@ function FulfillmentDashboardContent({
   queueHref = "/fulfillment/orders",
   telecallerRowsClickable = true,
   showShipmentStaffPerformance = true,
+  showFulfilmentPerformance = true,
 }: FulfillmentDashboardProps) {
   const router = useRouter()
   const summaryQuery = useSummary()
@@ -108,6 +119,8 @@ function FulfillmentDashboardContent({
   const summary = summaryQuery.data
   const analytics = analyticsQuery.data
   const staffPerformanceQuery = useShipmentStaffPerformance(showShipmentStaffPerformance)
+  const fulfilmentQuery = useFulfilmentPerformance({}, showFulfilmentPerformance)
+  const deliveryQuery = useDeliveryPerformance({}, showFulfilmentPerformance)
 
   // A failed request must never read as "zero shipments" -- the stat
   // tiles/cards below already fall back to "--"/empty copy when data is
@@ -166,7 +179,12 @@ function FulfillmentDashboardContent({
           icon={CheckCircle2}
           accent="emerald"
         />
-        <StatTile label="NDR" value={summary?.ndr ?? "—"} icon={AlertTriangle} accent="orange" />
+        <StatTile
+          label="NDR"
+          value={summary?.ndr ?? "—"}
+          icon={AlertTriangle}
+          accent="orange"
+        />
         <StatTile label="RTO" value={summary?.rto ?? "—"} icon={Undo2} accent="orange" />
         <StatTile
           label="Total Shipments"
@@ -201,7 +219,10 @@ function FulfillmentDashboardContent({
       </div>
 
       <div className="mb-6 grid gap-4 lg:grid-cols-2">
-        <ShipmentDailyTrendChart data={analytics?.daily_trend} isLoading={analyticsQuery.isLoading} />
+        <ShipmentDailyTrendChart
+          data={analytics?.daily_trend}
+          isLoading={analyticsQuery.isLoading}
+        />
 
         <Card>
           <CardHeader>
@@ -217,7 +238,10 @@ function FulfillmentDashboardContent({
             ) : (
               <div className="flex flex-col gap-2">
                 {analytics.status_breakdown.map((row) => (
-                  <div key={row.status} className="flex items-center justify-between text-sm">
+                  <div
+                    key={row.status}
+                    className="flex items-center justify-between text-sm"
+                  >
                     <span className="text-muted-foreground">
                       {STATUS_LABELS[row.status] ?? row.status}
                     </span>
@@ -265,7 +289,9 @@ function FulfillmentDashboardContent({
                     <TableRow
                       key={row.telecaller_id}
                       className={
-                        telecallerRowsClickable ? "hover:bg-accent/60 cursor-pointer" : undefined
+                        telecallerRowsClickable
+                          ? "hover:bg-accent/60 cursor-pointer"
+                          : undefined
                       }
                       onClick={
                         telecallerRowsClickable
@@ -274,9 +300,15 @@ function FulfillmentDashboardContent({
                       }
                     >
                       <TableCell className="font-medium">{row.telecaller_name}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.confirmed}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.shipped}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.delivered}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {row.confirmed}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {row.shipped}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {row.delivered}
+                      </TableCell>
                       <TableCell className="text-right tabular-nums">{row.ndr}</TableCell>
                       <TableCell className="text-right tabular-nums">{row.rto}</TableCell>
                     </TableRow>
@@ -287,6 +319,137 @@ function FulfillmentDashboardContent({
           )}
         </CardContent>
       </Card>
+
+      {showFulfilmentPerformance && (
+        <div className="mt-6 flex justify-end">
+          <Link
+            href="/fulfilment-performance"
+            className="text-primary text-sm font-medium hover:underline"
+          >
+            Open Fulfilment &amp; Delivery Performance (date range, trends, partner
+            comparison) →
+          </Link>
+        </div>
+      )}
+      {showFulfilmentPerformance && (
+        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Internal Order Fulfilment</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {fulfilmentQuery.isLoading ? (
+                <div className="bg-muted h-32 w-full animate-pulse rounded-md" />
+              ) : (
+                <div className="flex flex-col gap-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Avg. Fulfilment Time</span>
+                    <span className="font-medium tabular-nums">
+                      {fulfilmentQuery.data?.avg_fulfilment_days != null
+                        ? `${fulfilmentQuery.data.avg_fulfilment_days.toFixed(2)} days`
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Pending Fulfilment</span>
+                    <span className="font-medium tabular-nums">
+                      {fulfilmentQuery.data?.pending_fulfilment_count ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Pending &gt; 24h</span>
+                    <span className="font-medium tabular-nums">
+                      {fulfilmentQuery.data?.pending_over_24h_count ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Pending &gt; 48h</span>
+                    <span className="font-medium tabular-nums">
+                      {fulfilmentQuery.data?.pending_over_48h_count ?? "—"}
+                    </span>
+                  </div>
+                  {fulfilmentQuery.data?.team_warehouse_attribution_available ===
+                    false && (
+                    <p className="text-muted-foreground mt-2 border-t pt-2 text-xs">
+                      By team/warehouse: not available —{" "}
+                      {fulfilmentQuery.data.team_warehouse_attribution_note}
+                    </p>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Courier Delivery Performance</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {deliveryQuery.isLoading ? (
+                <div className="bg-muted h-32 w-full animate-pulse rounded-md" />
+              ) : (
+                <div className="flex flex-col gap-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">
+                      Avg. Delivery Days (Overall)
+                    </span>
+                    <span className="font-medium tabular-nums">
+                      {deliveryQuery.data?.overall_avg_delivery_days != null
+                        ? `${deliveryQuery.data.overall_avg_delivery_days.toFixed(2)} days`
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">COD Avg. Delivery Days</span>
+                    <span className="font-medium tabular-nums">
+                      {deliveryQuery.data?.cod_avg_delivery_days != null
+                        ? `${deliveryQuery.data.cod_avg_delivery_days.toFixed(2)} days`
+                        : "—"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">
+                      Prepaid Avg. Delivery Days
+                    </span>
+                    <span className="font-medium tabular-nums">
+                      {deliveryQuery.data?.prepaid_avg_delivery_days != null
+                        ? `${deliveryQuery.data.prepaid_avg_delivery_days.toFixed(2)} days`
+                        : "—"}
+                    </span>
+                  </div>
+                  {deliveryQuery.data && deliveryQuery.data.by_courier.length > 0 && (
+                    <div className="mt-2 border-t pt-2">
+                      <p className="text-muted-foreground mb-1 text-xs font-medium">
+                        By Shipping Partner
+                      </p>
+                      {deliveryQuery.data.by_courier.map((row) => (
+                        <div
+                          key={row.courier_key ?? row.courier_id ?? "unassigned"}
+                          className="flex items-center justify-between"
+                        >
+                          <span className="text-muted-foreground">
+                            {row.courier_name}
+                          </span>
+                          <span className="tabular-nums">
+                            {row.avg_delivery_days != null
+                              ? `${row.avg_delivery_days.toFixed(2)} days`
+                              : "—"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {deliveryQuery.data?.zone_is_state_based && (
+                    <p className="text-muted-foreground mt-2 border-t pt-2 text-xs">
+                      Zone grouping is state-based (not courier billing zones).
+                    </p>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {showShipmentStaffPerformance && (
         <Card className="mt-6">
@@ -317,15 +480,27 @@ function FulfillmentDashboardContent({
                   <TableBody>
                     {staffPerformanceQuery.data.map((row) => (
                       <TableRow key={row.shipment_staff_id}>
-                        <TableCell className="font-medium">{row.shipment_staff_name}</TableCell>
+                        <TableCell className="font-medium">
+                          {row.shipment_staff_name}
+                        </TableCell>
                         <TableCell className="text-right tabular-nums">
                           {row.telecaller_count}
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">{row.confirmed}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.shipped}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.delivered}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.ndr}</TableCell>
-                        <TableCell className="text-right tabular-nums">{row.rto}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.confirmed}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.shipped}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.delivered}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.ndr}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {row.rto}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

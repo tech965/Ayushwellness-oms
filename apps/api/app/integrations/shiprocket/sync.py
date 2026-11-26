@@ -14,6 +14,7 @@ which side owns the record list.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +24,7 @@ from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.normalizer import TRACKING_NORMALIZER, extract_tracking_events
 from app.models.enums import RTOStatus, ShipmentStatus
 from app.models.shipment import Shipment
+from app.repositories.courier import CourierRepository
 from app.services.inventory_service import InventoryService
 from app.services.rto_service import RTOService
 from app.services.shipment_service import ShipmentService
@@ -158,6 +160,24 @@ async def apply_tracking_event(
         await shipment_service.update_shipment(
             shipment.id, actor=None, current_status=mapped_status, **milestone_updates
         )
+
+    # Copy the real event times onto the denormalised columns analytics
+    # reads. Only ever the courier's own event timestamp -- never "now".
+    # Pickup keeps the EARLIEST pickup scan; delivery the first DELIVERED.
+    event_ts = normalized["event_timestamp"]
+    stamps: dict[str, datetime] = {}
+    if mapped_status == ShipmentStatus.PICKED_UP and (
+        shipment.pickup_date is None or event_ts < shipment.pickup_date
+    ):
+        stamps["pickup_date"] = event_ts
+    if mapped_status == ShipmentStatus.DELIVERED and shipment.actual_delivery_date is None:
+        stamps["actual_delivery_date"] = event_ts
+    if shipment.courier_id is None and normalized.get("courier_name"):
+        courier = await CourierRepository(session).get_by_name_ci(normalized["courier_name"])
+        if courier is not None:
+            stamps["courier_id"] = courier.id
+    if stamps:
+        await shipment_service.update_shipment(shipment.id, actor=None, **stamps)
 
     if mapped_status in _DISPATCHED_STATUSES:
         try:

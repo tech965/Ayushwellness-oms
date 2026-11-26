@@ -186,6 +186,250 @@ export interface ShipmentAnalytics {
   telecaller_stats: TelecallerShipmentStats[]
 }
 
+/** OMS SOW Module 2 — the 13-status funnel (12 SOW statuses plus Fulfilled – Tracking Unavailable) derived from `Order`/
+ * `Shipment` state (`app.services.shipment_status.UNIFIED_STATUSES`),
+ * distinct from the 9-value `ShipmentStatus` persisted on a `Shipment`
+ * row above. Never invent a value here -- the backend's
+ * `pattern=` validator on `GET /shipments/status-analytics/orders`
+ * rejects anything outside this list with a 422.
+ */
+export type UnifiedShipmentStatus =
+  | "order_placed"
+  | "ready_to_ship"
+  | "pickup_pending"
+  | "picked_up"
+  | "in_transit"
+  | "out_for_delivery"
+  | "delivered"
+  | "rto_initiated"
+  | "rto_in_transit"
+  | "rto_delivered"
+  | "ndr"
+  | "cancelled"
+  | "fulfilled_tracking_unavailable"
+
+export const UNIFIED_SHIPMENT_STATUS_OPTIONS: {
+  label: string
+  value: UnifiedShipmentStatus
+}[] = [
+  { label: "Order Placed", value: "order_placed" },
+  { label: "Ready to Ship", value: "ready_to_ship" },
+  { label: "Pickup Pending", value: "pickup_pending" },
+  { label: "Picked Up", value: "picked_up" },
+  { label: "In Transit", value: "in_transit" },
+  { label: "Out for Delivery", value: "out_for_delivery" },
+  { label: "Delivered", value: "delivered" },
+  { label: "RTO Initiated", value: "rto_initiated" },
+  { label: "RTO In Transit", value: "rto_in_transit" },
+  { label: "RTO Delivered", value: "rto_delivered" },
+  { label: "NDR", value: "ndr" },
+  { label: "Cancelled", value: "cancelled" },
+  { label: "Fulfilled – Tracking Unavailable", value: "fulfilled_tracking_unavailable" },
+]
+
+export interface UnifiedStatusCount {
+  status: UnifiedShipmentStatus
+  count: number
+  percent_of_total: number
+}
+
+/** A management-friendly category over the technical unified statuses. */
+export interface StatusGroupCount {
+  key: StatusGroupKey
+  label: string
+  statuses: UnifiedShipmentStatus[]
+  count: number
+  percent_of_total: number
+}
+
+export type StatusGroupKey =
+  | "new_orders"
+  | "ready_for_shipping"
+  | "awaiting_pickup"
+  | "picked_up"
+  | "in_transit"
+  | "out_for_delivery"
+  | "delivered"
+  | "return_to_origin"
+  | "delivery_issue"
+  | "cancelled"
+  | "tracking_pending"
+
+export type StatusKpiKey = "total" | "fulfilled" | "delivered" | "rto"
+
+export interface ShipmentStatusAnalytics {
+  total_orders: number
+  total_eligible_orders: number
+  total_shipped_orders: number
+  total_fulfilled?: number
+  total_delivered?: number
+  total_rto?: number
+  status_groups?: StatusGroupCount[]
+  status_breakdown: UnifiedStatusCount[]
+  pickup_rate: number
+  in_transit_rate: number
+  out_for_delivery_rate: number
+  delivery_rate: number
+  rto_rate: number
+}
+
+export interface UnifiedStatusDailyPoint {
+  date: string
+  order_placed: number
+  ready_to_ship: number
+  pickup_pending: number
+  picked_up: number
+  in_transit: number
+  out_for_delivery: number
+  delivered: number
+  rto_initiated: number
+  rto_in_transit: number
+  rto_delivered: number
+  ndr: number
+  cancelled: number
+  fulfilled_tracking_unavailable: number
+}
+
+export interface ShipmentStatusHistory {
+  daily: UnifiedStatusDailyPoint[]
+}
+
+export interface ShipmentStatusDrilldownRow {
+  order_id: string
+  order_number: string
+  order_datetime: string
+  customer_name: string | null
+  payment_type: string
+  sku_summary: string | null
+  total_amount: string
+  unified_status: UnifiedShipmentStatus
+  shipment_id: string | null
+  awb: string | null
+  courier_name: string | null
+  expected_delivery_date: string | null
+  actual_delivery_date: string | null
+  /** Original technical shipment status (e.g. "in_transit"). */
+  shipment_status?: string | null
+  current_location?: string | null
+  last_tracking_update_at?: string | null
+  pickup_date?: string | null
+}
+
+/** One order behind a Module 3 / Module 4 KPI, chart bar or partner row. */
+export interface PerformanceOrderRow {
+  order_id: string
+  order_number: string
+  order_datetime: string
+  payment_type: string
+  sku_summary: string | null
+  unified_status: UnifiedShipmentStatus
+  shipment_status: string | null
+  awb: string | null
+  courier_name: string | null
+  pickup_date: string | null
+  actual_delivery_date: string | null
+  fulfilment_days: number | null
+  delivery_days: number | null
+  pending_hours: number | null
+}
+
+export type FulfilmentScope =
+  | "fulfilled"
+  | "delivered"
+  | "cod_delivered"
+  | "prepaid_delivered"
+  | "pending"
+  | "pending_24h"
+  | "pending_48h"
+
+export type PartnerMetric =
+  "allocated" | "picked_up" | "delivered" | "rto" | "cod_success" | "prepaid_success"
+
+export interface ShipmentStatusAnalyticsFilters {
+  courier_id?: string
+  payment_type?: string
+  sku?: string
+  date_from?: string
+  date_to?: string
+}
+
+// --- OMS SOW Module 3: Fulfilment & Delivery Performance Dashboard --------
+
+export interface FulfilmentSummary {
+  avg_fulfilment_days: number | null
+  fulfilled_order_count: number
+  missing_pickup_timestamp_count: number
+  pending_fulfilment_count: number
+  pending_over_24h_count: number
+  pending_over_48h_count: number
+  team_warehouse_breakdown: Record<string, unknown>[]
+  team_warehouse_attribution_available: boolean
+  team_warehouse_attribution_note: string
+}
+
+export interface FulfilmentDailyPoint {
+  date: string
+  avg_fulfilment_days: number | null
+  fulfilled_order_count: number
+}
+
+export interface FulfilmentTrend {
+  daily: FulfilmentDailyPoint[]
+}
+
+export interface DeliveryPerformanceByCourier {
+  /** Name-based partner identity; `courier_id` is null for partners known only from tracking events. */
+  courier_key?: string | null
+  courier_id: string | null
+  courier_name: string
+  /** Original courier/service names behind this carrier, most used first. */
+  service_names?: string[]
+  avg_delivery_days: number | null
+  delivered_order_count: number
+}
+
+export interface DeliveryPerformanceByZone {
+  zone: string
+  avg_delivery_days: number | null
+  delivered_order_count: number
+}
+
+export interface DeliveryPerformance {
+  overall_avg_delivery_days: number | null
+  delivered_order_count: number
+  missing_timestamp_count: number
+  by_courier: DeliveryPerformanceByCourier[]
+  by_zone: DeliveryPerformanceByZone[]
+  zone_is_state_based: boolean
+  unmapped_zone_order_count: number
+  cod_avg_delivery_days: number | null
+  cod_delivered_order_count: number
+  prepaid_avg_delivery_days: number | null
+  prepaid_delivered_order_count: number
+}
+
+export interface DeliveryTrendDailyPoint {
+  date: string
+  avg_delivery_days: number | null
+  delivered_order_count: number
+}
+
+export interface DeliveryTrend {
+  daily: DeliveryTrendDailyPoint[]
+}
+
+export interface FulfilmentPerformanceFilters {
+  courier_id?: string
+  payment_type?: string
+  sku?: string
+  date_from?: string
+  date_to?: string
+}
+
+export interface DeliveryPerformanceFilters extends FulfilmentPerformanceFilters {
+  zone?: string
+}
+
 export interface BulkShipOrderResult {
   order_id: string
   success: boolean
@@ -238,4 +482,60 @@ export interface ProcessExistingShipmentsResponse {
   skipped_count: number
   failed_count: number
   results: ProcessExistingShipmentResult[]
+}
+
+// --- OMS SOW Module 4: Shipping Partner Allocation & Performance Analysis -
+
+export interface PartnerFilters {
+  payment_type?: string
+  sku?: string
+  date_from?: string
+  date_to?: string
+}
+
+export interface PartnerAllocationRow {
+  courier_key: string
+  courier_id: string | null
+  courier_name: string
+  /** Original courier/service names behind this carrier, most used first. */
+  service_names?: string[]
+  orders_allocated: number
+  allocation_percent: number
+  avg_delivery_days: number | null
+}
+
+export interface PartnerAllocation {
+  partners: PartnerAllocationRow[]
+  total_orders_allocated: number
+  total_allocation_percent: number
+}
+
+/** One partner's full Section B/C comparison row.
+ * `avg_shipping_cost_per_delivered_order` / `_per_rto_order` are always
+ * `null` -- see `PartnerPerformance.shipping_cost_unavailable_reason`.
+ */
+export interface PartnerPerformanceRow {
+  courier_key: string
+  courier_id: string | null
+  courier_name: string
+  /** Original courier/service names behind this carrier, most used first. */
+  service_names?: string[]
+  total_allocated: number
+  total_picked_up: number
+  total_delivered: number
+  delivery_success_rate: number | null
+  rto_percentage: number | null
+  avg_delivery_days: number | null
+  avg_fulfilment_to_delivery_days: number | null
+  missing_delivery_timestamp_count: number
+  cod_delivery_success_rate: number | null
+  prepaid_delivery_success_rate: number | null
+  avg_shipping_cost_per_delivered_order: number | null
+  avg_shipping_cost_per_rto_order: number | null
+}
+
+export interface PartnerPerformance {
+  partners: PartnerPerformanceRow[]
+  shipping_cost_available: boolean
+  shipping_cost_unavailable_reason: string
 }

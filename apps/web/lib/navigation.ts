@@ -20,12 +20,15 @@ import {
   Phone,
   PhoneCall,
   Plug,
+  Radar,
   Repeat,
   RotateCcw,
   Scale,
   Settings,
   ShieldCheck,
   ShoppingCart,
+  Timer,
+  TrendingUp,
   Truck,
   Users,
   Wallet,
@@ -60,8 +63,18 @@ export const navGroups: NavGroup[] = [
       { label: "Payments", href: "/payments", icon: CreditCard },
       { label: "Customers", href: "/customers", icon: Users },
       { label: "Products", href: "/products", icon: Package },
-      { label: "Inventory", href: "/inventory", icon: Warehouse, permission: "inventory.read" },
-      { label: "Inventory Workspace (IMS)", href: "/ims", icon: Boxes, permission: "ims.read" },
+      {
+        label: "Inventory",
+        href: "/inventory",
+        icon: Warehouse,
+        permission: "inventory.read",
+      },
+      {
+        label: "Inventory Workspace (IMS)",
+        href: "/ims",
+        icon: Boxes,
+        permission: "ims.read",
+      },
     ],
   },
   {
@@ -83,6 +96,35 @@ export const navGroups: NavGroup[] = [
     ],
   },
   {
+    // OMS SOW Modules 2-4. One group (names fixed by the SOW) instead of
+    // being scattered through Fulfillment; the routes are unchanged.
+    label: "Shipment Analytics",
+    items: [
+      {
+        label: "Shipment Tracking & Status Analytics",
+        href: "/shipment-tracking",
+        icon: Radar,
+        permission: "shipments.read",
+      },
+      {
+        label: "Fulfilment & Delivery Performance",
+        href: "/fulfilment-performance",
+        icon: Timer,
+        permission: "shipments.read",
+      },
+      {
+        label: "Shipping Partner Performance",
+        href: "/shipping-partners",
+        icon: TrendingUp,
+        permission: "shipments.read",
+      },
+    ],
+  },
+  {
+    // Former "Intelligence" + "Marketplaces" groups merged: the two
+    // marketplace analytics screens are analytics, not another top-level
+    // section (the separate "Marketplace Management" group below is the
+    // order workspace and is left as specified).
     label: "Intelligence",
     items: [
       { label: "Analytics", href: "/analytics", icon: BarChart3 },
@@ -92,11 +134,6 @@ export const navGroups: NavGroup[] = [
         href: "/operations-command-center",
         icon: Activity,
       },
-    ],
-  },
-  {
-    label: "Marketplaces",
-    items: [
       {
         label: "Amazon · Sales Analytics",
         href: "/marketplaces/amazon/sales-analytics",
@@ -195,7 +232,7 @@ export const navGroups: NavGroup[] = [
     // `telecalling.manage`/`calls.manage` permission via the "*" role).
     label: "Telecalling",
     items: [
-      { label: "Dashboard", href: "/team/dashboard", icon: LayoutDashboard },
+      { label: "Telecalling Dashboard", href: "/team/dashboard", icon: LayoutDashboard },
       { label: "Lead Pool", href: "/team/leads", icon: ListChecks },
       { label: "Abandoned Checkouts", href: "/team/checkouts", icon: MousePointerClick },
       { label: "Unfulfilled Orders", href: "/team/orders/unfulfilled", icon: ListChecks },
@@ -253,8 +290,24 @@ export const fulfillmentNavGroups: NavGroup[] = [
       // confirmed, regardless of current status -- deliberately a
       // separate page/query from "Orders Need Shipment" above (see
       // `components/fulfillment/confirmed-by-telecaller.tsx`'s docstring).
-      { label: "Confirmed by Telecaller", href: "/fulfillment/confirmed-orders", icon: PhoneCall },
+      {
+        label: "Confirmed by Telecaller",
+        href: "/fulfillment/confirmed-orders",
+        icon: PhoneCall,
+      },
       { label: "Shipments", href: "/fulfillment/shipments", icon: Truck },
+      {
+        label: "Shipment Tracking & Status Analytics",
+        href: "/shipment-tracking",
+        icon: Radar,
+        permission: "shipments.read",
+      },
+      {
+        label: "Fulfilment & Delivery Performance",
+        href: "/fulfilment-performance",
+        icon: Timer,
+        permission: "shipments.read",
+      },
       { label: "NDR", href: "/ndr", icon: PackageX, permission: "ndr.read" },
       { label: "RTO", href: "/rto", icon: RotateCcw, permission: "rto.read" },
     ],

@@ -227,3 +227,262 @@ class ShipmentAnalyticsResponse(BaseModel):
     confirmation_to_shipment_rate: float = 0.0
     daily_trend: list[DailyShipmentTrendPoint]
     telecaller_stats: list[TelecallerShipmentStats]
+
+
+class UnifiedStatusCount(BaseModel):
+    """One of the 12 SOW-defined unified statuses
+    (`app.services.shipment_status.UNIFIED_STATUSES`) and its count/share
+    of `total_orders` — the full funnel, not just the 5 KPI percentages.
+    """
+
+    status: str
+    count: int
+    percent_of_total: float
+
+
+class StatusGroupCount(BaseModel):
+    """One management-friendly category over the technical statuses."""
+
+    key: str
+    label: str
+    statuses: list[str]
+    count: int
+    percent_of_total: float
+
+
+class ShipmentStatusAnalyticsResponse(BaseModel):
+    """OMS SOW Module 2 — unified 12-status breakdown plus the 5 KPI
+    percentages, computed per `app.services.shipment_analytics_service`.
+    `total_eligible_orders` = every order that has reached at least
+    `ready_to_ship` (i.e. excludes `order_placed` and `cancelled`).
+    `total_shipped_orders` = every order that has reached at least
+    `picked_up` (see that service module's docstring for the exact
+    bucket list and why). Both percentages are computed server-side,
+    never left for the frontend to recompute.
+    """
+
+    total_orders: int
+    total_eligible_orders: int
+    total_shipped_orders: int
+    total_fulfilled: int = 0
+    total_delivered: int = 0
+    total_rto: int = 0
+    status_groups: list[StatusGroupCount] = []
+    status_breakdown: list[UnifiedStatusCount]
+    pickup_rate: float
+    in_transit_rate: float
+    out_for_delivery_rate: float
+    delivery_rate: float
+    rto_rate: float
+
+
+class UnifiedStatusDailyPoint(BaseModel):
+    """One calendar day's (IST) full 12-status breakdown — the SOW's
+    "date-wise shipment status tracking" / "historical shipment status
+    reports".
+    """
+
+    date: str
+    order_placed: int = 0
+    ready_to_ship: int = 0
+    pickup_pending: int = 0
+    picked_up: int = 0
+    in_transit: int = 0
+    out_for_delivery: int = 0
+    delivered: int = 0
+    rto_initiated: int = 0
+    rto_in_transit: int = 0
+    rto_delivered: int = 0
+    ndr: int = 0
+    cancelled: int = 0
+    fulfilled_tracking_unavailable: int = 0
+
+
+class ShipmentStatusHistoryResponse(BaseModel):
+    daily: list[UnifiedStatusDailyPoint]
+
+
+class ShipmentStatusDrilldownRowResponse(BaseModel):
+    """One order under a given unified status (`GET
+    /shipments/status-analytics/orders`) — denormalized the same way
+    `ShipmentQueueRowResponse` is, so the drill-down table renders
+    without an N+1 request per row.
+    """
+
+    order_id: uuid.UUID
+    order_number: str
+    order_datetime: datetime
+    customer_name: str | None
+    payment_type: PaymentType
+    sku_summary: str | None
+    total_amount: Decimal
+    unified_status: str
+    shipment_id: uuid.UUID | None = None
+    awb: str | None = None
+    courier_name: str | None = None
+    expected_delivery_date: datetime | None = None
+    actual_delivery_date: datetime | None = None
+    # Original (technical) shipment status, tracking details and pickup date,
+    # shown inside the order details.
+    shipment_status: str | None = None
+    current_location: str | None = None
+    last_tracking_update_at: datetime | None = None
+    pickup_date: datetime | None = None
+
+
+class PerformanceOrderRowResponse(BaseModel):
+    """One order behind a Module 3 / Module 4 KPI, chart bar or partner row
+    (`GET /shipments/fulfilment-performance/orders`, `/partner-orders`).
+    Durations are computed server-side from the same timestamps and rules
+    as the aggregate that opened the list.
+    """
+
+    order_id: uuid.UUID
+    order_number: str
+    order_datetime: datetime
+    payment_type: PaymentType
+    sku_summary: str | None = None
+    unified_status: str
+    shipment_status: str | None = None
+    awb: str | None = None
+    courier_name: str | None = None
+    pickup_date: datetime | None = None
+    actual_delivery_date: datetime | None = None
+    fulfilment_days: float | None = None
+    delivery_days: float | None = None
+    pending_hours: float | None = None
+
+
+# --- OMS SOW Module 3: Fulfilment & Delivery Performance Dashboard -------
+
+
+class FulfilmentSummaryResponse(BaseModel):
+    """Section A (Internal Order Fulfilment). `avg_fulfilment_days` is
+    `None` when there is no qualifying order at all (never shown as 0).
+    See `app.services.fulfilment_performance_service`'s module docstring
+    for the exact timestamp choices and exclusion rules.
+    """
+
+    avg_fulfilment_days: float | None
+    fulfilled_order_count: int
+    missing_pickup_timestamp_count: int
+    pending_fulfilment_count: int
+    pending_over_24h_count: int
+    pending_over_48h_count: int
+    team_warehouse_breakdown: list[dict] = Field(default_factory=list)
+    team_warehouse_attribution_available: bool
+    team_warehouse_attribution_note: str
+
+
+class FulfilmentDailyPoint(BaseModel):
+    date: str
+    avg_fulfilment_days: float | None
+    fulfilled_order_count: int
+
+
+class FulfilmentTrendResponse(BaseModel):
+    daily: list[FulfilmentDailyPoint]
+
+
+class DeliveryPerformanceByCourier(BaseModel):
+    courier_key: str | None = None
+    service_names: list[str] = []
+    courier_id: uuid.UUID | None
+    courier_name: str
+    avg_delivery_days: float | None
+    delivered_order_count: int
+
+
+class DeliveryPerformanceByZone(BaseModel):
+    zone: str
+    avg_delivery_days: float | None
+    delivered_order_count: int
+
+
+class DeliveryPerformanceResponse(BaseModel):
+    """Section B (Courier Delivery Performance). `by_zone` groups by
+    normalized Indian state (NOT a courier billing zone -- see
+    `zone_is_state_based`, always `True`, and the service module's
+    docstring for why).
+    """
+
+    overall_avg_delivery_days: float | None
+    delivered_order_count: int
+    missing_timestamp_count: int
+    by_courier: list[DeliveryPerformanceByCourier]
+    by_zone: list[DeliveryPerformanceByZone]
+    zone_is_state_based: bool
+    unmapped_zone_order_count: int
+    cod_avg_delivery_days: float | None
+    cod_delivered_order_count: int
+    prepaid_avg_delivery_days: float | None
+    prepaid_delivered_order_count: int
+
+
+class DeliveryTrendDailyPoint(BaseModel):
+    date: str
+    avg_delivery_days: float | None
+    delivered_order_count: int
+
+
+class DeliveryTrendResponse(BaseModel):
+    daily: list[DeliveryTrendDailyPoint]
+
+
+# --- OMS SOW Module 4: Shipping Partner Allocation & Performance Analysis -
+
+
+class PartnerAllocationRow(BaseModel):
+    """Section A -- one row of the Order Allocation Dashboard.
+    `allocation_percent` rows sum to exactly 100.00 across the whole
+    response (largest-remainder rounding, see
+    `ShippingPartnerPerformanceService._allocation_percentages`).
+    """
+
+    courier_key: str
+    courier_id: uuid.UUID | None = None
+    courier_name: str
+    service_names: list[str] = []
+    orders_allocated: int
+    allocation_percent: float
+    avg_delivery_days: float | None
+
+
+class PartnerAllocationResponse(BaseModel):
+    partners: list[PartnerAllocationRow]
+    total_orders_allocated: int
+    total_allocation_percent: float
+
+
+class PartnerPerformanceRow(BaseModel):
+    """Section B -- one partner's full comparison row. Also backs Section
+    C (Decision-Making Dashboard), which reshapes/sorts these same rows
+    rather than recomputing anything -- see the service module's
+    docstring. `avg_shipping_cost_per_delivered_order` /
+    `_per_rto_order` are always `None` -- see
+    `shipping_cost_available`/`shipping_cost_unavailable_reason` on the
+    parent response for why.
+    """
+
+    courier_key: str
+    courier_id: uuid.UUID | None = None
+    courier_name: str
+    service_names: list[str] = []
+    total_allocated: int
+    total_picked_up: int
+    total_delivered: int
+    delivery_success_rate: float | None
+    rto_percentage: float | None
+    avg_delivery_days: float | None
+    avg_fulfilment_to_delivery_days: float | None
+    missing_delivery_timestamp_count: int
+    cod_delivery_success_rate: float | None
+    prepaid_delivery_success_rate: float | None
+    avg_shipping_cost_per_delivered_order: float | None
+    avg_shipping_cost_per_rto_order: float | None
+
+
+class PartnerPerformanceResponse(BaseModel):
+    partners: list[PartnerPerformanceRow]
+    shipping_cost_available: bool
+    shipping_cost_unavailable_reason: str
