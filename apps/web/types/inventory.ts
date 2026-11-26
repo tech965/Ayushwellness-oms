@@ -198,6 +198,51 @@ export interface InventoryMovementFilters {
   catalog_variant_id?: string
   order_id?: string
   movement_type?: InventoryMovementType
+  /** Partial, case-insensitive. */
+  sku?: string
+  /** ISO 8601, inclusive. */
+  date_from?: string
+  date_to?: string
+}
+
+/** Module 1.1/Module 1 — every field is a live aggregate (see the
+ * backend's `InventoryService.get_dashboard`), never a hardcoded/sample
+ * value. `opening_stock_boxes` is all-time and unscoped by date;
+ * `inward_boxes_in_range`/`outward_boxes_in_range` are scoped to the
+ * request's `date_from`/`date_to` and are never combined with it.
+ *
+ * `physical_stock_boxes` (on hand), `reserved_stock_boxes` (soft-held by
+ * active legacy order reservations) and `available_to_sell_boxes`
+ * (physical - reserved) are three distinct figures -- never collapsed
+ * into one "stock" number. `rto_in_transit_boxes` (courier still has it)
+ * and `rto_awaiting_verification_boxes` (courier-delivered, not yet
+ * warehouse-verified) are mutually exclusive and neither counts toward
+ * `physical_stock_boxes` -- that stock has left the warehouse and has
+ * not yet been added back.
+ */
+export interface InventoryDashboard {
+  total_products: number
+  total_skus: number
+  total_available_boxes: number
+  total_available_packets: number
+  opening_stock_boxes: number
+  inward_boxes_in_range: number
+  outward_boxes_in_range: number
+  rto_in_transit_boxes: number
+  rto_in_transit_count: number
+  rto_awaiting_verification_boxes: number
+  rto_awaiting_verification_count: number
+  low_stock_count: number
+  out_of_stock_count: number
+  physical_stock_boxes: number
+  reserved_stock_boxes: number
+  available_to_sell_boxes: number
+}
+
+export interface InventoryDashboardFilters {
+  /** ISO 8601, inclusive. */
+  date_from?: string
+  date_to?: string
 }
 
 export const STOCK_STATUS_LABELS: Record<StockStatus, string> = {

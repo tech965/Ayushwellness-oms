@@ -16,7 +16,12 @@ from app.models.auth import User
 from app.models.rto import RTO
 from app.schemas.common import PageParams, SortParams, build_pagination_meta
 from app.schemas.response import ApiResponse, PaginatedResponse
-from app.schemas.rto import RTOListResponse, RTOResponse, RTOUpdateRequest
+from app.schemas.rto import (
+    RTOListResponse,
+    RTOResponse,
+    RTOUpdateRequest,
+    RTOVerifyReceiptRequest,
+)
 from app.services.rto_service import RTOService
 
 router = APIRouter()
@@ -105,3 +110,22 @@ async def update_rto(
 ) -> ApiResponse[RTOResponse]:
     rto = await RTOService(session).update_rto(rto_id, actor=current_user, **payload.model_dump())
     return ApiResponse(data=RTOResponse.model_validate(rto), message="RTO updated.")
+
+
+@router.post("/{rto_id}/verify-receipt", response_model=ApiResponse[RTOResponse])
+async def verify_rto_receipt(
+    rto_id: uuid.UUID,
+    payload: RTOVerifyReceiptRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("rto.update")),
+) -> ApiResponse[RTOResponse]:
+    """Warehouse staff confirm physical receipt of a returned shipment --
+    the ONLY action that ever restocks an RTO (Module 1 requirement 1).
+    Gated by `rto.update`, the same permission `PATCH /{rto_id}` already
+    requires -- this is itself an update to the RTO record, not a new
+    permission scope.
+    """
+    rto = await RTOService(session).verify_warehouse_receipt(
+        rto_id, actor=current_user, **payload.model_dump()
+    )
+    return ApiResponse(data=RTOResponse.model_validate(rto), message="RTO receipt verified.")

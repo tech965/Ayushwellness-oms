@@ -8,14 +8,15 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import AwareDateTime, Base, JSONType, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import RTOStatus, sa_enum
+from app.models.enums import RTORestockStatus, RTOStatus, sa_enum
 from app.models.mixins import SyncMetadataMixin
 
 if TYPE_CHECKING:
+    from app.models.auth import User
     from app.models.courier import Courier
     from app.models.order import Order
     from app.models.shipment import Shipment
@@ -48,6 +49,25 @@ class RTO(Base, UUIDPrimaryKeyMixin, TimestampMixin, SyncMetadataMixin):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     rto_metadata: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
 
+    # Warehouse verification -- separate from `status` above (the
+    # courier-reported state). `status == RECEIVED` only ever flips this
+    # to AWAITING_VERIFICATION; restock requires an explicit
+    # `RTOService.verify_warehouse_receipt` call. See `RTORestockStatus`.
+    restock_status: Mapped[RTORestockStatus] = mapped_column(
+        sa_enum(RTORestockStatus, "rto_restock_status"),
+        nullable=False,
+        default=RTORestockStatus.NOT_APPLICABLE,
+        server_default=RTORestockStatus.NOT_APPLICABLE.value,
+        index=True,
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
+    verified_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    accepted_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rejected_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     shipment: Mapped[Shipment] = relationship()
     order: Mapped[Order] = relationship()
     courier: Mapped[Courier | None] = relationship()
+    verified_by: Mapped[User | None] = relationship()

@@ -6,11 +6,24 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.enums import RTOStatus
+from app.models.enums import RTORestockStatus, RTOStatus
 
 
 class RTOUpdateRequest(BaseModel):
     status: RTOStatus | None = None
+    notes: str | None = None
+
+
+class RTOVerifyReceiptRequest(BaseModel):
+    """`product_variant_id`/`accepted_quantity`/`rejected_quantity`: all
+    three together (a partial/per-line verification), or all omitted (a
+    full accept of every order line) -- see `RTOService.
+    verify_warehouse_receipt`'s docstring.
+    """
+
+    product_variant_id: uuid.UUID | None = None
+    accepted_quantity: int | None = None
+    rejected_quantity: int | None = None
     notes: str | None = None
 
 
@@ -25,6 +38,11 @@ class RTOResponse(BaseModel):
     normalized_reason: str | None
     external_reason: str | None
     status: RTOStatus
+    restock_status: RTORestockStatus
+    verified_at: datetime | None
+    verified_by_user_id: uuid.UUID | None
+    accepted_quantity: int | None
+    rejected_quantity: int | None
     initiated_at: datetime | None
     completed_at: datetime | None
     notes: str | None

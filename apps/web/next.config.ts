@@ -1,6 +1,11 @@
 import type { NextConfig } from "next"
 
 const nextConfig: NextConfig = {
+  // Next's dev-mode cross-origin protection only allows "localhost" by
+  // default, not "127.0.0.1" -- without this, opening the app via
+  // 127.0.0.1 (as opposed to localhost) gets every _next/static chunk
+  // and the HMR websocket blocked with a 403.
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   // Tells the browser bundle whether this is a Vercel preview, so it can refuse
   // to use the production API (lib/api-config.ts). VERCEL_ENV is set by Vercel
   // ("production" | "preview" | "development") and always wins; the manual value

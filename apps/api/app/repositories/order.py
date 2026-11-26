@@ -41,6 +41,19 @@ class OrderRepository(BaseRepository[Order]):
                 return live
         return await super().get_by_id(id_)
 
+    async def get_for_update(self, id_: uuid.UUID) -> Order | None:
+        """Row-locked read (`SELECT ... FOR UPDATE`) against the legacy
+        `orders` table directly -- deliberately bypasses `get_by_id`'s
+        live-mode branch (`load_order`/the dormant API-first shadow
+        architecture has no row here to lock, and isn't part of what
+        this serializes). Mirrors `ProductVariantRepository.get_for_update`:
+        lets a dispatch-confirmation and a cancellation attempt on the
+        same order serialize against each other instead of racing.
+        """
+        stmt = select(Order).where(Order.id == id_).with_for_update()
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def update(self, instance: Order, **fields) -> Order:  # noqa: ANN003
         if is_live_transient(instance):
             return await apply_live_update(self.session, instance, fields)

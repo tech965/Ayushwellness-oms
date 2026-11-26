@@ -11,7 +11,7 @@ input for anything in this module (see `InventoryService`'s docstring).
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -33,6 +33,7 @@ from app.schemas.inventory import (
     CatalogVariantNameUpdateRequest,
     CatalogVariantStockAdjustmentResponse,
     InventoryAdjustmentRequest,
+    InventoryDashboardResponse,
     InventoryMovementResponse,
     InventoryProductStockResponse,
     InventoryProductSummaryResponse,
@@ -303,6 +304,24 @@ def _movement_response(movement) -> InventoryMovementResponse:  # noqa: ANN001
     )
 
 
+@router.get("/dashboard", response_model=ApiResponse[InventoryDashboardResponse])
+async def get_inventory_dashboard(
+    date_from: datetime | None = Query(
+        default=None, description="Inclusive lower bound for inward/outward totals."
+    ),
+    date_to: datetime | None = Query(
+        default=None, description="Inclusive upper bound for inward/outward totals."
+    ),
+    session: Any = Depends(get_db),
+    _: User = Depends(require_permission("inventory.read")),
+) -> ApiResponse[InventoryDashboardResponse]:
+    """Module 1.1 — see `InventoryService.get_dashboard` for exactly what
+    each figure means and how it's derived; nothing here is hardcoded.
+    """
+    data = await InventoryService(session).get_dashboard(date_from=date_from, date_to=date_to)
+    return ApiResponse(data=InventoryDashboardResponse(**data))
+
+
 @router.get("/stock", response_model=PaginatedResponse[InventoryProductSummaryResponse])
 async def list_product_stock(
     q: str | None = Query(default=None, description="Search by product name, vendor, or SKU."),
@@ -441,6 +460,11 @@ async def list_movements(
     ),
     order_id: uuid.UUID | None = Query(default=None),
     movement_type: str | None = Query(default=None),
+    sku: str | None = Query(
+        default=None, description="Partial, case-insensitive SKU search."
+    ),
+    date_from: datetime | None = Query(default=None, description="Inclusive lower bound."),
+    date_to: datetime | None = Query(default=None, description="Inclusive upper bound."),
     page_params: PageParams = Depends(pagination_params),
     sort_params: SortParams = Depends(sort_params_dep),
     session: Any = Depends(get_db),
@@ -454,6 +478,9 @@ async def list_movements(
         catalog_variant_id=catalog_variant_id,
         order_id=order_id,
         movement_type=movement_type,
+        sku=sku,
+        date_from=date_from,
+        date_to=date_to,
     )
     return PaginatedResponse(
         data=[_movement_response(m) for m in items],

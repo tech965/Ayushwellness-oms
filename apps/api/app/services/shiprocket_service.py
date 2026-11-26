@@ -23,6 +23,11 @@ from app.integrations.registry import get_adapter
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.config import ShiprocketConfig
 from app.integrations.shiprocket.normalizer import TRACKING_NORMALIZER, extract_tracking_events
+from app.integrations.shiprocket.sync import (
+    _DISPATCHED_STATUSES,
+    RTO_STATUS_FROM_SHIPMENT_STATUS,
+    milestone_timestamp_updates,
+)
 from app.models.auth import User
 from app.models.enums import (
     FulfillmentStatus,
@@ -43,6 +48,7 @@ from app.services.courier_service import CourierService
 from app.services.inventory_service import InventoryService
 from app.services.live_shiprocket import LiveShiprocketService, live_ref_for
 from app.services.ndr_service import NDRService
+from app.services.rto_service import RTOService
 from app.services.shipment_service import ShipmentService
 from app.services.shopify_fulfillment_service import ShopifyFulfillmentService
 
@@ -240,6 +246,7 @@ class ShiprocketOperationsService:
         self.shipment_service = ShipmentService(session)
         self.courier_service = CourierService(session)
         self.ndr_service = NDRService(session)
+        self.rto_service = RTOService(session)
         self.inventory_service = InventoryService(session)
         self.shopify_fulfillment_service = ShopifyFulfillmentService(session)
         self.audit = AuditService(session)
@@ -820,9 +827,67 @@ class ShiprocketOperationsService:
                 raw_payload=normalized["raw_payload"],
             )
             if normalized["mapped_status"] is not None:
-                await self.shipment_service.update_shipment(
-                    shipment.id, actor=actor, current_status=normalized["mapped_status"]
+                milestone_updates = milestone_timestamp_updates(
+                    shipment,
+                    mapped_status=normalized["mapped_status"],
+                    event_timestamp=normalized["event_timestamp"],
+                    expected_delivery_date=normalized.get("expected_delivery_date"),
                 )
+                await self.shipment_service.update_shipment(
+                    shipment.id,
+                    actor=actor,
+                    current_status=normalized["mapped_status"],
+                    **milestone_updates,
+                )
+                if normalized["mapped_status"] in _DISPATCHED_STATUSES:
+                    # This on-demand "Refresh Tracking" action previously
+                    # never reached `apply_dispatch` at all (unlike the
+                    # scheduled pull-sync and webhook paths, both routed
+                    # through `apply_tracking_event`) -- an operator
+                    # clicking this button for the first PICKED_UP-or-later
+                    # status on a shipment must decrement stock exactly
+                    # the same way. `apply_dispatch` is idempotent (DB
+                    # unique constraint), so this is a no-op if another
+                    # path already recorded the dispatch.
+                    try:
+                        await self.inventory_service.apply_dispatch(
+                            order_id=shipment.order_id, shipment_id=shipment.id
+                        )
+                    except Exception:  # noqa: BLE001 - stock tracking must never block tracking refresh
+                        await self.session.rollback()
+                        logger.exception(
+                            "inventory_dispatch_failed",
+                            shipment_id=str(shipment.id),
+                            source="shiprocket_manual_refresh",
+                        )
+
+                rto_status = RTO_STATUS_FROM_SHIPMENT_STATUS.get(normalized["mapped_status"])
+                if rto_status is not None:
+                    # Module 1 requirement 2 — this manual-refresh path
+                    # previously had NO RTO-derivation logic at all (the
+                    # concrete parity gap the audit surfaced). Routed
+                    # through the exact same shared helper
+                    # `apply_tracking_event` (webhook + scheduled
+                    # pull-sync) uses, so all three ingestion paths derive
+                    # identical RTO state and none of them ever restocks
+                    # off a courier status alone.
+                    try:
+                        await self.rto_service.process_courier_rto_status(
+                            source_system="shiprocket",
+                            external_id=shipment.awb,
+                            shipment_id=shipment.id,
+                            order_id=shipment.order_id,
+                            courier_id=shipment.courier_id,
+                            status=rto_status,
+                            external_reason=normalized["description"],
+                        )
+                    except Exception:  # noqa: BLE001 - stock tracking must never block tracking refresh
+                        await self.session.rollback()
+                        logger.exception(
+                            "rto_status_processing_failed",
+                            shipment_id=str(shipment.id),
+                            source="shiprocket_manual_refresh",
+                        )
 
         await self.audit.record(
             user=actor,

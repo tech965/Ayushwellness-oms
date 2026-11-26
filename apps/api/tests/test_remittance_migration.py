@@ -60,7 +60,11 @@ def _sqlite_friendly(module):
 
 def test_single_alembic_head_and_revision_chain():
     script = ScriptDirectory.from_config(Config(str(API_ROOT / "alembic.ini")))
-    assert script.get_heads() == ["f2b8d4a6c0e1"]
+    assert script.get_heads() == ["a8c4e6f0b2d9"]  # merge of the RTO and payment chains
+    assert set(script.get_revision("a8c4e6f0b2d9").down_revision) == {
+        "7f3a9c2e5d81",
+        "f2b8d4a6c0e1",
+    }
     assert script.get_revision("f2b8d4a6c0e1").down_revision == "e7a1c3b5d9f4"
     assert script.get_revision("e7a1c3b5d9f4").down_revision == "d3b5f7a9c1e2"
     assert script.get_revision("c9e1a5d3f7b2").down_revision == "b4d8e2a6c1f7"

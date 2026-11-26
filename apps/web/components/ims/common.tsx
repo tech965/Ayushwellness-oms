@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils"
 
 export { fmt, parseQty }
 import { resolveFinishedItem, useCatalogVariantSearch, useItemDetail, useItemSearch, useWarehouses } from "@/services/ims"
-import type { ImsItem, StockStatus } from "@/types/ims"
+import type { CatalogVariantHit, ImsItem, StockStatus } from "@/types/ims"
 
 export function useDebounced<T>(value: T, ms = 300): T {
   const [v, setV] = React.useState(value)
@@ -229,6 +229,40 @@ export function ErrorNote({ error }: { error: unknown }) {
   )
 }
 
+/** One product's worth of `CatalogVariantHit` rows, grouped by
+ * `product_id` -- the picker shows one row per PRODUCT (never a SKU),
+ * with a packaging sub-step only when a product resolves to more than
+ * one Shopify variant. Mirrors the Categories page's own "Packaging"
+ * dropdown (see `app/ims/categories/page.tsx::ProductStockDialog`) --
+ * the same no-SKU-shown convention, reused here instead of duplicated.
+ */
+interface ProductHitGroup {
+  product_id: string
+  name: string
+  category: string
+  variants: CatalogVariantHit[]
+  total_stock: number
+}
+
+function groupByProduct(hits: CatalogVariantHit[]): ProductHitGroup[] {
+  const groups = new Map<string, ProductHitGroup>()
+  for (const hit of hits) {
+    let group = groups.get(hit.product_id)
+    if (!group) {
+      // The product's own name is the first variant's label with any
+      // packaging suffix stripped is not reliable across catalogues, so
+      // the FIRST variant found stands in for the product's display
+      // name -- exactly how `CategoryOverviewGroup.name` is already
+      // derived server-side for the Categories page.
+      group = { product_id: hit.product_id, name: hit.label, category: hit.category, variants: [], total_stock: 0 }
+      groups.set(hit.product_id, group)
+    }
+    group.variants.push(hit)
+    group.total_stock += hit.total_stock
+  }
+  return Array.from(groups.values())
+}
+
 /** Dialog that finds one inventory item: a Shopify finished-goods variant or a packaging unit. */
 export function ItemPickerDialog({
   open,
@@ -247,8 +281,11 @@ export function ItemPickerDialog({
   const dq = useDebounced(q)
   const [busy, setBusy] = React.useState(false)
   const [tab, setTab] = React.useState(kinds[0])
-  const finished = useCatalogVariantSearch(dq, open && tab === "finished")
+  const [expandedProduct, setExpandedProduct] = React.useState<string | null>(null)
+  const finished = useCatalogVariantSearch(dq, open && tab === "finished", warehouseId)
   const packaging = useItemSearch(dq, "packaging", warehouseId, open && tab === "packaging")
+  const productGroups = React.useMemo(() => groupByProduct(finished.data ?? []), [finished.data])
+  const stockLabel = warehouseId ? "in stock here" : "in stock"
 
   async function pickVariant(productId: string, variantId: string) {
     setBusy(true)
@@ -269,31 +306,55 @@ export function ItemPickerDialog({
           <DialogTitle>Select item</DialogTitle>
           <DialogDescription>Finished goods come live from Shopify; packaging units are tracked separately.</DialogDescription>
         </DialogHeader>
-        <Input autoFocus placeholder="Search by name or SKU…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <Input autoFocus placeholder="Search by product name…" value={q} onChange={(e) => setQ(e.target.value)} />
         <Tabs value={tab} onValueChange={(v) => setTab(v as "finished" | "packaging")}>
           <TabsList>
-            {kinds.includes("finished") && <TabsTrigger value="finished">Finished goods (SKU)</TabsTrigger>}
+            {kinds.includes("finished") && <TabsTrigger value="finished">Finished goods</TabsTrigger>}
             {kinds.includes("packaging") && <TabsTrigger value="packaging">Packaging</TabsTrigger>}
           </TabsList>
           <TabsContent value="finished" className="max-h-80 overflow-y-auto">
             {finished.isLoading && <p className="text-muted-foreground p-3 text-sm">Loading Shopify catalogue…</p>}
             {finished.isError && <ErrorNote error={finished.error} />}
-            {finished.data?.length === 0 && <p className="text-muted-foreground p-3 text-sm">No matching products.</p>}
-            {finished.data?.map((v) => (
-              <button
-                key={v.variant_id}
-                disabled={busy}
-                onClick={() => pickVariant(v.product_id, v.variant_id)}
-                className="hover:bg-muted flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm"
-              >
-                <span>
-                  <span className="block font-medium">{v.label}</span>
-                  <span className="text-muted-foreground text-xs">
-                    {v.sku_missing ? "No SKU" : v.sku} · {v.category}
+            {productGroups.length === 0 && !finished.isLoading && (
+              <p className="text-muted-foreground p-3 text-sm">No matching products.</p>
+            )}
+            {productGroups.map((group) => (
+              <div key={group.product_id}>
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    group.variants.length === 1
+                      ? pickVariant(group.product_id, group.variants[0].variant_id)
+                      : setExpandedProduct((p) => (p === group.product_id ? null : group.product_id))
+                  }
+                  className="hover:bg-muted flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-left text-sm"
+                >
+                  <span>
+                    <span className="block font-medium">{group.name}</span>
+                    <span className="text-muted-foreground text-xs">{group.category}</span>
                   </span>
-                </span>
-                <span className="text-muted-foreground text-xs tabular-nums">{fmt(v.total_stock)} in stock</span>
-              </button>
+                  <span className="text-muted-foreground text-xs tabular-nums">
+                    {fmt(group.total_stock)} {stockLabel}
+                  </span>
+                </button>
+                {expandedProduct === group.product_id && group.variants.length > 1 && (
+                  <div className="ml-3 space-y-0.5 border-l pl-2">
+                    {group.variants.map((v) => (
+                      <button
+                        key={v.variant_id}
+                        disabled={busy}
+                        onClick={() => pickVariant(v.product_id, v.variant_id)}
+                        className="hover:bg-muted flex w-full items-center justify-between gap-3 rounded-md px-3 py-1.5 text-left text-sm"
+                      >
+                        <span className="text-muted-foreground">{v.label}</span>
+                        <span className="text-muted-foreground text-xs tabular-nums">
+                          {fmt(v.total_stock)} {stockLabel}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             ))}
           </TabsContent>
           <TabsContent value="packaging" className="max-h-80 overflow-y-auto">

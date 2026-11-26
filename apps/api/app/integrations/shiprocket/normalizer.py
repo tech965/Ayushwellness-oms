@@ -124,6 +124,13 @@ class ShiprocketTrackingNormalizer:
             "event_timestamp": _parse_datetime(raw.get("date") or raw.get("timestamp")),
             "description": raw.get("activity") or raw.get("sr-status-label") or raw_status or None,
             "courier_name": raw.get("courier_name"),
+            # Never confirmed present in a sampled `shipment_track_activities`
+            # item -- read defensively, same as every other field here, so it
+            # activates automatically the day Shiprocket's payload happens to
+            # include one, without ever inventing a value when it doesn't.
+            "expected_delivery_date": _parse_datetime(
+                raw.get("etd") or raw.get("expected_delivery_date") or raw.get("edd")
+            ),
             "raw_payload": raw,
         }
 
@@ -235,6 +242,12 @@ class ShiprocketWebhookTrackingNormalizer:
             ),
             "description": _first_present(raw, "current_status_label", "activity") or raw_status,
             "courier_name": _first_present(raw, "courier_name", "courier"),
+            # Not present in any of the 20+ sampled real webhook deliveries
+            # this engagement confirmed — read defensively anyway, same
+            # reasoning as `ShiprocketTrackingNormalizer`'s own ETA field.
+            "expected_delivery_date": _parse_datetime(
+                _first_present(raw, "etd", "expected_delivery_date", "edd")
+            ),
             "raw_payload": raw,
         }
 

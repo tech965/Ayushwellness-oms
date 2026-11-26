@@ -69,7 +69,7 @@ from sqlalchemy.exc import IntegrityError  # pyright: ignore[reportMissingImport
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.models.auth import User
-from app.models.enums import InventoryMovementType, StockStatus
+from app.models.enums import InventoryMovementType, OrderStatus, StockStatus
 from app.models.inventory import InventoryMovement
 from app.models.product import (
     CatalogVariant,
@@ -84,12 +84,16 @@ from app.repositories.inventory import (
     InventoryProductRepository,
     InventoryStockRepository,
 )
-from app.repositories.order import OrderItemRepository
+from app.repositories.order import OrderItemRepository, OrderRepository
 from app.repositories.product import CatalogVariantRepository, ProductVariantRepository
 from app.schemas.common import PageParams, SortParams
 from app.schemas.settings import AppSettingsData
 from app.services.audit_service import AuditService
 from app.services.inventory_reservation_service import InventoryReservationService
+from app.services.order_reservation_service import (
+    LegacyOrderReservationService,
+    total_reserved_boxes,
+)
 
 logger = get_logger(__name__)
 
@@ -127,6 +131,7 @@ class InventoryService:
         self.catalog_variant_adjustments = CatalogVariantStockAdjustmentRepository(session)
         self.movements = InventoryMovementRepository(session)
         self.order_items = OrderItemRepository(session)
+        self.orders = OrderRepository(session)
         self.audit = AuditService(session)
 
     # --- reads ----------------------------------------------------------
@@ -258,6 +263,77 @@ class InventoryService:
             raise NotFoundError("Product variant not found.")
         return variant
 
+    async def get_dashboard(
+        self, *, date_from: datetime | None, date_to: datetime | None
+    ) -> dict[str, int]:
+        """Module 1.1 — every figure here is a live aggregate over
+        `ProductVariant`/`InventoryMovement`/`RTO`, never a cached or
+        hardcoded number, and never touches the separate IMS module's
+        own warehouse ledger (`app.services.ims_service`) or the dormant
+        API-first `InventoryReservation`/`OrderWorkflow` architecture.
+
+        `opening_stock_boxes` is derived, not stored -- confirmed in the
+        Phase 1 audit that `InventoryMovementType.INITIAL_STOCK` is
+        declared but never actually written anywhere, and that every
+        real write to `available_quantity` (dispatch, RTO restock,
+        manual add) is 1:1 paired with an `InventoryMovement` row. That
+        makes `today's total − all-time total delta` an exact
+        reconstruction of the stock level before the ledger's first
+        entry, not an approximation.
+
+        `inward_boxes_in_range`/`outward_boxes_in_range` are scoped to
+        `[date_from, date_to]` and are a SEPARATE figure from
+        `opening_stock_boxes` (all-time, unscoped) -- the two are never
+        combined into one number, so a caller can never mistake a
+        date-ranged movement total for the stock level that preceded it.
+        """
+        totals = await self.stock.dashboard_totals()
+        all_time_delta = await self.movements.all_time_delta_total()
+        inward, outward = await self.movements.totals_by_sign_in_range(
+            date_from=date_from, date_to=date_to
+        )
+        rto_boxes, rto_count = await self.movements.rto_in_transit_boxes_and_count()
+        awaiting_boxes, awaiting_count = (
+            await self.movements.rto_awaiting_verification_boxes_and_count()
+        )
+        threshold = await self.get_low_stock_threshold()
+        low_stock_count, out_of_stock_count = await self.stock.low_and_out_of_stock_counts(
+            low_stock_threshold=threshold
+        )
+        # Legacy order-placement reservation (`OrderInventoryReservation`,
+        # Module 1 requirement 3) -- a "soft hold" overlay that never
+        # touches `available_quantity` itself: `physical_stock_boxes` is
+        # the same figure as `total_available_boxes` above, named
+        # explicitly here so the dashboard can show physical/reserved/
+        # available-to-sell as three clearly distinct numbers rather
+        # than making the UI infer "physical" from the catalogue total.
+        physical_boxes = totals["total_available_boxes"]
+        reserved_boxes = await total_reserved_boxes(self.session)
+        return {
+            "total_products": totals["total_products"],
+            "total_skus": totals["total_skus"],
+            "total_available_boxes": totals["total_available_boxes"],
+            "total_available_packets": totals["total_available_packets"],
+            "opening_stock_boxes": totals["total_available_boxes"] - all_time_delta,
+            "inward_boxes_in_range": inward,
+            # `totals_by_sign_in_range` returns the raw signed ledger sum
+            # (negative, by construction -- outward movements are
+            # negative `quantity_delta`s); negated here, at the one
+            # presentation boundary, so the API/UI always reports a
+            # plain magnitude ("230 boxes went out"), never a number a
+            # reader could misread as a credit.
+            "outward_boxes_in_range": -outward,
+            "rto_in_transit_boxes": rto_boxes,
+            "rto_in_transit_count": rto_count,
+            "rto_awaiting_verification_boxes": awaiting_boxes,
+            "rto_awaiting_verification_count": awaiting_count,
+            "low_stock_count": low_stock_count,
+            "out_of_stock_count": out_of_stock_count,
+            "physical_stock_boxes": physical_boxes,
+            "reserved_stock_boxes": reserved_boxes,
+            "available_to_sell_boxes": physical_boxes - reserved_boxes,
+        }
+
     async def list_movements(
         self,
         *,
@@ -268,6 +344,7 @@ class InventoryService:
         catalog_variant_id: uuid.UUID | None = None,
         order_id: uuid.UUID | None = None,
         movement_type: str | None = None,
+        sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ) -> tuple[list[InventoryMovement], int]:
@@ -277,6 +354,7 @@ class InventoryService:
             catalog_variant_id=catalog_variant_id,
             order_id=order_id,
             movement_type=movement_type,
+            sku=sku,
             date_from=date_from,
             date_to=date_to,
         )
@@ -346,7 +424,25 @@ class InventoryService:
         per (order, variant) -- safe to call again for the same order as
         tracking advances through later statuses (IN_TRANSIT, DELIVERED,
         ...) or on a pull-sync re-scan; never reads anything from Shopify.
+
+        A confirmed physical dispatch ALWAYS deducts stock, regardless of
+        `Order.status` -- a courier that has genuinely picked up a
+        package doesn't un-pick it up because the OMS separately marked
+        the order cancelled (a late webhook, or a courier error). When
+        the order is cancelled at the moment dispatch is confirmed, the
+        deduction still happens exactly as below, but each such movement
+        is additionally flagged (structured log + `AuditLog`,
+        `action="inventory.dispatch_after_cancellation"`) for manual
+        reconciliation -- never silently skipped, never silently
+        unflagged. `order_id` is locked (`SELECT ... FOR UPDATE`) for
+        this method's whole transaction -- `OrderService.transition_status`/
+        `upsert_synced_order`'s cancellation path takes the same lock
+        before checking shipment progress, so the two can never observe
+        a half-applied version of each other: whichever gets here first
+        is fully visible (committed) to the other before it proceeds.
         """
+        order = await self.orders.get_for_update(order_id)
+        order_is_cancelled = order is not None and order.status == OrderStatus.CANCELLED
         if items is None:
             items = await self.order_items.list_for_order(order_id)
         for item in items:
@@ -398,6 +494,9 @@ class InventoryService:
                 # caller's own transaction (see module docstring).
                 async with self.session.begin_nested():
                     await self.variants.update(variant, available_quantity=new_quantity)
+                    reason = "Shiprocket dispatch"
+                    if order_is_cancelled:
+                        reason = "Shiprocket dispatch (order already cancelled)"
                     await self.movements.create(
                         product_variant_id=variant_id,
                         movement_type=InventoryMovementType.DISPATCH,
@@ -405,12 +504,50 @@ class InventoryService:
                         quantity_after=new_quantity,
                         order_id=order_id,
                         shipment_id=shipment_id,
-                        reason="Shiprocket dispatch",
+                        reason=reason,
                     )
-                    # The stock has now physically left: the reservation (if
-                    # one was taken at shipment creation) is consumed, so
-                    # available-to-promise does not count it twice.
-                    await InventoryReservationService(self.session).consume(order_id, [variant_id])
+                    # The stock has now physically left: the legacy
+                    # order-placement reservation (if one was taken at
+                    # order creation -- Module 1 requirement 3) is
+                    # consumed, so available-to-sell does not count it
+                    # twice. `InventoryReservationService` (the dormant
+                    # architecture's own reservation table) is ALSO
+                    # consumed here -- unchanged from before this
+                    # module's work -- since `apply_dispatch` is called
+                    # with either a legacy `orders.id` or an
+                    # `order_workflow.id` depending on caller (see
+                    # `test_inventory_architecture.py`), and each
+                    # service's `consume` is a no-op update that matches
+                    # zero rows for an id from the other id-space.
+                    await LegacyOrderReservationService(self.session).consume(
+                        order_id, [variant_id]
+                    )
+                    await InventoryReservationService(self.session).consume(
+                        order_id, [variant_id]
+                    )
+                    if order_is_cancelled:
+                        # Flagged, never skipped -- see this method's
+                        # docstring. Rolls back together with the movement
+                        # above on a lost race (same SAVEPOINT); commits
+                        # together with it otherwise.
+                        logger.warning(
+                            "inventory_dispatch_confirmed_after_cancellation",
+                            order_id=str(order_id),
+                            shipment_id=str(shipment_id),
+                            product_variant_id=str(variant_id),
+                        )
+                        await self.audit.record(
+                            user=None,
+                            action="inventory.dispatch_after_cancellation",
+                            entity_type="order",
+                            entity_id=str(order_id),
+                            new_value={
+                                "shipment_id": str(shipment_id),
+                                "product_variant_id": str(variant_id),
+                                "boxes_deducted": boxes,
+                            },
+                            metadata={"reason": "confirmed_physical_dispatch_after_cancellation"},
+                        )
             except IntegrityError:
                 logger.info(
                     "inventory_dispatch_lost_race",
@@ -429,25 +566,60 @@ class InventoryService:
         # update_rto`.
         await self.session.commit()
 
-    async def apply_rto_restock(self, *, order_id: uuid.UUID, rto_id: uuid.UUID) -> None:
-        """Mirror of `apply_dispatch`, called once a shipment's RTO is
-        confirmed received back at the warehouse (`RTOStatus.RECEIVED`) --
-        either derived automatically from tracking or set manually via
-        `RTOService.update_rto`.
+    async def apply_rto_restock(
+        self,
+        *,
+        order_id: uuid.UUID,
+        rto_id: uuid.UUID,
+        only_variant_id: uuid.UUID | None = None,
+        max_boxes: int | None = None,
+    ) -> int:
+        """Restocks a WAREHOUSE-VERIFIED RTO receipt -- never called
+        directly off a courier status any more (Module 1 requirement 1):
+        the only caller is `RTOService.verify_warehouse_receipt`, once
+        warehouse staff have confirmed physical receipt of this specific
+        `rto_id`. Mirror of `apply_dispatch`.
 
-        Restocks the EXACT box quantity this order+variant's own
-        `DISPATCH` movement removed, read back from the ledger -- not a
-        fresh `packets / packets_per_box` conversion. `packets_per_box`
-        is editable at any time (`update_packets_per_box`), and it must
-        never retroactively change what an already-recorded dispatch is
-        worth: if 120 packets were dispatched at 60/box (-2 boxes) and
-        `packets_per_box` is later changed to 30, the RTO restock must
-        still be +2 boxes, not +4. Falls back to a fresh conversion using
-        the variant's current `packets_per_box` only when no matching
-        dispatch was ever recorded through this OMS (a historical/edge
-        case) -- the best information available at that point.
+        Idempotency is RECEIPT-level (`rto_id`, via `exists_for_rto` +
+        the `uq_inventory_movements_rto_restock_variant_rto` partial
+        unique index) -- NOT order-level like `apply_dispatch`'s own
+        DISPATCH idempotency. A single order can have more than one
+        `RTO` row (one per shipment); each one restocks independently,
+        and each is itself idempotent against being verified twice (see
+        `InventoryMovement`'s module docstring).
+
+        Restocks the box quantity this order+variant's own `DISPATCH`
+        movement removed, read back from the ledger -- not a fresh
+        `packets / packets_per_box` conversion (same reasoning as always:
+        `packets_per_box` can change after dispatch and must never
+        retroactively change what an already-recorded dispatch is
+        worth), MINUS whatever earlier receipts on this same order+variant
+        have already restocked (`restocked_boxes_for_order_variant`) --
+        so two receipts on the same order/variant can never together
+        restock more than was actually dispatched. Falls back to a fresh
+        conversion only when no matching dispatch was ever recorded (a
+        historical/edge case).
+
+        `only_variant_id`/`max_boxes` (both or neither): restricts this
+        call to a single order line and caps the boxes restocked at
+        `max_boxes` (a PARTIAL accept -- the remainder reported rejected
+        by the caller is simply never added back to stock here; rejected
+        quantity never increases physical stock). Omitted entirely
+        (the default): every order line is restocked in full, exactly as
+        before Module 1's warehouse-verification requirement.
+
+        Returns the total boxes actually restocked (0 if none, e.g. a
+        replayed verification for an already-restocked receipt).
         """
         items = await self.order_items.list_for_order(order_id)
+        if only_variant_id is not None:
+            items = [
+                item
+                for item in items
+                if item.product_variant_id == only_variant_id
+                or (item.product_variant_id is None)
+            ]
+        total_restocked = 0
         for item in items:
             if item.quantity <= 0:
                 continue
@@ -460,6 +632,8 @@ class InventoryService:
                     "inventory_rto_restock_unresolved_sku", order_id=str(order_id), sku=item.sku
                 )
                 continue
+            if only_variant_id is not None and variant.id != only_variant_id:
+                continue
             locked = await self.variants.get_for_update(variant.id)
             if locked is not None:
                 variant = locked
@@ -468,10 +642,8 @@ class InventoryService:
             # `variant`.
             variant_id = variant.id
 
-            already_moved = await self.movements.exists_for_order(
-                order_id=order_id,
-                product_variant_id=variant_id,
-                movement_type=InventoryMovementType.RTO_RESTOCK,
+            already_moved = await self.movements.exists_for_rto(
+                rto_id=rto_id, product_variant_id=variant_id
             )
             if already_moved:
                 continue
@@ -482,14 +654,23 @@ class InventoryService:
                 movement_type=InventoryMovementType.DISPATCH,
             )
             if dispatch_movement is not None:
-                boxes = abs(dispatch_movement.quantity_delta)
+                dispatched_boxes = abs(dispatch_movement.quantity_delta)
             else:
-                boxes = _ceil_div(item.quantity * variant.pack_size, variant.packets_per_box)
+                dispatched_boxes = _ceil_div(
+                    item.quantity * variant.pack_size, variant.packets_per_box
+                )
+            already_restocked = await self.movements.restocked_boxes_for_order_variant(
+                order_id=order_id, product_variant_id=variant_id
+            )
+            outstanding = max(dispatched_boxes - already_restocked, 0)
+            boxes = outstanding if max_boxes is None else min(max_boxes, outstanding)
+            if boxes <= 0:
+                continue
 
             new_quantity = variant.available_quantity + boxes
             try:
                 # See the matching comment in `apply_dispatch` -- same
-                # SAVEPOINT + unique-constraint race protection.
+                # SAVEPOINT + unique-index race protection.
                 async with self.session.begin_nested():
                     await self.variants.update(variant, available_quantity=new_quantity)
                     await self.movements.create(
@@ -499,19 +680,22 @@ class InventoryService:
                         quantity_after=new_quantity,
                         order_id=order_id,
                         rto_id=rto_id,
-                        reason="Shiprocket RTO received",
+                        reason="Warehouse-verified RTO receipt",
                     )
+                total_restocked += boxes
             except IntegrityError:
                 logger.info(
                     "inventory_rto_restock_lost_race",
                     order_id=str(order_id),
                     product_variant_id=str(variant_id),
+                    rto_id=str(rto_id),
                 )
                 continue
 
         # See the matching comment in `apply_dispatch` -- always commit,
         # even on a no-op pass.
         await self.session.commit()
+        return total_restocked
 
     # --- staff-initiated writes ------------------------------------------
 

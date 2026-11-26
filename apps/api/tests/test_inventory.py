@@ -14,11 +14,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from app.core.exceptions import ValidationError
+from app.core.exceptions import ConflictError, ValidationError
 from app.integrations.shiprocket.sync import apply_tracking_event
 from app.models.enums import (
     InventoryMovementType,
     PaymentType,
+    RTORestockStatus,
     RTOStatus,
     ShipmentStatus,
     StockStatus,
@@ -601,7 +602,16 @@ async def test_apply_rto_restock_increments_stock_once(db_session: AsyncSession)
     assert refreshed.available_quantity == 8  # 5 + 3 boxes (180 / 60), only once
 
 
-async def test_manual_rto_status_update_triggers_restock(db_session: AsyncSession) -> None:
+async def test_manual_rto_status_update_awaits_warehouse_verification_never_restocks(
+    db_session: AsyncSession,
+) -> None:
+    """Module 1 requirement 1 (supersedes this test's original name/
+    assertion): a manual `status=RECEIVED` edit flips `restock_status`
+    to AWAITING_VERIFICATION -- it must NEVER restock directly any more,
+    courier-status-driven or not. Only `RTOService.
+    verify_warehouse_receipt` (see `test_rto_warehouse_verification.py`)
+    may create the `RTO_RESTOCK` movement.
+    """
     _, variant = await _make_variant(db_session, sku="SKU-5", available_quantity=4)
     order = await _make_order_with_item(
         db_session, order_number="ORD-5", sku="SKU-5", quantity=1, product_variant_id=variant.id
@@ -616,10 +626,11 @@ async def test_manual_rto_status_update_triggers_restock(db_session: AsyncSessio
     )
     await db_session.commit()
 
-    await RTOService(db_session).update_rto(rto.id, actor=None, status=RTOStatus.RECEIVED)
+    updated = await RTOService(db_session).update_rto(rto.id, actor=None, status=RTOStatus.RECEIVED)
 
+    assert updated.restock_status == RTORestockStatus.AWAITING_VERIFICATION
     refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
-    assert refreshed.available_quantity == 5
+    assert refreshed.available_quantity == 4  # unchanged -- not yet warehouse-verified
 
 
 def _tracking_event(*, status: ShipmentStatus, mapped: ShipmentStatus | None) -> dict:
@@ -697,9 +708,17 @@ async def test_rto_initiated_does_not_restock(db_session: AsyncSession) -> None:
     assert movements == []
 
 
-async def test_duplicate_rto_received_event_does_not_restock_twice(
+async def test_duplicate_rto_received_event_never_restocks_awaits_verification_once(
     db_session: AsyncSession,
 ) -> None:
+    """Module 1 requirement 1 (supersedes this test's original
+    assertion, which expected a courier RTO_DELIVERED event to restock
+    directly -- that is now explicitly disallowed). A replayed
+    RTO_DELIVERED event must never restock, and must only flip
+    `restock_status` to AWAITING_VERIFICATION once (idempotent, not
+    re-flipped by the duplicate). Restock only ever happens via
+    `RTOService.verify_warehouse_receipt`, called once here afterward.
+    """
     _, variant = await _make_variant(db_session, sku="SKU-RTO-DUP", available_quantity=5)
     order = await _make_order_with_item(
         db_session, order_number="ORD-RTO-DUP", sku="SKU-RTO-DUP", quantity=1, product_variant_id=variant.id
@@ -725,7 +744,22 @@ async def test_duplicate_rto_received_event_does_not_restock_twice(
         )
 
     refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
-    assert refreshed.available_quantity == 6  # +1, exactly once
+    assert refreshed.available_quantity == 5  # never restocked off courier status alone
+
+    rto, _ = await RTORepository(db_session).upsert_by_external_id(
+        source_system="shiprocket",
+        external_id="AWB-RTO-DUP",
+        shipment_id=shipment.id,
+        order_id=order.id,
+    )
+    assert rto.restock_status == RTORestockStatus.AWAITING_VERIFICATION
+
+    await rto_service.verify_warehouse_receipt(rto.id, actor=None)
+    with pytest.raises(ConflictError):
+        await rto_service.verify_warehouse_receipt(rto.id, actor=None)
+
+    refreshed = await ProductVariantRepository(db_session).get_by_id(variant.id)
+    assert refreshed.available_quantity == 6  # +1, exactly once, only after verification
 
 
 # --- manual adjustment (add-incoming-stock) -------------------------------

@@ -4,9 +4,9 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
-from app.models.enums import InventoryMovementType, ProductStatus
+from app.models.enums import InventoryMovementType, ProductStatus, RTORestockStatus, RTOStatus
 from app.models.inventory import InventoryMovement
 from app.models.product import (
     CatalogVariant,
@@ -14,6 +14,7 @@ from app.models.product import (
     Product,
     ProductVariant,
 )
+from app.models.rto import RTO
 from app.repositories.base import AppendOnlyRepository, BaseRepository
 
 
@@ -98,6 +99,53 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
         )
         return movement is not None
 
+    async def get_for_rto(
+        self, *, rto_id: uuid.UUID, product_variant_id: uuid.UUID
+    ) -> InventoryMovement | None:
+        """The RTO_RESTOCK row (if any) already recorded for this exact
+        (rto, variant) -- the receipt-level idempotency check mirroring
+        `get_for_order`, but keyed by `rto_id` rather than `order_id`
+        (see `app.models.inventory.InventoryMovement`'s module docstring:
+        one RTO row is one courier receipt, and a single order can have
+        more than one). Same ordered + `.limit(1)` defensiveness as
+        `get_for_order`.
+        """
+        stmt = (
+            select(InventoryMovement)
+            .where(
+                InventoryMovement.rto_id == rto_id,
+                InventoryMovement.product_variant_id == product_variant_id,
+                InventoryMovement.movement_type == InventoryMovementType.RTO_RESTOCK,
+            )
+            .order_by(InventoryMovement.created_at.asc(), InventoryMovement.id.asc())
+            .limit(1)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalars().first()
+
+    async def exists_for_rto(self, *, rto_id: uuid.UUID, product_variant_id: uuid.UUID) -> bool:
+        return (
+            await self.get_for_rto(rto_id=rto_id, product_variant_id=product_variant_id)
+        ) is not None
+
+    async def restocked_boxes_for_order_variant(
+        self, *, order_id: uuid.UUID, product_variant_id: uuid.UUID
+    ) -> int:
+        """SUM of every RTO_RESTOCK already recorded for this (order,
+        variant), across EVERY RTO/receipt -- the "already returned"
+        baseline `InventoryService.apply_rto_restock`/`RTOService.
+        verify_warehouse_receipt` subtract from the single `DISPATCH`
+        row's box quantity to get what a new receipt may still accept.
+        """
+        total = await self.session.scalar(
+            select(func.coalesce(func.sum(InventoryMovement.quantity_delta), 0)).where(
+                InventoryMovement.order_id == order_id,
+                InventoryMovement.product_variant_id == product_variant_id,
+                InventoryMovement.movement_type == InventoryMovementType.RTO_RESTOCK,
+            )
+        )
+        return int(total or 0)
+
     def search_query(
         self,
         *,
@@ -106,6 +154,7 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
         catalog_variant_id: uuid.UUID | None = None,
         order_id: uuid.UUID | None = None,
         movement_type: str | None = None,
+        sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
     ):
@@ -113,11 +162,10 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
             selectinload(InventoryMovement.product_variant).selectinload(ProductVariant.product),
             selectinload(InventoryMovement.actor),
         )
-        if product_variant_id:
-            stmt = stmt.where(InventoryMovement.product_variant_id == product_variant_id)
-        # `product_id` and `catalog_variant_id` both filter via ProductVariant;
-        # join it once so passing both (or either) never double-joins.
-        if product_id is not None or catalog_variant_id is not None:
+        # `product_id`/`catalog_variant_id`/`sku` all filter via
+        # ProductVariant; join it once so passing any combination of them
+        # never double-joins.
+        if product_id is not None or catalog_variant_id is not None or sku is not None:
             stmt = stmt.join(
                 ProductVariant, ProductVariant.id == InventoryMovement.product_variant_id
             )
@@ -127,6 +175,13 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
                 # OMS-visible variant history spans EVERY underlying Shopify
                 # ProductVariant grouped under it -- no ledger row is rewritten.
                 stmt = stmt.where(ProductVariant.catalog_variant_id == catalog_variant_id)
+            if sku:
+                # Module 1.1's catalogue-wide "SKU-wise movement history"
+                # search -- partial, case-insensitive, same convention as
+                # every other free-text search in this codebase.
+                stmt = stmt.where(ProductVariant.sku.ilike(f"%{sku}%"))
+        if product_variant_id:
+            stmt = stmt.where(InventoryMovement.product_variant_id == product_variant_id)
         if order_id:
             stmt = stmt.where(InventoryMovement.order_id == order_id)
         if movement_type:
@@ -266,6 +321,146 @@ class InventoryMovementRepository(AppendOnlyRepository[InventoryMovement]):
                 latest[variant_id] = created_at
         return latest
 
+    async def all_time_delta_total(self) -> int:
+        """SUM of every `quantity_delta` ever recorded, across every
+        variant -- the one number `InventoryProductRepository.
+        dashboard_stock_totals`'s opening-stock derivation needs
+        (opening = today's total available boxes - this). Excludes
+        variants of DRAFT products, matching that method's own filter,
+        so the two halves of the subtraction cover the same population.
+        """
+        total = await self.session.scalar(
+            select(func.coalesce(func.sum(InventoryMovement.quantity_delta), 0))
+            .select_from(InventoryMovement)
+            .join(ProductVariant, ProductVariant.id == InventoryMovement.product_variant_id)
+            .join(Product, Product.id == ProductVariant.product_id)
+            .where(Product.status != ProductStatus.DRAFT)
+        )
+        return int(total or 0)
+
+    async def totals_by_sign_in_range(
+        self, *, date_from: datetime | None, date_to: datetime | None
+    ) -> tuple[int, int]:
+        """`(total_inward_boxes, total_outward_boxes)` across every variant
+        within `[date_from, date_to]` (either bound optional -- all-time
+        when both are None). Inward/outward are the sign of
+        `quantity_delta`, across every movement type -- a manual "Add
+        Stock" counts as inward exactly like an RTO restock does; a
+        manual downward correction counts as outward exactly like a
+        dispatch does. Mirrors `movement_totals_by_sign_bulk`'s own
+        sign-bucketing, just summed across the whole catalogue instead of
+        per-variant.
+        """
+        conditions = [Product.status != ProductStatus.DRAFT]
+        if date_from is not None:
+            conditions.append(InventoryMovement.created_at >= date_from)
+        if date_to is not None:
+            conditions.append(InventoryMovement.created_at <= date_to)
+
+        base = (
+            select(func.coalesce(func.sum(InventoryMovement.quantity_delta), 0))
+            .select_from(InventoryMovement)
+            .join(ProductVariant, ProductVariant.id == InventoryMovement.product_variant_id)
+            .join(Product, Product.id == ProductVariant.product_id)
+        )
+        inward = await self.session.scalar(
+            base.where(*conditions, InventoryMovement.quantity_delta > 0)
+        )
+        outward = await self.session.scalar(
+            base.where(*conditions, InventoryMovement.quantity_delta < 0)
+        )
+        return int(inward or 0), int(outward or 0)
+
+    async def rto_in_transit_boxes_and_count(self) -> tuple[int, int]:
+        """`(boxes, shipment_count)` physically on their way back to the
+        warehouse right now: a `DISPATCH` movement whose order has an RTO
+        row still `INITIATED`/`IN_TRANSIT` (confirmed-received RTOs are
+        excluded by that status filter alone -- restock only ever fires
+        on `RTOStatus.RECEIVED`, see `InventoryService.apply_rto_restock`).
+
+        The `NOT EXISTS` guard additionally excludes any (order, variant)
+        pair that already has an `RTO_RESTOCK` movement -- a defensive
+        belt-and-braces check (not merely redundant with the status
+        filter): if a restock has somehow already landed for a pair
+        whose RTO row hasn't yet been marked RECEIVED, that stock is
+        already back in `available_quantity`, and counting it here too
+        would double-count it. Same `NOT EXISTS`-correlated-subquery
+        idiom already used elsewhere in this codebase (see
+        `PlatformInventoryService.sum_sold_packets`'s reversal exclusion)
+        rather than a tuple-IN, which SQLite cannot execute.
+        """
+        in_transit_order_ids = select(RTO.order_id).where(
+            RTO.status.in_([RTOStatus.INITIATED, RTOStatus.IN_TRANSIT])
+        )
+        restock = aliased(InventoryMovement)
+        already_restocked = (
+            select(restock.id)
+            .where(
+                restock.order_id == InventoryMovement.order_id,
+                restock.product_variant_id == InventoryMovement.product_variant_id,
+                restock.movement_type == InventoryMovementType.RTO_RESTOCK,
+            )
+            .exists()
+        )
+        stmt = select(
+            func.count(InventoryMovement.id),
+            func.coalesce(func.sum(-InventoryMovement.quantity_delta), 0),
+        ).where(
+            InventoryMovement.movement_type == InventoryMovementType.DISPATCH,
+            InventoryMovement.order_id.in_(in_transit_order_ids),
+            ~already_restocked,
+        )
+        result = await self.session.execute(stmt)
+        count, boxes = result.one()
+        return int(boxes or 0), int(count or 0)
+
+    async def rto_awaiting_verification_boxes_and_count(self) -> tuple[int, int]:
+        """`(boxes, shipment_count)` the courier reports delivered back to
+        the warehouse but NOT yet confirmed received by warehouse staff
+        (`RTO.restock_status == AWAITING_VERIFICATION`) -- deliberately
+        separate from `rto_in_transit_boxes_and_count` (courier status
+        still `INITIATED`/`IN_TRANSIT`): a package can be "awaiting
+        verification" only once the courier has already marked it
+        delivered, so the two sets never overlap and must never be added
+        together into one "in transit" figure (Module 1 requirement:
+        awaiting-verification stock is neither physical nor in transit).
+
+        The `NOT EXISTS` guard is keyed by `rto_id` (not `order_id`,
+        unlike `rto_in_transit_boxes_and_count`'s own guard) -- a
+        receipt-level check matching `InventoryMovementRepository.
+        get_for_rto`'s own idempotency key, so a second, still-pending
+        RTO on the same order/variant is never excluded just because a
+        DIFFERENT RTO on that order already restocked its own receipt.
+        """
+        awaiting_rtos = select(RTO.id, RTO.order_id).where(
+            RTO.restock_status == RTORestockStatus.AWAITING_VERIFICATION
+        ).subquery()
+        restock = aliased(InventoryMovement)
+        already_restocked = (
+            select(restock.id)
+            .where(
+                restock.rto_id == awaiting_rtos.c.id,
+                restock.product_variant_id == InventoryMovement.product_variant_id,
+                restock.movement_type == InventoryMovementType.RTO_RESTOCK,
+            )
+            .exists()
+        )
+        stmt = (
+            select(
+                func.count(InventoryMovement.id),
+                func.coalesce(func.sum(-InventoryMovement.quantity_delta), 0),
+            )
+            .select_from(InventoryMovement)
+            .join(awaiting_rtos, awaiting_rtos.c.order_id == InventoryMovement.order_id)
+            .where(
+                InventoryMovement.movement_type == InventoryMovementType.DISPATCH,
+                ~already_restocked,
+            )
+        )
+        result = await self.session.execute(stmt)
+        count, boxes = result.one()
+        return int(boxes or 0), int(count or 0)
+
 
 class InventoryStockRepository(BaseRepository[ProductVariant]):
     """Read-side view over a single `ProductVariant` -- intentionally not
@@ -274,6 +469,62 @@ class InventoryStockRepository(BaseRepository[ProductVariant]):
     """
 
     model = ProductVariant
+
+    async def dashboard_totals(self) -> dict[str, int]:
+        """`{total_products, total_skus, total_available_boxes,
+        total_available_packets}` across every non-DRAFT product's
+        variants -- one aggregate query, database-side (never loads every
+        variant into Python the way the product-list page's own
+        `total_packets` computation does; the formula is identical:
+        `available_quantity * packets_per_box`, confirmed against
+        `app.api.v1.endpoints.inventory`'s existing per-product
+        computation -- never `pack_size`, which is a different factor).
+        """
+        stmt = (
+            select(
+                func.count(func.distinct(Product.id)),
+                func.count(ProductVariant.id),
+                func.coalesce(func.sum(ProductVariant.available_quantity), 0),
+                func.coalesce(
+                    func.sum(ProductVariant.available_quantity * ProductVariant.packets_per_box), 0
+                ),
+            )
+            .select_from(ProductVariant)
+            .join(Product, Product.id == ProductVariant.product_id)
+            .where(Product.status != ProductStatus.DRAFT)
+        )
+        result = await self.session.execute(stmt)
+        total_products, total_skus, total_boxes, total_packets = result.one()
+        return {
+            "total_products": int(total_products or 0),
+            "total_skus": int(total_skus or 0),
+            "total_available_boxes": int(total_boxes or 0),
+            "total_available_packets": int(total_packets or 0),
+        }
+
+    async def low_and_out_of_stock_counts(self, *, low_stock_threshold: int) -> tuple[int, int]:
+        """`(low_stock_count, out_of_stock_count)` across every non-DRAFT
+        product's variants, using the same threshold
+        `InventoryService.get_low_stock_threshold`/`compute_stock_status`
+        already applies per-variant elsewhere -- never a second,
+        separately-reasoned threshold.
+        """
+        base = (
+            select(func.count(ProductVariant.id))
+            .select_from(ProductVariant)
+            .join(Product, Product.id == ProductVariant.product_id)
+            .where(Product.status != ProductStatus.DRAFT)
+        )
+        out_of_stock = await self.session.scalar(
+            base.where(ProductVariant.available_quantity <= 0)
+        )
+        low_stock = await self.session.scalar(
+            base.where(
+                ProductVariant.available_quantity > 0,
+                ProductVariant.available_quantity <= low_stock_threshold,
+            )
+        )
+        return int(low_stock or 0), int(out_of_stock or 0)
 
     async def get_by_id_with_product(self, id_: uuid.UUID) -> ProductVariant | None:
         stmt = (

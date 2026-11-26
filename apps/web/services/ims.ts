@@ -114,10 +114,13 @@ export function useCategoryOptions() {
     queryFn: () => get<{ items: string[] }>("/filters/categories").then((d) => d.items),
   })
 }
-export function useCatalogVariantSearch(q: string, enabled = true) {
+export function useCatalogVariantSearch(q: string, enabled = true, warehouseId?: string) {
   return useQuery({
-    queryKey: ["ims", "catalog", "variants", q],
-    queryFn: () => get<{ items: CatalogVariantHit[] }>("/catalog/variants", { q, limit: 15 }).then((d) => d.items),
+    queryKey: ["ims", "catalog", "variants", q, warehouseId],
+    queryFn: () =>
+      get<{ items: CatalogVariantHit[] }>("/catalog/variants", { q, limit: 50, warehouse_id: warehouseId }).then(
+        (d) => d.items
+      ),
     enabled,
   })
 }

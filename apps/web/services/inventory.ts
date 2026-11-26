@@ -5,6 +5,8 @@ import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
   CatalogName,
   CatalogVariantStockAdjustment,
+  InventoryDashboard,
+  InventoryDashboardFilters,
   InventoryMovement,
   InventoryMovementFilters,
   InventoryProductStock,
@@ -37,6 +39,26 @@ export function useInventoryProducts(params: ProductListParams) {
   return useQuery({
     queryKey: ["inventory", "products", params],
     queryFn: () => fetchProducts(params),
+    placeholderData: (previous) => previous,
+  })
+}
+
+async function fetchDashboard(params: InventoryDashboardFilters): Promise<InventoryDashboard> {
+  const response = await apiClient.get<ApiResponse<InventoryDashboard>>("/inventory/dashboard", {
+    params: { date_from: params.date_from, date_to: params.date_to },
+  })
+  if (!response.data.data) throw new Error("Dashboard data unavailable.")
+  return response.data.data
+}
+
+/** Module 1.1 — the Inventory dashboard cards. `date_from`/`date_to`
+ * only scope `inward_boxes_in_range`/`outward_boxes_in_range`; every
+ * other field is all-time and unaffected by them.
+ */
+export function useInventoryDashboard(params: InventoryDashboardFilters) {
+  return useQuery({
+    queryKey: ["inventory", "dashboard", params],
+    queryFn: () => fetchDashboard(params),
     placeholderData: (previous) => previous,
   })
 }
@@ -96,6 +118,9 @@ async function fetchMovements(
         catalog_variant_id: params.catalog_variant_id,
         order_id: params.order_id,
         movement_type: params.movement_type,
+        sku: params.sku || undefined,
+        date_from: params.date_from,
+        date_to: params.date_to,
       },
     }
   )
