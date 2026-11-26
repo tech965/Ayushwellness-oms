@@ -43,6 +43,7 @@ class CodRemittance(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # --- verified bank credit (manual; never written by sync) -------------
     bank_credit_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     bank_credit_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    bank_verification_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     bank_credited_on: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     bank_verified_at: Mapped[datetime | None] = mapped_column(AwareDateTime(), nullable=True)
     bank_verified_by: Mapped[uuid.UUID | None] = mapped_column(

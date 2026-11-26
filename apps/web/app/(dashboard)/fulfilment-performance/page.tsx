@@ -28,6 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { formatDate } from "@/lib/format"
+import { formatShare } from "@/lib/percent"
 import { formatDays, paymentLabel } from "@/lib/shipment-labels"
 import { useDateRangeFilter } from "@/lib/use-date-range-filter"
 import { usePaginationState } from "@/lib/use-pagination"
@@ -39,6 +40,7 @@ import {
   useFulfilmentOrders,
   useFulfilmentPerformance,
   useFulfilmentPerformanceHistory,
+  useShipmentStatusAnalytics,
 } from "@/services/shipments"
 import type { FulfilmentScope, PerformanceOrderRow } from "@/types/shipment"
 
@@ -61,6 +63,24 @@ const SCOPE_TITLES: Record<FulfilmentScope, string> = {
 
 function shortDay(iso: string): string {
   return format(parseISO(iso), "d MMM")
+}
+
+/** "Based on 5,144 orders (54.2%)": the order count plus its share of every
+ * order in the same filtered period. The share is omitted (never shown as 0%)
+ * while the total is unknown or zero.
+ */
+function coverage(count: number, total: number | undefined): string {
+  const share = formatShare(count, total)
+  const base = `Based on ${plural(count, "order", "orders")}`
+  return share === "—" ? base : `${base} (${share})`
+}
+
+/** "11.7% of all 9,493 orders" for the pending-work cards. */
+function ofAll(count: number, total: number | undefined): string | undefined {
+  const share = formatShare(count, total)
+  return share === "—" || total === undefined
+    ? undefined
+    : `${share} of all ${total.toLocaleString("en-IN")} orders`
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -152,6 +172,9 @@ function FulfilmentPerformancePageContent() {
   const fulfilmentHistory = useFulfilmentPerformanceHistory(filters)
   const deliveryQuery = useDeliveryPerformance(filters)
   const deliveryHistory = useDeliveryPerformanceHistory(filters)
+  // Denominator for every percentage below: all orders under the SAME filters.
+  const totalsQuery = useShipmentStatusAnalytics(filters)
+  const totalOrders = totalsQuery.data?.total_orders
 
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const ordersQuery = useFulfilmentOrders({
@@ -276,7 +299,7 @@ function FulfilmentPerformancePageContent() {
                 <SelectableStatCard
                   label="Average Fulfilment Time"
                   value={formatDays(f.avg_fulfilment_days)}
-                  detail={`Based on ${plural(f.fulfilled_order_count, "order", "orders")}`}
+                  detail={coverage(f.fulfilled_order_count, totalOrders)}
                   description="Order confirmed to picked up by the courier"
                   accent="blue"
                   selected={isScope("fulfilled")}
@@ -285,7 +308,7 @@ function FulfilmentPerformancePageContent() {
                 <SelectableStatCard
                   label="Average Delivery Time"
                   value={formatDays(d.overall_avg_delivery_days)}
-                  detail={`Based on ${plural(d.delivered_order_count, "order", "orders")}`}
+                  detail={coverage(d.delivered_order_count, totalOrders)}
                   description="Courier pickup to delivered, all payment types"
                   accent="green"
                   selected={isScope("delivered")}
@@ -294,7 +317,7 @@ function FulfilmentPerformancePageContent() {
                 <SelectableStatCard
                   label="COD Average Delivery Time"
                   value={formatDays(d.cod_avg_delivery_days)}
-                  detail={`Based on ${plural(d.cod_delivered_order_count, "order", "orders")}`}
+                  detail={coverage(d.cod_delivered_order_count, totalOrders)}
                   description="Cash-on-delivery orders only"
                   accent="amber"
                   selected={isScope("cod_delivered")}
@@ -303,7 +326,7 @@ function FulfilmentPerformancePageContent() {
                 <SelectableStatCard
                   label="Prepaid Average Delivery Time"
                   value={formatDays(d.prepaid_avg_delivery_days)}
-                  detail={`Based on ${plural(d.prepaid_delivered_order_count, "order", "orders")}`}
+                  detail={coverage(d.prepaid_delivered_order_count, totalOrders)}
                   description="Prepaid orders only"
                   accent="violet"
                   selected={isScope("prepaid_delivered")}
@@ -311,6 +334,14 @@ function FulfilmentPerformancePageContent() {
                 />
               </div>
               <div className="text-muted-foreground space-y-1 text-xs">
+                <p>
+                  The percentage on each card is the share of all{" "}
+                  {totalOrders === undefined
+                    ? "orders"
+                    : `${totalOrders.toLocaleString("en-IN")} orders`}{" "}
+                  in this period that the average is based on. This is sample coverage,
+                  not delivery efficiency: it shows how much data backs each average.
+                </p>
                 {f.missing_pickup_timestamp_count > 0 && (
                   <p>
                     {plural(f.missing_pickup_timestamp_count, "order does", "orders do")}{" "}
@@ -361,6 +392,7 @@ function FulfilmentPerformancePageContent() {
               <SelectableStatCard
                 label="Pending Fulfilment"
                 value={f.pending_fulfilment_count}
+                detail={ofAll(f.pending_fulfilment_count, totalOrders)}
                 description="Ready to ship or waiting for pickup"
                 accent="amber"
                 selected={isScope("pending")}
@@ -369,6 +401,7 @@ function FulfilmentPerformancePageContent() {
               <SelectableStatCard
                 label="Pending for More Than 24 Hours"
                 value={f.pending_over_24h_count}
+                detail={ofAll(f.pending_over_24h_count, totalOrders)}
                 description="Waiting longer than one day"
                 accent="orange"
                 selected={isScope("pending_24h")}
@@ -377,6 +410,7 @@ function FulfilmentPerformancePageContent() {
               <SelectableStatCard
                 label="Pending for More Than 48 Hours"
                 value={f.pending_over_48h_count}
+                detail={ofAll(f.pending_over_48h_count, totalOrders)}
                 description="Waiting longer than two days"
                 accent="red"
                 selected={isScope("pending_48h")}

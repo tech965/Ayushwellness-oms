@@ -154,7 +154,8 @@ async def test_sync_is_idempotent_and_keeps_bank_verification(db_session: AsyncS
         amount=Decimal("300"),
         reference="BANK-77",
         credited_on=datetime(2026, 11, 12, tzinfo=UTC),
-        user_id=None,
+        reason="Checked against the bank statement",
+        user=None,
     )
     second = await svc.sync_remittances(_FakeAdapter([[record], [{"no_awb": 1}]]))
     assert second["created"] == 0 and second["updated"] == 1 and second["skipped"] == 1

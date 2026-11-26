@@ -1,5 +1,6 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from "axios"
 
+import { apiConfig } from "@/lib/api-config"
 import type { AccessTokenResult } from "@/types/auth"
 import type { ApiErrorResponse, ApiResponse } from "@/types/api"
 
@@ -12,7 +13,7 @@ const REFRESH_TOKEN_STORAGE_KEY = "oms_refresh_token"
  * feature service (orders, customers, ...) gets it for free.
  */
 export const apiClient = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1",
+  baseURL: apiConfig.baseUrl ?? undefined,
   timeout: 15_000,
 })
 
@@ -50,6 +51,10 @@ function clearStoredTokens(): void {
 }
 
 apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+  // A preview with no safe API sends nothing, not even to a per-request URL.
+  if (apiConfig.problem) {
+    throw new Error(`Preview API is not configured. ${apiConfig.problem}`)
+  }
   const token = getStoredAccessToken()
   if (token) {
     config.headers.set("Authorization", `Bearer ${token}`)

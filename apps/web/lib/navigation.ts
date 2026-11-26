@@ -1,6 +1,7 @@
 import type { LucideIcon } from "lucide-react"
 import {
   Activity,
+  Banknote,
   BarChart3,
   Bell,
   Boxes,
@@ -9,7 +10,9 @@ import {
   CreditCard,
   FileClock,
   Gauge,
+  HandCoins,
   History,
+  Landmark,
   LayoutDashboard,
   ListChecks,
   Map,
@@ -18,6 +21,7 @@ import {
   Package,
   PackageX,
   Phone,
+  ReceiptText,
   PhoneCall,
   Plug,
   Radar,
@@ -44,6 +48,11 @@ export interface NavItem {
    * `SidebarNav`) -- omit for items every `navGroups` user should see.
    */
   permission?: string
+  /** Sub-pages shown indented under this item (e.g. the two remittance
+   * reconciliation modules under "Reconciliation"). The parent stays a real
+   * page of its own.
+   */
+  children?: NavItem[]
 }
 
 export interface NavGroup {
@@ -152,12 +161,42 @@ export const navGroups: NavGroup[] = [
     label: "Operations",
     items: [
       { label: "Integrations", href: "/integrations", icon: Plug },
-      { label: "Reconciliation", href: "/reconciliation", icon: Scale },
+      {
+        label: "Reconciliation",
+        href: "/reconciliation",
+        icon: Scale,
+        children: [
+          {
+            label: "COD Remittance Reconciliation",
+            href: "/reconciliation/cod",
+            icon: Banknote,
+            permission: "reconciliation.read",
+          },
+          {
+            label: "Prepaid Remittance Reconciliation",
+            href: "/reconciliation/prepaid",
+            icon: Landmark,
+            permission: "reconciliation.read",
+          },
+        ],
+      },
       {
         label: "Shiprocket Wallet",
         href: "/shiprocket-wallet",
         icon: Wallet,
         permission: "analytics.read",
+      },
+      {
+        label: "Shiprocket Expenses",
+        href: "/shiprocket-finance/expenses",
+        icon: ReceiptText,
+        permission: "analytics.read",
+      },
+      {
+        label: "Shiprocket Remittances",
+        href: "/shiprocket-finance/remittances",
+        icon: HandCoins,
+        permission: "reconciliation.read",
       },
       { label: "Automation", href: "/automation", icon: Workflow },
       {

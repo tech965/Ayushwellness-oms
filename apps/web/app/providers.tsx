@@ -5,6 +5,7 @@ import { QueryClientProvider } from "@tanstack/react-query"
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools"
 import { ThemeProvider } from "next-themes"
 
+import { PreviewEnvironmentGuard } from "@/components/layout/preview-environment-guard"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { createQueryClient } from "@/lib/query-client"
 
@@ -14,7 +15,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
       <QueryClientProvider client={queryClient}>
-        <TooltipProvider>{children}</TooltipProvider>
+        <PreviewEnvironmentGuard>
+          <TooltipProvider>{children}</TooltipProvider>
+        </PreviewEnvironmentGuard>
         {process.env.NODE_ENV === "development" && (
           <ReactQueryDevtools initialIsOpen={false} />
         )}

@@ -10,6 +10,8 @@ interface SelectableStatCardProps {
   description?: string
   /** A second line such as "based on 1,204 orders". */
   detail?: string
+  /** Full definition, shown on hover. */
+  tooltip?: string
   selected?: boolean
   onClick: () => void
   /** Border/value accent so related cards read as a family. */
@@ -36,6 +38,7 @@ export function SelectableStatCard({
   value,
   description,
   detail,
+  tooltip,
   selected = false,
   onClick,
   accent = "blue",
@@ -45,6 +48,7 @@ export function SelectableStatCard({
     <button
       type="button"
       onClick={onClick}
+      title={tooltip}
       aria-pressed={selected}
       className={cn(
         "focus-visible:ring-ring rounded-xl text-left transition focus-visible:ring-2 focus-visible:outline-none",

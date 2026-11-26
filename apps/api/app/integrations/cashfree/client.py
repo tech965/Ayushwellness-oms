@@ -199,3 +199,42 @@ class CashfreeClient:
             "filters": filters,
         }
         return await self.request("POST", "/settlements", json=payload)
+
+    async def get_settlement_reconciliation(
+        self,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        cf_settlement_ids: list[str] | None = None,
+        settlement_utrs: list[str] | None = None,
+        cursor: str | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        """`POST /settlement/recon` (Settlement Reconciliation) -- the
+        transaction-level rows behind settlements: per event (payment /
+        refund / dispute / chargeback / reversal) the settlement id, UTR,
+        service charge, tax and the amount that was part of the settlement.
+        Cursor-paginated (max 1000). Per the official reference exactly one
+        of: settlement ids, UTRs, or a date range (here `*_initiated_on`,
+        ISO 8601) is used per call.
+        """
+        filters: dict[str, Any] = {}
+        if cf_settlement_ids:
+            filters["cf_settlement_ids"] = cf_settlement_ids
+        elif settlement_utrs:
+            filters["settlement_utrs"] = settlement_utrs
+        else:
+            if start_date:
+                filters["start_date_initiated_on"] = start_date
+            if end_date:
+                filters["end_date_initiated_on"] = end_date
+        payload: dict[str, Any] = {
+            "pagination": {"limit": min(limit, 1000), "cursor": cursor},
+            "filters": filters,
+        }
+        return await self.request("POST", "/settlement/recon", json=payload)
+
+    async def get_order_settlements(self, order_id: str) -> dict[str, Any]:
+        """`GET /orders/{order_id}/settlements` -- settlement details for
+        one order (used to fill in a single order on demand)."""
+        return await self.request("GET", f"/orders/{order_id}/settlements")

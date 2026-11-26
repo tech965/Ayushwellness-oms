@@ -60,6 +60,10 @@ what to do before trusting this in production.
 | `CASHFREE_API_URL` | No | `https://sandbox.cashfree.com/pg` (sandbox-safe default) | `https://api.cashfree.com/pg` for production |
 | `CASHFREE_WEBHOOK_SECRET` | No | unset → falls back to `CASHFREE_CLIENT_SECRET` | Only needed if this specific Cashfree account has a webhook signing key distinct from its client secret |
 | `CASHFREE_RETURN_URL` | No | unset (checkout works without it) | `order_meta.return_url` template; a `{order_id}` placeholder is substituted with the OMS order id |
+| `CASHFREE_SYNC_ENABLED` | No | `true` | Master switch for the scheduled settlement sync (§16). It still does nothing without credentials |
+| `CASHFREE_SYNC_INTERVAL_MINUTES` | No | `60` (min. 5 enforced) | Beat interval. Cashfree rate-limits Get Settlements to 30/min in production |
+| `CASHFREE_SYNC_INITIAL_DAYS` | No | `30` | Window pulled by the very first sync |
+| `CASHFREE_SYNC_LOOKBACK_DAYS` | No | `7` | Each later sync re-reads this many days before the last successful sync, so a settlement that changed status is refreshed |
 
 Never logged: `CASHFREE_CLIENT_SECRET`, `CASHFREE_WEBHOOK_SECRET`, or any
 resolved webhook secret value — confirmed by
@@ -307,7 +311,7 @@ next step — not implemented here to avoid speculative complexity.
   branches on this field — confirmed by inspection) rather than adding
   one via an Alembic `ALTER TYPE ... ADD VALUE` migration for a purely
   descriptive column.
-- Reconciliation is on-demand only (§13) — no scheduled task.
+- Payment reconciliation by order is on-demand (§13). Settlement/transaction synchronisation for Module 7 is scheduled — see §16.
 - A webhook for a Cashfree order created entirely outside this OMS (the
   confirmed Shopify -> Cashfree -> webhook architecture) now creates a
   `Payment` on first arrival by resolving `Order.order_number` from the
@@ -321,3 +325,145 @@ next step — not implemented here to avoid speculative complexity.
 **Do not claim this integration is fully working in production until a
 real Cashfree payment has been completed and a real Cashfree webhook has
 been received and processed by the deployed OMS** (§14, step 8).
+
+
+## 16. Module 7 — API-first settlement synchronisation
+
+Module 7 (prepaid reconciliation) pulls Cashfree data through the
+**existing** client/config/normalizer/sync services (nothing is duplicated;
+`app/services/cashfree_gateway_sync_service.py` only orchestrates). One
+sync run, triggered by the Celery beat task `cashfree.sync_settlements`
+(every `CASHFREE_SYNC_INTERVAL_MINUTES`), by **Sync Now** in the UI
+(`POST /api/v1/remittance-reconciliation/prepaid/cashfree/sync`, needs
+`reconciliation.upload`), does three steps:
+
+| Step | Cashfree API (official reference) | Stored in |
+|---|---|---|
+| transactions | `POST /recon` (nested rows now accepted) | `Payment` via the unchanged `apply_payment_event` |
+| settlement lots | `POST /settlements` (date range, cursor pagination ≤ 1000) | `cashfree_settlements` (id, status, UTR, gross, charges, tax, net) |
+| transaction-level settlement rows | `POST /settlement/recon` (`start/end_date_initiated_on`, cursor pagination) | `gateway_settlement_lines` with `source='api'` |
+
+`GET /orders/{id}/settlements` is available on the client for single-order lookups.
+
+**Matching.** Rows are matched to OMS orders by exact id only, reusing the
+upload matcher: Cashfree `cf_payment_id` → `Payment.external_transaction_id`,
+then `order_id` → `Order.order_number` (with/without `#`). Unmatched rows stay
+visible in the Unmatched report; a manual match is never overwritten by a re-sync.
+
+**Duplicate prevention / retry.** Each settlement row is keyed by Cashfree's
+`event_id` (`dedupe_key`), so any window can be re-run: new rows are inserted,
+changed rows updated in place, identical rows left alone. A run takes a DB
+lock with a 15-minute TTL (so a worker and a Sync Now click never overlap, and
+a crashed run cannot block forever). Transient errors (timeout, 429, 5xx) are
+retried with backoff by the client. The "synced through" watermark only
+advances after a fully successful run, so a failed/partial run is retried over
+the same window next time.
+
+**Sync Now runs on the Celery worker.** The API only publishes
+`cashfree.sync_manual` (default `celery` queue) and returns. It needs a broker
+it can reach (`CELERY_BROKER_URL`, or `REDIS_URL`) that is the **same** one the
+worker consumes. Both need the Cashfree credentials: the API to know it is
+configured, the worker to sync. While waiting, the status shows *queued*;
+repeated clicks queue nothing more. If the broker is unreachable the request
+returns 503 within 10 seconds. A message no worker finishes within 15 minutes
+expires and shows as failed. While another sync holds the lock, the task retries
+every 60 seconds, up to 5 times.
+
+**Status tracking.** `gateway_sync_states` records last attempt, last
+*successful* sync, status (`ok`/`partial`/`failed`/`auth_error`/`not_configured`),
+a sanitised error, trigger and last webhook time. The UI shows connection
+status and the last successful sync; with no credentials, or if Cashfree rejects
+them (401/403), it shows **Not Configured** and no Cashfree figures.
+
+**Webhook.** `POST /api/v1/webhooks/cashfree/settlement` handles
+`SETTLEMENT_INITIATED/SUCCESS/FAILED/REVERSED` with the same raw-body signature
+check as the payment webhook. It updates the lot's status/UTR (never backwards:
+a late INITIATED cannot undo SUCCESS), re-derives its lines' status
+(failed/reversed lots fail their lines) and links bank credits by UTR.
+Add this URL and these events in the Cashfree dashboard (§7).
+
+**What is deliberately NOT concluded from Cashfree.**
+* **Reported vs bank-confirmed.** *Total Settlement Received* is the successful
+  net settlement the gateway reports. *Prepaid Bank Confirmed* is the part of it
+  matched with actual bank credits by UTR / settlement reference. *Settlement
+  Difference* is expected net minus Total Settlement Received. COD follows the
+  same split: *Total COD Settled* (courier-reported) and *COD Bank Confirmed*.
+  The two are never added together; unmatched report lines and unlinked bank
+  credits are separate figures.
+* A settlement marked SUCCESS is **not** proof of a bank credit. A line counts
+  as bank-confirmed only when an uploaded bank-statement credit with the same
+  UTR is linked; until then the order stays *Partially reconciled*.
+* Events that are PENDING (or whose lot is pending / has no UTR) are stored but
+  never counted as settled; failed / reversed lots exclude their lines.
+* A missing `event_settlement_amount` is never invented — the row is skipped and
+  counted (`skipped_incomplete`).
+* Manual file upload stays available only as a fallback.
+
+**Interpretations to verify against a real sandbox before trusting production:**
+1. Refund / dispute / chargeback rows are stored with a negative net and their
+   reversals positive, regardless of the sign Cashfree sends (the reference does
+   not state it).
+2. Field names follow the official OpenAPI blocks (`event_details`,
+   `order_details`, `payment_details`, `settlement_details`); both nested and flat
+   rows are accepted.
+3. The reference describes the webhook signature as HMAC-SHA256 of
+   `timestamp + raw body` (base64); some pages show a different separator —
+   confirm with one real delivery.
+4. Cashfree's `cf_settlement_ids` filter is typed differently on two pages
+   (string vs integer); the client sends strings.
+
+Credentials never reach the frontend, logs, the status API or `last_error`
+(the stored error text is scrubbed of the configured client id/secret).
+
+
+### Accepted successful settlement statuses
+
+An **allowlist**. A settlement line counts toward *Total Settlement Received*,
+charges, GST and bank matching only when its status is one of these. Case,
+surrounding spaces, and spaces or hyphens inside the value are ignored.
+
+| Accepted status | Meaning |
+|---|---|
+| `success` | Cashfree's success value; also common in uploaded reports |
+| `successful` | Spelled-out form |
+| `settled` | Settled to the merchant |
+| `processed` | Settlement processed |
+| `completed` | Settlement completed |
+
+Every other value is **not** counted:
+
+* **Not successful** (recognised failures and in-flight states): `failed`,
+  `failure`, `reversed`, `cancelled`, `declined`, `rejected`, `void`, `error`,
+  `user_dropped`, `not_attempted`, `incomplete`, `flagged`, `pending`,
+  `initiated`, `processing`, `in_progress`, `on_hold`.
+* **Unverified** (blank, unknown or unfamiliar, for example `paid` or `ok`).
+  The line is kept and shown, with its amount under *Unverified lines*.
+
+This applies to uploaded reports from every gateway, so a report **without a
+Status column is entirely Unverified**. To correct it, upload the report again
+with recognised statuses: for rows already imported as Unverified, only the
+status is updated (audit logged). A recognised status is never changed by a
+later file.
+
+For API-synchronised lines the event status must be on the list, and when
+Cashfree sends a settlement (lot) status that must be on the list too. Confirm
+the exact values your account returns in the sandbox before go-live.
+
+To accept a new value, add it to `SUCCESS_LINE_STATES` in
+`apps/api/app/services/remittance_common.py` **and** to this table (a test
+keeps them identical).
+
+### Bank confirmation
+
+* **Statement-matched:** a bank statement credit whose reference equals the
+  report reference / UTR. It is linked for no more than the reference still
+  needs and the credit still has free.
+* **Manually verified:** ADMIN only (`reconciliation.adjust`), with a mandatory
+  reason, bank reference and amount, audit logged: a manual link of a statement
+  credit, or `POST /revenue-reconciliation/remittances/{awb}/verify-bank-credit`
+  for a Shiprocket remittance.
+* **Partial credits** count the amount actually credited. When one reference
+  covers several lines the credit is split pro rata to the paisa; no order under
+  that reference is *Matched* until the whole reference is covered (within Rs 1).
+* One rupee of a statement credit is used once: links plus manual verifications
+  never exceed the credit, across COD and prepaid.

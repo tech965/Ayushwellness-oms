@@ -60,6 +60,13 @@ class IntegrationError(OMSError):
     error_code = "integration_error"
 
 
+class ServiceUnavailableError(OMSError):
+    """Something the request depends on (e.g. the task queue) is unreachable."""
+
+    status_code = 503
+    error_code = "service_unavailable"
+
+
 class WebhookVerificationError(OMSError):
     status_code = 401
     error_code = "webhook_verification_error"

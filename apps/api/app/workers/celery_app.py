@@ -81,6 +81,7 @@ celery_app = Celery(
         "app.tasks.shiprocket_sync",
         "app.tasks.reconciliation_tasks",
         "app.tasks.cod_remittance_sync",
+        "app.tasks.cashfree_gateway_sync",
         "app.tasks.shiprocket_wallet_sync",
         "app.tasks.whatsapp_tasks",
         # Provider-specific task modules are added here as needed, e.g.:
@@ -221,6 +222,12 @@ celery_app.conf.update(
         "sync-cod-remittances": {
             "task": "shiprocket.sync_cod_remittances",
             "schedule": 3600.0,
+        },
+        # Module 7: Cashfree transactions + settlements + settlement lines.
+        # Idempotent; a no-op when Cashfree is not configured.
+        "sync-cashfree-settlements": {
+            "task": "cashfree.sync_settlements",
+            "schedule": float(max(settings.CASHFREE_SYNC_INTERVAL_MINUTES, 5) * 60),
         },
         "reap-stale-sync-jobs": {
             "task": "sync.reap_stale",

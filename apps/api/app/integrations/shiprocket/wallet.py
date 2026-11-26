@@ -1,11 +1,14 @@
 """Parsers for Shiprocket wallet data.
 
-The response shapes of the wallet-balance, statement and serviceability
-endpoints are NOT verified against a live account (Shiprocket's reference
-docs are not machine-readable here). So every parser reads each field from
-a list of plausible keys and returns `None` when nothing matches -- it never
-invents a value, never turns a missing balance into 0, and never guesses a
-transaction direction.
+Shiprocket's public API collection (apidocs.shiprocket.in) documents
+`GET /account/details/wallet-balance` (`data.balance_amount`) and
+`GET /account/details/statement`, whose rows carry `transaction_id`,
+`order_id`, `channel_order_id`, `awb_code`, `action`, `charge`,
+`description`, `debit_amount`, `credit_amount`, `balance_amount` and
+`created_at` (the samples have empty values, so real value formats are still
+unverified against a live account). Other plausible keys are accepted too.
+Every parser returns `None` when nothing matches -- it never invents a value,
+never turns a missing balance into 0, and never guesses a direction.
 """
 
 from __future__ import annotations
@@ -106,7 +109,7 @@ _COURIER = ("courier_name", "courier", "courier_company")
 _DESC = ("description", "remarks", "narration", "note", "details")
 _STATUS = ("status", "transaction_status")
 _PAYREF = ("payment_reference", "payment_id", "utr", "gateway_reference")
-_BAL = ("balance", "closing_balance", "running_balance", "balance_after")
+_BAL = ("balance_amount", "balance", "closing_balance", "running_balance", "balance_after")
 
 
 def _direction(raw: dict[str, Any]) -> str | None:
@@ -115,12 +118,23 @@ def _direction(raw: dict[str, Any]) -> str | None:
         return "credit"
     if text in ("dr", "debit", "debited") or "debit" in text:
         return "debit"
-    credit, debit = _num(raw.get("credit")), _num(raw.get("debit"))
+    credit, debit = _split_amounts(raw)
     if credit and not debit:
         return "credit"
     if debit and not credit:
         return "debit"
     return None
+
+
+def _split_amounts(raw: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
+    """(credit, debit) from separate columns: the documented
+    `credit_amount` / `debit_amount`, else `credit` / `debit`."""
+    credit = _num(raw.get("credit_amount"))
+    debit = _num(raw.get("debit_amount"))
+    return (
+        credit if credit is not None else _num(raw.get("credit")),
+        debit if debit is not None else _num(raw.get("debit")),
+    )
 
 
 def classify(direction: str, text: str) -> str:
@@ -162,13 +176,19 @@ def normalize_wallet_transaction(raw: dict[str, Any]) -> dict[str, Any] | None:
     amount = _num(_first(raw, _AMOUNT))
     direction = _direction(raw)
     if amount is None:
-        amount = _num(raw.get("credit")) or _num(raw.get("debit"))
+        credit, debit = _split_amounts(raw)
+        if credit and debit:
+            return None  # both sides filled: the direction would be a guess
+        amount = credit or debit
     if when is None or amount is None or direction is None:
         return None
     amount = abs(amount)
     desc = _first(raw, _DESC)
     desc_text = str(desc) if desc is not None else ""
-    hint = f"{desc_text} {_first(raw, _DIR) or ''} {raw.get('category') or ''}"
+    hint = (
+        f"{desc_text} {_first(raw, _DIR) or ''} {raw.get('category') or ''} "
+        f"{raw.get('action') or ''}"
+    )
     ref = _first(raw, _REF)
     awb = _first(raw, _AWB)
     order = _first(raw, _ORDER)

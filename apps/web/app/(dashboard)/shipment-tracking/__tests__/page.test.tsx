@@ -361,4 +361,114 @@ describe("Shipment Tracking — CEO view", () => {
     await user.click(screen.getByRole("button", { name: /Total Orders/ }))
     expect(screen.getByRole("button", { name: /retry|try again/i })).toBeInTheDocument()
   })
+
+  describe("percentages of total orders", () => {
+    const withKpis = (
+      counts: Partial<Record<StatusGroupKey, number>>,
+      kpis: { fulfilled: number; delivered: number; rto: number }
+    ) => ({
+      ...analytics(counts),
+      total_fulfilled: kpis.fulfilled,
+      total_delivered: kpis.delivered,
+      total_rto: kpis.rto,
+    })
+    const setAnalytics = (data: unknown) =>
+      vi.mocked(useShipmentStatusAnalytics).mockReturnValue({
+        data,
+        isLoading: false,
+        isError: false,
+      } as unknown as ReturnType<typeof useShipmentStatusAnalytics>)
+    const card = (label: string) =>
+      screen.getByRole("button", { name: new RegExp(label) })
+
+    it("shows each card's count with its one-decimal share of total orders", () => {
+      setAnalytics(
+        withKpis({ new_orders: 1000 }, { fulfilled: 729, delivered: 351, rto: 154 })
+      )
+      renderWithProviders(<ShipmentTrackingPage />)
+      expect(card("Total Orders")).toHaveTextContent("1000")
+      expect(card("Total Orders")).toHaveTextContent("100.0% of total orders")
+      expect(card("Total Fulfilled")).toHaveTextContent("729")
+      expect(card("Total Fulfilled")).toHaveTextContent("72.9% of total orders")
+      expect(card("Total Delivered")).toHaveTextContent("35.1% of total orders")
+      expect(card("Total RTO")).toHaveTextContent("15.4% of total orders")
+    })
+
+    it("keeps the existing card descriptions", () => {
+      setAnalytics(
+        withKpis({ new_orders: 1000 }, { fulfilled: 729, delivered: 351, rto: 154 })
+      )
+      renderWithProviders(<ShipmentTrackingPage />)
+      expect(card("Total Delivered")).toHaveTextContent(
+        "Successfully reached the customer"
+      )
+      expect(card("Total Orders")).toHaveTextContent("Every order placed in this period")
+    })
+
+    it("computes from the response rather than from fixed numbers", () => {
+      setAnalytics(withKpis({ new_orders: 8 }, { fulfilled: 3, delivered: 1, rto: 2 }))
+      renderWithProviders(<ShipmentTrackingPage />)
+      expect(card("Total Fulfilled")).toHaveTextContent("37.5% of total orders")
+      expect(card("Total Delivered")).toHaveTextContent("12.5% of total orders")
+      expect(card("Total RTO")).toHaveTextContent("25.0% of total orders")
+    })
+
+    it("shows a dash, never 0%, NaN or Infinity, when there are no orders", () => {
+      setAnalytics(withKpis({}, { fulfilled: 0, delivered: 0, rto: 0 }))
+      renderWithProviders(<ShipmentTrackingPage />)
+      for (const label of [
+        "Total Orders",
+        "Total Fulfilled",
+        "Total Delivered",
+        "Total RTO",
+      ]) {
+        expect(card(label)).not.toHaveTextContent("of total orders")
+        expect(card(label)).toHaveTextContent("—")
+      }
+      expect(document.body.textContent).not.toMatch(/NaN|Infinity/)
+    })
+
+    it("shows category shares with one decimal in the breakdown", () => {
+      setAnalytics(
+        withKpis({ new_orders: 3, delivered: 1 }, { fulfilled: 1, delivered: 1, rto: 0 })
+      )
+      renderWithProviders(<ShipmentTrackingPage />)
+      const table = screen.getByText("Status breakdown").closest("section") as HTMLElement
+      const rowOf = (label: string) =>
+        within(table).getByText(label).closest("tr") as HTMLElement
+      expect(rowOf("New Orders")).toHaveTextContent("75.0%")
+      expect(rowOf("Successfully Delivered")).toHaveTextContent("25.0%")
+      expect(rowOf("Cancelled Orders")).toHaveTextContent("0.0%")
+    })
+
+    it("recomputes from the filtered response when a filter changes", async () => {
+      vi.mocked(useShipmentStatusAnalytics).mockImplementation(((filters: {
+        sku?: string
+      }) => ({
+        data: filters.sku
+          ? withKpis({ new_orders: 200 }, { fulfilled: 150, delivered: 50, rto: 10 })
+          : withKpis({ new_orders: 1000 }, { fulfilled: 729, delivered: 351, rto: 154 }),
+        isLoading: false,
+        isError: false,
+      })) as unknown as typeof useShipmentStatusAnalytics)
+      renderWithProviders(<ShipmentTrackingPage />)
+      expect(card("Total Delivered")).toHaveTextContent("35.1% of total orders")
+      fireEvent.change(screen.getByPlaceholderText("Filter by SKU"), {
+        target: { value: "A" },
+      })
+      expect(card("Total Orders")).toHaveTextContent("200")
+      expect(card("Total Delivered")).toHaveTextContent("25.0% of total orders")
+      expect(card("Total RTO")).toHaveTextContent("5.0% of total orders")
+    })
+
+    it("keeps the cards clickable with percentages shown", async () => {
+      const user = userEvent.setup()
+      setAnalytics(
+        withKpis({ new_orders: 1000 }, { fulfilled: 729, delivered: 351, rto: 154 })
+      )
+      renderWithProviders(<ShipmentTrackingPage />)
+      await user.click(card("Total Delivered"))
+      expect(lastDrilldownArgs()).toMatchObject({ kpi: "delivered", enabled: true })
+    })
+  })
 })

@@ -180,6 +180,24 @@ def extract_recon_rows(response: dict[str, Any]) -> tuple[list[dict[str, Any]], 
     return rows, cursor if isinstance(cursor, str) and cursor else None
 
 
+def flatten_recon_row(raw: dict[str, Any]) -> dict[str, Any]:
+    """Cashfree's reconciliation rows are documented as NESTED
+    (`event_details` / `order_details` / `payment_details` /
+    `settlement_details`); older/other shapes are flat. Both are accepted:
+    nested sections are merged in (without overriding a top-level key) and
+    the nested event fields get the flat names this module reads.
+    """
+    flat: dict[str, Any] = dict(raw)
+    for section in ("order_details", "payment_details", "settlement_details", "event_details"):
+        part = raw.get(section)
+        if isinstance(part, dict):
+            for key, value in part.items():
+                flat.setdefault(key, value)
+    # `status` in a nested row is the PAYMENT's status (payment_details);
+    # the event's own status stays reachable as `event_status`.
+    return flat
+
+
 def normalize_recon_row(raw: dict[str, Any]) -> dict[str, Any] | None:
     """One `/recon` row -> the exact kwargs
     `CashfreePaymentService.apply_payment_event` already accepts — reused
@@ -194,28 +212,29 @@ def normalize_recon_row(raw: dict[str, Any]) -> dict[str, Any] | None:
     ever excluded, so this never silently drops a genuine payment row
     over a field that turns out to be optional.
     """
-    event_type = raw.get("event_type")
+    flat = flatten_recon_row(raw)
+    event_type = flat.get("event_type")
     if event_type not in (None, _RECON_PAYMENT_EVENT_TYPE):
         return None
-    order_id = raw.get("order_id")
+    order_id = flat.get("order_id")
     if not order_id:
         return None
 
-    cf_payment_id = raw.get("cf_payment_id")
-    raw_amount = raw.get("payment_amount")
-    amount = extract_decimal_amount(raw, "payment_amount") if raw_amount is not None else None
+    cf_payment_id = flat.get("cf_payment_id")
+    raw_amount = flat.get("payment_amount")
+    amount = extract_decimal_amount(flat, "payment_amount") if raw_amount is not None else None
 
     return {
         "cashfree_order_id": str(order_id),
         "cf_payment_id": str(cf_payment_id) if cf_payment_id is not None else None,
-        "raw_status": raw.get("status"),
+        "raw_status": flat.get("status"),
         "amount": amount,
-        "currency": raw.get("payment_currency"),
+        "currency": flat.get("payment_currency"),
         # Not present on a /recon row (confirmed against the current API
         # reference) — never guessed; a webhook/reconcile-by-order delivery
         # is what actually populates `payment_metadata["payment_method"]`.
         "payment_method_name": None,
-        "paid_at": parse_iso_datetime(raw.get("payment_time")),
+        "paid_at": parse_iso_datetime(flat.get("payment_time")),
         "raw_payload": raw,
     }
 
@@ -263,6 +282,135 @@ def normalize_settlement_row(raw: dict[str, Any]) -> dict[str, Any] | None:
         "amount_settled": _amount("amount_settled"),
         "raw_external_payload": raw,
     }
+
+
+# --- Settlement reconciliation (POST /settlement/recon) --------------------
+
+# Event types (official reference): PAYMENT, REFUND, REFUND_REVERSAL,
+# DISPUTE, DISPUTE_REVERSAL, CHARGEBACK, CHARGEBACK_REVERSAL,
+# OTHER_ADJUSTMENT. The reference does not state the SIGN of
+# `event_settlement_amount` for debit events, so the OMS normalises it
+# (documented interpretation, see docs/integrations/cashfree.md): money
+# taken back from the merchant is stored NEGATIVE, money returned POSITIVE,
+# whatever sign Cashfree sent. OTHER_ADJUSTMENT keeps the sign as sent.
+_SETTLEMENT_DEBIT_EVENTS = frozenset({"REFUND", "DISPUTE", "CHARGEBACK"})
+_SETTLEMENT_CREDIT_BACK_EVENTS = frozenset(
+    {"REFUND_REVERSAL", "DISPUTE_REVERSAL", "CHARGEBACK_REVERSAL"}
+)
+
+
+def _opt_decimal(container: dict[str, Any], key: str) -> Decimal | None:
+    value = container.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        return extract_decimal_amount(container, key)
+    except Exception:  # noqa: BLE001 - an unparseable amount is "missing", never guessed
+        return None
+
+
+def normalize_settlement_recon_row(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """One `/settlement/recon` row -> kwargs for a `GatewaySettlementLine`
+    (API source). Returns `None` when the row cannot be used honestly:
+    no `event_settlement_amount` (the net settled amount is never invented)
+    or nothing to identify the event / its order or payment.
+
+    Settlement id, UTR, charges and tax are read exactly as provided; a
+    missing UTR stays `None` (the line then simply has no bank reference).
+    """
+    flat = flatten_recon_row(raw)
+    event_type = str(flat.get("event_type") or "").strip().upper() or None
+    net = _opt_decimal(flat, "event_settlement_amount")
+    if net is None:
+        return None
+    order_id = flat.get("order_id")
+    cf_payment_id = flat.get("cf_payment_id")
+    event_id = flat.get("event_id")
+    if not (event_id or order_id or cf_payment_id):
+        return None
+
+    if event_type in _SETTLEMENT_DEBIT_EVENTS:
+        net = -abs(net)
+    elif event_type in _SETTLEMENT_CREDIT_BACK_EVENTS:
+        net = abs(net)
+
+    event_amount = _opt_decimal(flat, "event_amount")
+    charge = _opt_decimal(flat, "event_service_charge")
+    tax = _opt_decimal(flat, "event_service_tax")
+    if charge is None and event_type in (None, _RECON_PAYMENT_EVENT_TYPE):
+        charge = _opt_decimal(flat, "payment_service_charge")
+    if tax is None and event_type in (None, _RECON_PAYMENT_EVENT_TYPE):
+        tax = _opt_decimal(flat, "payment_service_tax")
+
+    cf_settlement_id = flat.get("cf_settlement_id")
+    utr = flat.get("settlement_utr")
+    event_status = flat.get("event_status")
+    settled_at = parse_iso_datetime(flat.get("settlement_date")) or parse_iso_datetime(
+        flat.get("settlement_processed_on") or flat.get("settlement_initiated_on")
+    )
+    return {
+        "event_id": str(event_id) if event_id else None,
+        "event_type": event_type,
+        "gateway_transaction_id": str(cf_payment_id) if cf_payment_id is not None else None,
+        "order_ref": str(order_id) if order_id else None,
+        "cf_settlement_id": str(cf_settlement_id) if cf_settlement_id is not None else None,
+        "settlement_reference": (str(utr).strip() if utr else None) or None,
+        "gross_amount": abs(event_amount)
+        if event_amount is not None and event_type in (None, _RECON_PAYMENT_EVENT_TYPE)
+        else None,
+        "gateway_charges": abs(charge) if charge is not None else Decimal("0"),
+        "gst_amount": abs(tax) if tax is not None else Decimal("0"),
+        "refund_amount": abs(event_amount)
+        if event_amount is not None and event_type == "REFUND"
+        else Decimal("0"),
+        "net_amount": net,
+        "transaction_date": parse_iso_datetime(flat.get("event_time")),
+        "settlement_date": settled_at,
+        "line_status": str(event_status).strip().lower() if event_status else None,
+        "raw_row": raw,
+    }
+
+
+# --- Settlement webhooks ---------------------------------------------------
+
+SETTLEMENT_WEBHOOK_TYPES = frozenset(
+    {
+        "SETTLEMENT_INITIATED",
+        "SETTLEMENT_SUCCESS",
+        "SETTLEMENT_FAILED",
+        "SETTLEMENT_REVERSED",
+    }
+)
+
+
+def extract_settlement_webhook(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Settlement webhook body -> `CashfreeSettlementRepository` kwargs, or
+    `None` if it carries no settlement id. Only the fields the webhook
+    actually provides are returned; absent ones stay absent (never zero).
+    """
+    data = payload.get("data")
+    settlement = data.get("settlement") if isinstance(data, dict) else None
+    if not isinstance(settlement, dict):
+        return None
+    settlement_id = settlement.get("settlement_id") or settlement.get("cf_settlement_id")
+    if not settlement_id:
+        return None
+    out: dict[str, Any] = {
+        "cf_settlement_id": str(settlement_id),
+        "status": settlement.get("status"),
+        "settlement_utr": settlement.get("utr") or settlement.get("settlement_utr"),
+        "settlement_initiated_on": parse_iso_datetime(
+            settlement.get("settlement_initiated_on") or settlement.get("initiated_on")
+        ),
+        "settlement_processed_on": parse_iso_datetime(
+            settlement.get("settlement_processed_on") or settlement.get("processed_on")
+        ),
+    }
+    for key in ("amount_settled", "payment_amount"):
+        value = _opt_decimal(settlement, key)
+        if value is not None:
+            out[key] = value
+    return out
 
 
 class CashfreeOrderPushNormalizer:

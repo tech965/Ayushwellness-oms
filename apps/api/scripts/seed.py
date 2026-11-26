@@ -82,6 +82,8 @@ PERMISSIONS: dict[str, str] = {
     "webhooks.read": "View webhook event log",
     "reconciliation.read": "View reconciliation runs and results",
     "reconciliation.manage": "Trigger a reconciliation run and resolve mismatches",
+    "reconciliation.upload": "Upload COD / prepaid settlement reports and bank statements",
+    "reconciliation.adjust": "Manually match, link or adjust remittance / settlement records",
     "marketplace.read": (
         "View the Marketplace Orders workspace (Amazon/Flipkart/Meesho orders, "
         "marketplace dashboard, marketplace reports)"

@@ -8,16 +8,32 @@ report themselves as DISCONNECTED when credentials are absent.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
+def _env_file() -> str:
+    """`.env` in the working directory, unless `OMS_ENV_FILE` names another file
+    (e.g. a staging one). Then ONLY that file is read, and it must exist: a typo
+    must never fall back to `.env`, which may point at another database and hold
+    live third-party credentials.
+    """
+    chosen = os.environ.get("OMS_ENV_FILE")
+    if chosen is None:
+        return ".env"
+    if not Path(chosen).is_file():
+        raise RuntimeError("OMS_ENV_FILE is set but that file does not exist. Refusing to start.")
+    return chosen
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -244,6 +260,16 @@ class Settings(BaseSettings):
     # back to a same-origin-safe default (no redirect) when unset, since
     # a wrong/unset return_url must never break checkout creation.
     CASHFREE_RETURN_URL: str | None = None
+    # Scheduled settlement/transaction synchronisation (Module 7). It only
+    # ever runs when the credentials above are present; with none it is a
+    # no-op and the UI shows "Not Configured". Cashfree rate-limits Get
+    # Settlements (30/min in production), so the default is hourly.
+    CASHFREE_SYNC_ENABLED: bool = True
+    CASHFREE_SYNC_INTERVAL_MINUTES: int = 60
+    CASHFREE_SYNC_INITIAL_DAYS: int = 30
+    # Each sync re-reads this many days before the last successful sync so
+    # a settlement that changed status since is refreshed (idempotent).
+    CASHFREE_SYNC_LOOKBACK_DAYS: int = 7
 
     # --- Address Validation ---
     # Primary/real provider: Google's Address Validation API

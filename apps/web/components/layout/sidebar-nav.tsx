@@ -103,9 +103,14 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
   const effectiveGroups = baseGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter(
-        (item) => !item.permission || hasPermission(item.permission)
-      ),
+      items: group.items
+        .filter((item) => !item.permission || hasPermission(item.permission))
+        .map((item) => ({
+          ...item,
+          children: item.children?.filter(
+            (child) => !child.permission || hasPermission(child.permission)
+          ),
+        })),
     }))
     .filter((group) => group.items.length > 0)
 
@@ -113,7 +118,10 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
     <nav className="flex flex-col gap-1 px-3 py-4">
       {effectiveGroups.map((group, index) => {
         const hasActiveItem = group.items.some(
-          (item) => pathname === item.href || pathname.startsWith(`${item.href}/`)
+          (item) =>
+            pathname === item.href ||
+            pathname.startsWith(`${item.href}/`) ||
+            Boolean(item.children?.some((child) => pathname.startsWith(child.href)))
         )
         // A folded group never hides the page the viewer is currently on,
         // and role-specific navs (a single group) are never foldable.
@@ -149,8 +157,13 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
               ))}
             {!isFolded &&
               group.items.map((item) => {
+                const childItems = item.children ?? []
+                // A parent that has sub-pages is only "active" on its own page;
+                // the sub-page link carries the highlight otherwise.
                 const isActive =
-                  pathname === item.href || pathname.startsWith(`${item.href}/`)
+                  childItems.length > 0
+                    ? pathname === item.href
+                    : pathname === item.href || pathname.startsWith(`${item.href}/`)
                 const Icon = item.icon
 
                 const link = (
@@ -188,7 +201,39 @@ export function SidebarNav({ collapsed = false }: { collapsed?: boolean }) {
                   </Link>
                 )
 
-                if (!collapsed) return link
+                if (!collapsed) {
+                  if (childItems.length === 0) return link
+                  return (
+                    <React.Fragment key={item.href}>
+                      {link}
+                      {childItems.map((child) => {
+                        const childActive =
+                          pathname === child.href || pathname.startsWith(`${child.href}/`)
+                        const ChildIcon = child.icon
+                        return (
+                          <Link
+                            key={child.href}
+                            href={child.href}
+                            prefetch={false}
+                            aria-current={childActive ? "page" : undefined}
+                            className={cn(
+                              "relative ml-4 flex items-center gap-2 rounded-md py-1.5 pr-3 pl-3 text-[0.8125rem] font-medium transition-colors",
+                              childActive
+                                ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold"
+                                : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"
+                            )}
+                          >
+                            {childActive && (
+                              <span className="bg-sidebar-primary absolute top-1/2 left-0 h-4 w-0.5 -translate-y-1/2 rounded-r-full" />
+                            )}
+                            <ChildIcon className="size-3.5 shrink-0" />
+                            {child.label}
+                          </Link>
+                        )
+                      })}
+                    </React.Fragment>
+                  )
+                }
 
                 return (
                   <Tooltip key={item.href}>

@@ -32,6 +32,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { formatDate } from "@/lib/format"
+import { formatPercent, formatShare } from "@/lib/percent"
 import {
   groupOfStatus,
   paymentLabel,
@@ -77,8 +78,13 @@ const METRIC_TITLES: Record<PartnerMetric, string> = {
   prepaid_success: "Delivered prepaid orders",
 }
 
+/** Chart values at the same one-decimal precision as the tables. */
+function oneDecimal(value: number | null): number | null {
+  return value === null ? null : Math.round(value * 10) / 10
+}
+
 function pct(value: number | null): string {
-  return value === null ? "—" : `${value}%`
+  return formatPercent(value)
 }
 
 function days(value: number | null): string {
@@ -144,10 +150,13 @@ function MetricCell({
   children,
   label,
   onOpen,
+  sub,
 }: {
   children: React.ReactNode
   label: string
   onOpen: () => void
+  /** Small denominator line under the number, e.g. "of 22 picked up". */
+  sub?: string
 }) {
   return (
     <TableCell className="text-right tabular-nums">
@@ -161,6 +170,11 @@ function MetricCell({
         }}
       >
         {children}
+        {sub && (
+          <span className="text-muted-foreground block text-[11px] font-normal">
+            {sub}
+          </span>
+        )}
       </button>
     </TableCell>
   )
@@ -195,6 +209,11 @@ function ShippingPartnersPageContent() {
 
   const allocationQuery = usePartnerAllocation(filters)
   const performanceQuery = usePartnerPerformance(filters)
+  // Performance rows by partner, so the allocation table can show each
+  // partner's delivery success / RTO % (same filters, same dataset).
+  const perfByKey = new Map(
+    (performanceQuery.data?.partners ?? []).map((row) => [row.courier_key, row])
+  )
 
   const { page, pageSize, setPage, resetPage } = usePaginationState()
   const ordersQuery = usePartnerOrders({
@@ -282,7 +301,9 @@ function ShippingPartnersPageContent() {
           <h3 className="text-base font-semibold">Order allocation</h3>
           <p className="text-muted-foreground text-xs">
             Orders with an identifiable courier, grouped by carrier. Each partner’s
-            original courier services are listed under its name.
+            original courier services are listed under its name. Allocation % is each
+            partner’s share of all allocated orders; delivery success % and RTO % are
+            measured against the orders that partner has picked up.
           </p>
         </div>
         <QueryStates
@@ -325,11 +346,20 @@ function ShippingPartnersPageContent() {
                       <TableHead>Shipping partner</TableHead>
                       <TableHead className="text-right">Orders allocated</TableHead>
                       <TableHead className="text-right">Allocation %</TableHead>
-                      <TableHead className="text-right">Avg. delivery time</TableHead>
+                      <TableHead className="hidden text-right whitespace-normal md:table-cell">
+                        Delivery success %
+                      </TableHead>
+                      <TableHead className="hidden text-right md:table-cell">
+                        RTO %
+                      </TableHead>
+                      <TableHead className="hidden text-right md:table-cell">
+                        Avg. delivery time
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {data.partners.map((row) => {
+                      const perf = perfByKey.get(row.courier_key)
                       const active =
                         selection?.partner === row.courier_key &&
                         selection.metric === "allocated"
@@ -359,14 +389,43 @@ function ShippingPartnersPageContent() {
                               names={row.service_names}
                               carrier={row.courier_name}
                             />
+                            {/* Small screens: the rate columns are hidden, so show them here. */}
+                            <span
+                              className="text-muted-foreground mt-1 block text-[11px] font-normal whitespace-normal md:hidden"
+                              data-testid="partner-rates-mobile"
+                            >
+                              Delivery success {pct(perf?.delivery_success_rate ?? null)}{" "}
+                              · RTO {pct(perf?.rto_percentage ?? null)}
+                              {perf ? ` (of ${perf.total_picked_up} picked up)` : ""} ·
+                              Avg. delivery {days(row.avg_delivery_days)}
+                            </span>
                           </TableCell>
                           <TableCell className="text-right tabular-nums">
                             {row.orders_allocated}
                           </TableCell>
                           <TableCell className="text-right tabular-nums">
-                            {row.allocation_percent}%
+                            {formatShare(
+                              row.orders_allocated,
+                              data.total_orders_allocated
+                            )}
                           </TableCell>
-                          <TableCell className="text-right tabular-nums">
+                          <TableCell className="hidden text-right tabular-nums md:table-cell">
+                            {pct(perf?.delivery_success_rate ?? null)}
+                            {perf && (
+                              <span className="text-muted-foreground block text-[11px]">
+                                of {perf.total_picked_up} picked up
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="hidden text-right tabular-nums md:table-cell">
+                            {pct(perf?.rto_percentage ?? null)}
+                            {perf && (
+                              <span className="text-muted-foreground block text-[11px]">
+                                of {perf.total_picked_up} picked up
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="hidden text-right tabular-nums md:table-cell">
                             {days(row.avg_delivery_days)}
                           </TableCell>
                         </TableRow>
@@ -409,13 +468,13 @@ function ShippingPartnersPageContent() {
             const success: ChartDatum[] = data.partners.map((p, i) => ({
               key: p.courier_key,
               label: p.courier_name,
-              value: p.delivery_success_rate,
+              value: oneDecimal(p.delivery_success_rate),
               color: colorOf(i),
             }))
             const rto: ChartDatum[] = data.partners.map((p) => ({
               key: p.courier_key,
               label: p.courier_name,
-              value: p.rto_percentage,
+              value: oneDecimal(p.rto_percentage),
               color: "#f97316",
             }))
             const selectedFor = (metric: PartnerMetric) =>
@@ -470,8 +529,8 @@ function ShippingPartnersPageContent() {
                       key: p.courier_key,
                       label: p.courier_name,
                       values: {
-                        cod: p.cod_delivery_success_rate,
-                        prepaid: p.prepaid_delivery_success_rate,
+                        cod: oneDecimal(p.cod_delivery_success_rate),
+                        prepaid: oneDecimal(p.prepaid_delivery_success_rate),
                       },
                     }))}
                     series={[
@@ -524,6 +583,11 @@ function ShippingPartnersPageContent() {
         >
           {(data) => (
             <>
+              <p className="text-muted-foreground text-xs">
+                Share of allocated = the partner’s orders ÷ all allocated orders. Delivery
+                success %, RTO % and the COD / Prepaid success rates are measured against
+                the orders the courier has picked up (shown under each figure).
+              </p>
               {!data.shipping_cost_available && (
                 <p className="text-muted-foreground text-xs">
                   Shipping costs are not available yet. They will appear once courier
@@ -536,6 +600,9 @@ function ShippingPartnersPageContent() {
                     <TableRow>
                       <TableHead>Shipping partner</TableHead>
                       <TableHead className="text-right">Allocated</TableHead>
+                      <TableHead className="text-right whitespace-normal">
+                        Share of allocated
+                      </TableHead>
                       <TableHead className="text-right">Picked up</TableHead>
                       <TableHead className="text-right">Delivered</TableHead>
                       <TableHead className="text-right whitespace-normal">
@@ -558,6 +625,11 @@ function ShippingPartnersPageContent() {
                   </TableHeader>
                   <TableBody>
                     {data.partners.map((row) => {
+                      const allocatedTotal = data.partners.reduce(
+                        (sum, partner) => sum + partner.total_allocated,
+                        0
+                      )
+                      const pickedUpSub = `of ${row.total_picked_up} picked up`
                       const open = (metric: PartnerMetric) =>
                         select({ metric, partner: row.courier_key })
                       const active = selection?.partner === row.courier_key
@@ -583,6 +655,12 @@ function ShippingPartnersPageContent() {
                           >
                             {row.total_allocated}
                           </MetricCell>
+                          <TableCell className="text-right tabular-nums">
+                            {formatShare(row.total_allocated, allocatedTotal)}
+                            <span className="text-muted-foreground block text-[11px]">
+                              of {allocatedTotal} allocated
+                            </span>
+                          </TableCell>
                           <MetricCell
                             label={`${row.courier_name} picked-up orders`}
                             onOpen={() => open("picked_up")}
@@ -598,12 +676,14 @@ function ShippingPartnersPageContent() {
                           <MetricCell
                             label={`${row.courier_name} delivered orders (success rate)`}
                             onOpen={() => open("delivered")}
+                            sub={pickedUpSub}
                           >
                             {pct(row.delivery_success_rate)}
                           </MetricCell>
                           <MetricCell
                             label={`${row.courier_name} RTO orders`}
                             onOpen={() => open("rto")}
+                            sub={pickedUpSub}
                           >
                             {pct(row.rto_percentage)}
                           </MetricCell>

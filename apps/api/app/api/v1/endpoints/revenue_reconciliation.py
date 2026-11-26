@@ -12,7 +12,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -166,9 +166,10 @@ async def sync_cod_remittances(
 
 
 class BankCreditVerification(BaseModel):
-    amount: Decimal
-    reference: str
+    amount: Decimal = Field(gt=0)
+    reference: str = Field(min_length=1, max_length=128)
     credited_on: datetime
+    reason: str = Field(min_length=3, max_length=255)
 
 
 @router.post("/remittances/{awb}/verify-bank-credit", response_model=ApiResponse[dict])
@@ -176,7 +177,8 @@ async def verify_bank_credit(
     awb: str,
     body: BankCreditVerification,
     session: AsyncSession = Depends(get_db),
-    user: User = Depends(require_permission("reconciliation.manage")),
+    # ADMIN only by default: this makes money count as bank confirmed.
+    user: User = Depends(require_permission("reconciliation.adjust")),
 ) -> ApiResponse[dict]:
     """Records that a person matched this remittance to a real bank credit.
     Shiprocket-reported remittance alone never counts as verified."""
@@ -185,6 +187,7 @@ async def verify_bank_credit(
         amount=body.amount,
         reference=body.reference,
         credited_on=body.credited_on,
-        user_id=user.id,
+        reason=body.reason,
+        user=user,
     )
     return ApiResponse(data={"awb": rem.awb, "bank_verified": True})

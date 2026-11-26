@@ -28,6 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { formatDate, formatDateTime } from "@/lib/format"
+import { formatShare } from "@/lib/percent"
 import {
   groupOfStatus,
   paymentLabel,
@@ -55,6 +56,14 @@ import type {
 } from "@/types/shipment"
 
 const ALL_COURIERS = "__all__"
+
+/** "72.9% of total orders" -- the share of every order in the current
+ * filtered period; "—" when there are no orders (never 0% or NaN).
+ */
+function ofTotal(count: number, total: number): string {
+  const share = formatShare(count, total)
+  return share === "—" ? "—" : `${share} of total orders`
+}
 
 type Selection =
   { type: "kpi"; key: StatusKpiKey } | { type: "group"; key: StatusGroupKey }
@@ -315,6 +324,7 @@ function ShipmentTrackingPageContent() {
                 <SelectableStatCard
                   label="Total Orders"
                   value={kpis.total}
+                  detail={ofTotal(kpis.total, kpis.total)}
                   description="Every order placed in this period"
                   accent="blue"
                   selected={isKpi("total")}
@@ -323,6 +333,7 @@ function ShipmentTrackingPageContent() {
                 <SelectableStatCard
                   label="Total Fulfilled"
                   value={kpis.fulfilled}
+                  detail={ofTotal(kpis.fulfilled, kpis.total)}
                   description="Handed to a courier or already fulfilled in Shopify"
                   accent="violet"
                   selected={isKpi("fulfilled")}
@@ -331,6 +342,7 @@ function ShipmentTrackingPageContent() {
                 <SelectableStatCard
                   label="Total Delivered"
                   value={kpis.delivered}
+                  detail={ofTotal(kpis.delivered, kpis.total)}
                   description="Successfully reached the customer"
                   accent="green"
                   selected={isKpi("delivered")}
@@ -339,6 +351,7 @@ function ShipmentTrackingPageContent() {
                 <SelectableStatCard
                   label="Total RTO"
                   value={kpis.rto}
+                  detail={ofTotal(kpis.rto, kpis.total)}
                   description="Being returned, or returned, to the warehouse"
                   accent="orange"
                   selected={isKpi("rto")}
@@ -424,7 +437,7 @@ function ShipmentTrackingPageContent() {
                                 {group.count}
                               </TableCell>
                               <TableCell className="text-right tabular-nums">
-                                {group.percent_of_total}%
+                                {formatShare(group.count, kpis.total)}
                               </TableCell>
                             </TableRow>
                           )
