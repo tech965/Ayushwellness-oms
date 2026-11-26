@@ -501,6 +501,135 @@ async def test_full_order_to_shipment_to_awb_to_tracking_flow(db_session: AsyncS
     }.issubset(set(audit_actions))
 
 
+# Module 4.1: the operator-triggered "Refresh Tracking" action
+# (`refresh_tracking_for_shipment`) is a second, separate ingestion path
+# from the scheduled pull-sync (`app.integrations.shiprocket.sync.
+# refresh_tracking`, covered in test_shiprocket_sync.py) -- both must
+# persist pickup_date/actual_delivery_date identically.
+async def test_manual_refresh_tracking_action_also_persists_pickup_date(
+    db_session: AsyncSession,
+) -> None:
+    order = await _make_order(db_session, "OMS-SR-MILESTONE")
+    client = _StubClient(
+        [
+            _create_order_response(shipment_id="8888"),
+            _assign_awb_response(awb="AWBMILESTONE"),
+            {
+                "tracking_data": {
+                    "shipment_track_activities": [
+                        {
+                            "id": 1,
+                            "status": "PICKED UP",
+                            "date": "2026-02-10 08:00:00",
+                            "activity": "Picked up",
+                        }
+                    ]
+                }
+            },
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    service = ShiprocketOperationsService(db_session)
+
+    shipment = await service.create_shipment_for_order(order.id, actor=None)
+    shipment = await service.assign_awb(shipment.id, actor=None, courier_id=None)
+    shipment = await service.refresh_tracking_for_shipment(shipment.id, actor=None)
+
+    assert shipment.pickup_date == datetime(2026, 2, 10, 8, 0, 0)
+    assert shipment.actual_delivery_date is None
+
+
+# Module 1.2: the manual "Refresh Tracking" action previously never
+# reached `apply_dispatch` at all (unlike the webhook/pull-sync paths,
+# both routed through `apply_tracking_event`) -- confirmed here with a
+# real matching `ProductVariant` so the dispatch can actually decrement
+# stock, not just log an unresolved-SKU skip.
+async def test_manual_refresh_tracking_action_reaches_the_guarded_dispatch_path(
+    db_session: AsyncSession,
+) -> None:
+    from app.models.inventory import InventoryMovement
+    from app.repositories.product import ProductRepository, ProductVariantRepository
+
+    product, _ = await ProductRepository(db_session).upsert_by_external_id(
+        source_system="shopify", external_id="prod-SKUDISPATCH", title="Ashwagandha"
+    )
+    variant, _ = await ProductVariantRepository(db_session).upsert_by_external_id(
+        source_system="shopify",
+        external_id="var-SKUDISPATCH",
+        product_id=product.id,
+        sku="SKUDISPATCH",
+        price=Decimal("499.00"),
+        available_quantity=10,
+        packets_per_box=1,
+        pack_size=1,
+    )
+    await db_session.commit()
+
+    order = await OrderService(db_session).create_order(
+        actor=None,
+        order_number="OMS-SR-DISPATCH",
+        customer_id=None,
+        order_datetime=datetime.now(UTC),
+        currency="INR",
+        payment_type=PaymentType.PREPAID,
+        shipping_charge=Decimal("0"),
+        notes=None,
+        items=[
+            OrderItemCreateRequest(
+                sku="SKUDISPATCH",
+                product_name="Ashwagandha",
+                quantity=2,
+                unit_price=Decimal("499.00"),
+            )
+        ],
+    )
+    order.status = OrderStatus.CONFIRMED
+    order.shipping_address = {
+        "line1": "123 Test St",
+        "city": "Mumbai",
+        "state": "MH",
+        "country": "India",
+        "pin_code": "400001",
+    }
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    client = _StubClient(
+        [
+            _create_order_response(shipment_id="9999"),
+            _assign_awb_response(awb="AWBDISPATCH"),
+            {
+                "tracking_data": {
+                    "shipment_track_activities": [
+                        {
+                            "id": 1,
+                            "status": "PICKED UP",
+                            "date": "2026-02-11 09:00:00",
+                            "activity": "Picked up",
+                        }
+                    ]
+                }
+            },
+        ]
+    )
+    register_adapter(ShiprocketAdapter(client=client))
+    service = ShiprocketOperationsService(db_session)
+
+    shipment = await service.create_shipment_for_order(order.id, actor=None)
+    shipment = await service.assign_awb(shipment.id, actor=None, courier_id=None)
+    await service.refresh_tracking_for_shipment(shipment.id, actor=None)
+
+    refreshed_variant = await db_session.get(type(variant), variant.id)
+    assert refreshed_variant.available_quantity == 8  # 10 - 2, actually deducted
+
+    moved = await db_session.execute(
+        select(func.count())
+        .select_from(InventoryMovement)
+        .where(InventoryMovement.order_id == order.id)
+    )
+    assert moved.scalar_one() == 1
+
+
 # --- bulk-ship eligibility validation (shared with create_shipment_for_order) --
 
 

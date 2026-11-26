@@ -211,6 +211,15 @@ class Settings(BaseSettings):
     NIMBUSPOST_PASSWORD: str | None = None
     NIMBUSPOST_API_KEY: str | None = None
     NIMBUSPOST_API_URL: str = "https://api.nimbuspost.com/v1/"
+    # Webhook subscription signing secret (New/v2 format, `x-nimbus-
+    # signature: sha256=<hex HMAC-SHA256>`) -- shown once in the
+    # `POST /v2/webhooks` response when the subscription is created, and
+    # again on a `PATCH .../secret` rotation. NOT the same value as
+    # NIMBUSPOST_PASSWORD/NIMBUSPOST_API_KEY above. Unset means the
+    # webhook receiver rejects every delivery (see
+    # `app.integrations.nimbuspost.webhooks.verify_webhook_signature`,
+    # which never treats an absent secret as "skip verification").
+    NIMBUSPOST_WEBHOOK_SECRET: str | None = None
 
     # --- Cashfree (optional — connected when credentials are present; the
     # API never fails to start without them). Payments API version

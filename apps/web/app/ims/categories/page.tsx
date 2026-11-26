@@ -38,7 +38,18 @@ function ProductImage({ url, name }: { url: string | null; name: string }) {
 const TXN_TYPES = [
   { label: "Add Stock", value: "add" },
   { label: "Reduce Stock", value: "reduce" },
+  { label: "Opening Stock", value: "opening" },
 ]
+
+/** "Opening Stock" moves stock exactly like "Add Stock" (same
+ * `adjustment_type`/`direction` sent to `/stock/adjustments` -- no
+ * backend schema change) -- it exists only so the reason/remarks field
+ * records WHY the stock was added, distinguishing an initial opening
+ * balance from routine restocking in Inventory History without a new
+ * ledger concept. */
+function adjustmentTypeFor(txnType: string): "increase" | "decrease" {
+  return txnType === "reduce" ? "decrease" : "increase"
+}
 
 /** Add/reduce stock for one product (a flavour or product group on the
  * Categories page). Reuses the existing `/stock/adjustments` endpoint --
@@ -88,8 +99,8 @@ function ProductStockDialog({
         idempotency_key: key,
         warehouse_id: warehouse,
         item_id: itemId,
-        adjustment_type: txnType === "add" ? "increase" : "decrease",
-        direction: txnType === "add" ? "in" : "out",
+        adjustment_type: adjustmentTypeFor(txnType),
+        direction: txnType === "reduce" ? "out" : "in",
         quantity: n,
         reason: reason.trim(),
       },
@@ -146,7 +157,7 @@ function ProductStockDialog({
               id="product-stock-reason"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
-              placeholder="e.g. Physical count correction"
+              placeholder={txnType === "opening" ? "e.g. Opening balance on IMS go-live" : "e.g. Physical count correction"}
             />
           </div>
           <ErrorNote error={adjust.error} />

@@ -228,6 +228,10 @@ async def test_valid_webhook_updates_shipment_matched_by_awb(
 
     refreshed = await db_session.get(Shipment, shipment.id)
     assert refreshed.current_status == ShipmentStatus.DELIVERED
+    # Module 4.1: the webhook path shares `apply_tracking_event` with the
+    # scheduled pull-sync, so a real DELIVERED webhook must persist
+    # actual_delivery_date too, not just advance current_status.
+    assert refreshed.actual_delivery_date == datetime(2026, 1, 10, 12, 0, 0)
 
     events = (
         await db_session.execute(

@@ -288,6 +288,48 @@ class CatalogVariantStockAdjustmentResponse(BaseModel):
     created_at: datetime
 
 
+class InventoryDashboardResponse(BaseModel):
+    """Module 1.1/Module 1 — every field is a live aggregate (see
+    `InventoryService.get_dashboard`), never a hardcoded or sample value.
+
+    Formulas (all in boxes, the same unit as `ProductVariant.
+    available_quantity`):
+      physical_stock_boxes    = total_available_boxes (today's on-hand total)
+      reserved_stock_boxes    = SUM(active legacy order reservations)
+      available_to_sell_boxes = physical_stock_boxes - reserved_stock_boxes
+      opening_stock_boxes     = total_available_boxes - all-time ledger delta (unscoped by date)
+      inward_boxes_in_range   = SUM(positive ledger deltas) within [date_from, date_to]
+      outward_boxes_in_range  = SUM(|negative ledger deltas|) within [date_from, date_to]
+      rto_in_transit_boxes    = dispatched boxes whose RTO is courier INITIATED/IN_TRANSIT
+      rto_awaiting_verification_boxes = dispatched boxes whose RTO is courier-delivered
+        but not yet warehouse-verified (RTO.restock_status == AWAITING_VERIFICATION)
+
+    `opening_stock_boxes`/`inward_boxes_in_range`/`outward_boxes_in_range`
+    are never combined into one figure. `rto_in_transit_boxes` and
+    `rto_awaiting_verification_boxes` are mutually exclusive sets (a
+    package is in exactly one of the two, or neither) and NEITHER is
+    counted in `physical_stock_boxes` -- stock in either state has
+    already left the warehouse and has not yet been added back.
+    """
+
+    total_products: int
+    total_skus: int
+    total_available_boxes: int
+    total_available_packets: int
+    opening_stock_boxes: int
+    inward_boxes_in_range: int
+    outward_boxes_in_range: int
+    rto_in_transit_boxes: int
+    rto_in_transit_count: int
+    rto_awaiting_verification_boxes: int
+    rto_awaiting_verification_count: int
+    low_stock_count: int
+    out_of_stock_count: int
+    physical_stock_boxes: int
+    reserved_stock_boxes: int
+    available_to_sell_boxes: int
+
+
 class PacketsPerBoxUpdateRequest(BaseModel):
     packets_per_box: int = Field(gt=0, description="Packets contained in one box.")
 

@@ -2039,3 +2039,153 @@ async def test_incremental_shipment_sync_stays_in_backlog_mode_while_a_cursor_is
     assert path == "/shipments"
     assert params["page"] == 4
     assert "sort" not in params  # plain backlog fetch(), not fetch_incremental()
+
+
+# --- Module 4.1: pickup_date / actual_delivery_date / expected_delivery_date persistence
+
+
+async def _refresh_once(db_session: AsyncSession, response: dict) -> None:
+    class _StubAdapter:
+        async def get_tracking(self, awb: str) -> dict:
+            return response
+
+    integration = (
+        await db_session.execute(
+            select(Integration).where(Integration.code == IntegrationCode.SHIPROCKET)
+        )
+    ).scalar_one_or_none()
+    if integration is None:
+        integration = await _make_shiprocket_integration(db_session)
+    sync_service = SyncService(db_session)
+    job = await sync_service.start_sync(
+        integration_id=integration.id, sync_type=SyncType.FULL, entity_type="tracking"
+    )
+    await refresh_tracking(db_session, job.id, _StubAdapter())
+    await sync_service.complete_sync(job.id, success=True)
+
+
+async def test_normal_pickup_and_delivery_persist_real_timestamps(
+    db_session: AsyncSession,
+) -> None:
+    _, shipment = await _make_order_with_shipment(
+        db_session, awb="MILESTONE1", current_status=ShipmentStatus.PENDING
+    )
+
+    await _refresh_once(
+        db_session, _tracking_response(status="PICKED UP", event_id=1, date="2026-02-01 09:00:00")
+    )
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.pickup_date == datetime(2026, 2, 1, 9, 0, 0)
+    assert refreshed.actual_delivery_date is None
+
+    await _refresh_once(
+        db_session, _tracking_response(status="DELIVERED", event_id=2, date="2026-02-03 15:30:00")
+    )
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.pickup_date == datetime(2026, 2, 1, 9, 0, 0)  # unchanged
+    assert refreshed.actual_delivery_date == datetime(2026, 2, 3, 15, 30, 0)
+
+
+async def test_duplicate_webhook_does_not_move_or_erase_timestamps(
+    db_session: AsyncSession,
+) -> None:
+    _, shipment = await _make_order_with_shipment(
+        db_session, awb="MILESTONE2", current_status=ShipmentStatus.PENDING
+    )
+    response = _tracking_response(status="PICKED UP", event_id=10, date="2026-02-01 09:00:00")
+
+    await _refresh_once(db_session, response)
+    await _refresh_once(db_session, response)  # exact same event_id+date -> deduped
+
+    total_events = await db_session.execute(
+        select(func.count())
+        .select_from(ShipmentEvent)
+        .where(ShipmentEvent.shipment_id == shipment.id)
+    )
+    assert total_events.scalar_one() == 1
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.pickup_date == datetime(2026, 2, 1, 9, 0, 0)
+
+
+async def test_out_of_order_event_does_not_overwrite_an_already_set_milestone(
+    db_session: AsyncSession,
+) -> None:
+    """A late-arriving pickup scan (earlier timestamp than an already-
+    processed in-transit event) must still set `pickup_date` once (it was
+    None), but a late-arriving, earlier-dated DELIVERED-adjacent event must
+    never move an already-set `actual_delivery_date`."""
+    _, shipment = await _make_order_with_shipment(
+        db_session, awb="MILESTONE3", current_status=ShipmentStatus.PENDING
+    )
+
+    # IN_TRANSIT arrives first (no PICKED_UP scan ever reached the OMS).
+    await _refresh_once(
+        db_session, _tracking_response(status="IN TRANSIT", event_id=20, date="2026-02-01 12:00:00")
+    )
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.pickup_date == datetime(2026, 2, 1, 12, 0, 0)  # backfilled from IN_TRANSIT
+
+    # DELIVERED arrives next, setting actual_delivery_date.
+    await _refresh_once(
+        db_session, _tracking_response(status="DELIVERED", event_id=21, date="2026-02-02 10:00:00")
+    )
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.actual_delivery_date == datetime(2026, 2, 2, 10, 0, 0)
+
+    # A genuinely late, earlier-dated PICKED_UP scan now shows up (different
+    # event_id/date -> not deduped, a real new ShipmentEvent).
+    await _refresh_once(
+        db_session, _tracking_response(status="PICKED UP", event_id=19, date="2026-01-31 08:00:00")
+    )
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.pickup_date == datetime(2026, 2, 1, 12, 0, 0)  # still the first value, unmoved
+    assert refreshed.actual_delivery_date == datetime(2026, 2, 2, 10, 0, 0)  # unmoved
+
+
+async def test_repeated_delivered_event_does_not_move_actual_delivery_date(
+    db_session: AsyncSession,
+) -> None:
+    _, shipment = await _make_order_with_shipment(
+        db_session, awb="MILESTONE4", current_status=ShipmentStatus.PENDING
+    )
+    await _refresh_once(
+        db_session, _tracking_response(status="DELIVERED", event_id=30, date="2026-02-05 11:00:00")
+    )
+    # A second, genuinely different DELIVERED event (e.g. a courier
+    # resending a "confirmed delivered" activity with a later timestamp)
+    # must never move the already-recorded actual_delivery_date.
+    await _refresh_once(
+        db_session, _tracking_response(status="DELIVERED", event_id=31, date="2026-02-05 11:45:00")
+    )
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.actual_delivery_date == datetime(2026, 2, 5, 11, 0, 0)
+
+
+async def test_missing_eta_leaves_expected_delivery_date_null(db_session: AsyncSession) -> None:
+    _, shipment = await _make_order_with_shipment(
+        db_session, awb="MILESTONE5", current_status=ShipmentStatus.PENDING
+    )
+    await _refresh_once(
+        db_session, _tracking_response(status="IN TRANSIT", event_id=40, date="2026-02-01 12:00:00")
+    )
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.expected_delivery_date is None  # never invented
+
+
+async def test_invalid_timestamp_event_is_dropped_not_guessed(db_session: AsyncSession) -> None:
+    _, shipment = await _make_order_with_shipment(
+        db_session, awb="MILESTONE6", current_status=ShipmentStatus.PENDING
+    )
+    await _refresh_once(
+        db_session, _tracking_response(status="PICKED UP", event_id=50, date="not-a-real-date")
+    )
+    refreshed = await ShipmentRepository(db_session).get_by_id(shipment.id)
+    assert refreshed.pickup_date is None
+    assert refreshed.current_status == ShipmentStatus.PENDING  # status never advanced either
+
+    total_events = await db_session.execute(
+        select(func.count())
+        .select_from(ShipmentEvent)
+        .where(ShipmentEvent.shipment_id == shipment.id)
+    )
+    assert total_events.scalar_one() == 0

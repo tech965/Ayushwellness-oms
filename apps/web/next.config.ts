@@ -1,6 +1,11 @@
 import type { NextConfig } from "next"
 
 const nextConfig: NextConfig = {
+  // Next's dev-mode cross-origin protection only allows "localhost" by
+  // default, not "127.0.0.1" -- without this, opening the app via
+  // 127.0.0.1 (as opposed to localhost) gets every _next/static chunk
+  // and the HMR websocket blocked with a 403.
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   // "standalone" output is only for the self-hosted Docker image
   // (docker/web.Dockerfile copies .next/standalone). Vercel's build
   // pipeline does its own function bundling/tracing and doesn't need

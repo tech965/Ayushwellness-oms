@@ -126,6 +126,23 @@ class RTOStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class RTORestockStatus(StrEnum):
+    """Warehouse verification state for an RTO's physical receipt --
+    separate from `RTOStatus` (the courier-reported shipment state).
+    `RTOStatus.RECEIVED` means the courier reports the package delivered
+    back to the warehouse; it only ever flips this to
+    `AWAITING_VERIFICATION`, never straight to `VERIFIED` -- restocking
+    `ProductVariant.available_quantity` always requires an explicit
+    `RTOService.verify_warehouse_receipt` call by warehouse staff. See
+    `app.models.rto.RTO`.
+    """
+
+    NOT_APPLICABLE = "not_applicable"
+    AWAITING_VERIFICATION = "awaiting_verification"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+
+
 class ReturnStatus(StrEnum):
     REQUESTED = "requested"
     APPROVED = "approved"

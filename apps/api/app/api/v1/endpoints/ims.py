@@ -75,7 +75,15 @@ async def dashboard(
 
 
 # ---------------------------------------------------------------- catalogue
-async def _register_lookup(session: AsyncSession, variant_ids: list[str]) -> dict[str, dict]:
+async def _register_lookup(
+    session: AsyncSession, variant_ids: list[str], *, warehouse_id: uuid.UUID | None = None
+) -> dict[str, dict]:
+    """`{variant_id: {item_id, total_stock}}` -- `total_stock` is
+    catalogue-wide by default, or scoped to one warehouse when
+    `warehouse_id` is given (the product-picker's "stock at this
+    warehouse" figure, reusing the exact same per-warehouse aggregate
+    `IMSService.get_stock_overview`'s own warehouse filter already uses
+    -- never a second, separately-computed quantity)."""
     if not variant_ids:
         return {}
     items = (
@@ -83,7 +91,9 @@ async def _register_lookup(session: AsyncSession, variant_ids: list[str]) -> dic
         .scalars()
         .all()
     )
-    qty = await IMSService(session)._qty_by_item(warehouse_id=None, item_ids=[i.id for i in items])  # noqa: SLF001
+    qty = await IMSService(session)._qty_by_item(  # noqa: SLF001
+        warehouse_id=warehouse_id, item_ids=[i.id for i in items]
+    )
     return {i.shopify_variant_id: {"item_id": str(i.id), "total_stock": qty.get(i.id, 0)} for i in items}
 
 
@@ -151,6 +161,9 @@ async def catalog_product(
 async def catalog_variants(
     q: str | None = Query(default=None, max_length=120),
     limit: int = Query(default=20, ge=1, le=50),
+    warehouse_id: uuid.UUID | None = Query(
+        default=None, description="Scope total_stock to this warehouse instead of catalogue-wide."
+    ),
     session: AsyncSession = Depends(get_db),
     _: User = Depends(require_permission(READ)),
 ) -> ApiResponse[dict]:
@@ -165,7 +178,7 @@ async def catalog_variants(
         }
         for p in products for v in p["variants"]
     ][:limit]
-    reg = await _register_lookup(session, [f["variant_id"] for f in flat])
+    reg = await _register_lookup(session, [f["variant_id"] for f in flat], warehouse_id=warehouse_id)
     return ApiResponse(
         data={"items": [{**f, **reg.get(f["variant_id"], {"item_id": None, "total_stock": 0})} for f in flat]}
     )

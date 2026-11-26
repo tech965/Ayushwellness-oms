@@ -37,6 +37,7 @@ from app.services.audit_service import AuditService
 from app.services.export_service import ExportService
 from app.services.live_orders import is_live_transient
 from app.services.order_ref import ensure_workflow
+from app.services.order_reservation_service import LegacyOrderReservationService
 
 ORDER_STATUS_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.PENDING: {OrderStatus.CONFIRMED, OrderStatus.CANCELLED},
@@ -85,6 +86,25 @@ _SHIPMENT_PROGRESS_BLOCK_MESSAGES: dict[ShipmentStatus, str] = {
     ),
 }
 
+# Same blocking-status set `unconfirm_order` already keys its own check
+# on (`_SHIPMENT_PROGRESS_BLOCK_MESSAGES`'s keys) -- shared here, never a
+# second, separately-reasoned definition of "this shipment has
+# progressed too far to safely undo/cancel."
+_SHIPMENT_PROGRESS_BLOCKING_STATUSES = frozenset(_SHIPMENT_PROGRESS_BLOCK_MESSAGES)
+
+
+def _first_shipment_progress_block(shipments) -> ShipmentStatus | None:  # noqa: ANN001
+    """First shipment status found in `_SHIPMENT_PROGRESS_BLOCKING_STATUSES`
+    among `shipments`, or `None`. Message wording is the caller's
+    responsibility -- a cancellation attempt and an unconfirm/revert
+    attempt read differently to an operator even though both are blocked
+    by the identical underlying condition.
+    """
+    for shipment in shipments:
+        if shipment.current_status in _SHIPMENT_PROGRESS_BLOCKING_STATUSES:
+            return shipment.current_status
+    return None
+
 
 class OrderService:
     def __init__(self, session: AsyncSession) -> None:
@@ -97,6 +117,22 @@ class OrderService:
         self.variants = ProductVariantRepository(session)
         self.shipments = ShipmentRepository(session)
         self.audit = AuditService(session)
+        self.reservations = LegacyOrderReservationService(session)
+
+    async def _resolve_variant_for_item(
+        self, *, product_variant_id: uuid.UUID | None, sku: str
+    ):
+        """Same resolution order as `InventoryService._resolve_variant`
+        (an explicit id first, falling back to the snapshot SKU string) --
+        kept as its own small lookup here rather than reaching into that
+        service's private helper, since `OrderService` already owns a
+        `ProductVariantRepository` instance for this exact purpose.
+        """
+        if product_variant_id is not None:
+            variant = await self.variants.get_by_id(product_variant_id)
+            if variant is not None:
+                return variant
+        return await self.variants.get_by_sku(sku)
 
     async def list_orders(
         self,
@@ -206,6 +242,7 @@ class OrderService:
             source_system="manual",
         )
 
+        reservation_lines: list[tuple[uuid.UUID, int]] = []
         for item in items:
             item_total = item.unit_price * item.quantity - item.discount_amount + item.tax_amount
             await self.order_items.create(
@@ -219,6 +256,22 @@ class OrderService:
                 tax_amount=item.tax_amount,
                 total_amount=item_total,
             )
+            variant = await self._resolve_variant_for_item(
+                product_variant_id=item.product_variant_id, sku=item.sku
+            )
+            if variant is not None:
+                reservation_lines.append((variant.id, item.quantity))
+
+        # Module 1 requirement 3 -- reserve the SKU quantity this order
+        # needs, all-or-nothing, before anything commits: a manual order
+        # creation with an HTTP caller present is the one path that can
+        # safely surface a 409 (`ConflictError`, raised by `reserve`) back
+        # to the operator rather than flag-and-proceed (contrast
+        # `upsert_synced_order`'s best-effort reservation below, which has
+        # no caller to return a 409 to). A line with no resolvable variant
+        # (unmatched SKU) is skipped here exactly like `apply_dispatch`
+        # skips it later -- never a reason to block order creation.
+        await self.reservations.reserve(order.id, reservation_lines)
 
         await self.payments.create(
             order_id=order.id,
@@ -264,8 +317,42 @@ class OrderService:
                 f"Cannot transition order from '{order.status.value}' to '{new_status.value}'."
             )
 
+        if new_status == OrderStatus.CANCELLED and not is_live_transient(order):
+            # Locks the same row `InventoryService.apply_dispatch` locks
+            # before it checks `Order.status` -- see that method's
+            # docstring. Whichever of the two gets here first is fully
+            # committed before the other proceeds, so this can never
+            # observe (or produce) a half-applied cancellation/dispatch.
+            locked_order = await self.orders.get_for_update(order_id)
+            if locked_order is not None:
+                order = locked_order
+            blocking_status = _first_shipment_progress_block(
+                await self.shipments.list_for_order(order_id)
+            )
+            if blocking_status is not None:
+                await self.audit.record(
+                    user=actor,
+                    action="order.cancellation_blocked",
+                    entity_type="order",
+                    entity_id=str(order.id),
+                    metadata={"blocking_shipment_status": blocking_status.value},
+                )
+                await self.session.commit()
+                raise ConflictError(
+                    "Cannot cancel this order because the shipment has already "
+                    f"reached '{blocking_status.value}'.",
+                    details={"error_type": "shipment_progressed"},
+                )
+
         previous_status = order.status
         await self.orders.update(order, status=new_status)
+        if new_status == OrderStatus.CANCELLED:
+            # Module 1 requirement 3 -- a cancellation that reaches this
+            # point has already passed the shipment-progress gate above,
+            # so no confirmed dispatch has consumed the reservation yet.
+            # Idempotent (`release` only touches ACTIVE rows), so it's
+            # always safe even if nothing was ever reserved for this order.
+            await self.reservations.release(order.id)
 
         await self.order_events.create(
             order_id=order.id,
@@ -755,9 +842,41 @@ class OrderService:
             if is_cancelled and order.status != OrderStatus.CANCELLED:
                 allowed = ORDER_STATUS_TRANSITIONS.get(order.status, set())
                 if OrderStatus.CANCELLED in allowed:
-                    await self.orders.update(order, status=OrderStatus.CANCELLED)
+                    blocking_status = None
+                    if not is_live_transient(order):
+                        # Same lock/guard `transition_status` uses for a
+                        # manual cancel -- a Shopify-driven cancellation
+                        # must never bypass it. No HTTP caller to return a
+                        # 409 to here, so a blocked outcome is recorded
+                        # (never raised) and the status is simply left
+                        # unchanged -- visible for manual reconciliation,
+                        # safe to retry on the next webhook/sync delivery.
+                        locked_order = await self.orders.get_for_update(order.id)
+                        if locked_order is not None:
+                            order = locked_order
+                        blocking_status = _first_shipment_progress_block(
+                            await self.shipments.list_for_order(order.id)
+                        )
+                    if blocking_status is not None:
+                        await self.audit.record(
+                            user=None,
+                            action="order.auto_cancel_blocked_shipment_progress",
+                            entity_type="order",
+                            entity_id=str(order.id),
+                            metadata={
+                                "blocking_shipment_status": blocking_status.value,
+                                "source_system": source_system,
+                            },
+                        )
+                    else:
+                        await self.orders.update(order, status=OrderStatus.CANCELLED)
+                        # Module 1 requirement 3 -- same release as a
+                        # manual `transition_status` cancel, see that
+                        # method's comment; idempotent either way.
+                        await self.reservations.release(order.id)
             created = False
 
+        reservation_lines: list[tuple[uuid.UUID, int]] = []
         for item in items_data:
             item = dict(item)
             item_external_id = item.pop("external_id")
@@ -775,6 +894,31 @@ class OrderService:
                 product_variant_id=product_variant_id,
                 **item,
             )
+            if product_variant_id is not None and item.get("quantity", 0) > 0:
+                reservation_lines.append((product_variant_id, item["quantity"]))
+
+        if reservation_lines and order.status not in (
+            OrderStatus.CANCELLED,
+            OrderStatus.DELIVERED,
+        ):
+            # Module 1 requirement 3 -- best-effort reservation for a
+            # Shopify-synced order (re-reserve is idempotent/quantity-
+            # updating per (variant, order), see `LegacyOrderReservationService.
+            # reserve`). Unlike `create_order`'s manual path, there is no
+            # HTTP caller here to return a 409 to, so insufficient stock
+            # is recorded for reconciliation (same "flag, never raise"
+            # philosophy as the auto-cancel block above) rather than
+            # failing an already-in-progress sync.
+            try:
+                await self.reservations.reserve(order.id, reservation_lines)
+            except ConflictError as exc:
+                await self.audit.record(
+                    user=None,
+                    action="order.reservation_insufficient_stock",
+                    entity_type="order",
+                    entity_id=str(order.id),
+                    metadata={"source_system": source_system, "details": exc.details},
+                )
 
         await self.payments.upsert_by_external_id(
             source_system=source_system,

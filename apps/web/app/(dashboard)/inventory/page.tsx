@@ -7,6 +7,8 @@ import { toast } from "sonner"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import { FilterBar } from "@/components/shared/filter-bar"
+import { InventoryDashboard } from "@/components/inventory/inventory-dashboard"
+import { MovementHistorySection } from "@/components/inventory/movement-history-section"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { ProductThumbnail } from "@/components/shared/product-thumbnail"
@@ -187,7 +189,8 @@ function StoredDataInventoryPage() {
         title="Inventory"
         description="Stock is owned by the OMS and moved by Shiprocket dispatch/RTO events — never by Shopify's own count. Click a product to view and edit its variants."
       />
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-6">
+        <InventoryDashboard />
         <div className="flex flex-wrap items-center justify-between gap-3">
           <FilterBar
             searchValue={search}
@@ -222,6 +225,7 @@ function StoredDataInventoryPage() {
             </>
           )}
         </QueryStates>
+        <MovementHistorySection />
       </div>
     </>
   )

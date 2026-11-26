@@ -44,6 +44,7 @@ from app.models.ims import (
 )
 from app.models.ndr import NDR
 from app.models.order import Order, OrderEvent, OrderItem
+from app.models.order_reservation import OrderInventoryReservation
 from app.models.order_workflow import OrderWorkflow
 from app.models.payment import Payment, PaymentTransaction
 from app.models.platform_inventory import InventoryPlatform, PlatformStockMovement
@@ -103,6 +104,7 @@ __all__ = [
     "Order",
     "OrderEvent",
     "OrderItem",
+    "OrderInventoryReservation",
     "Payment",
     "PaymentTransaction",
     "InventoryPlatform",
