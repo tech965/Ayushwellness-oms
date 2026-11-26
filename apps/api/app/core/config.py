@@ -8,16 +8,32 @@ report themselves as DISCONNECTED when credentials are absent.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
+def _env_file() -> str:
+    """`.env` in the working directory, unless `OMS_ENV_FILE` names another file
+    (e.g. a staging one). Then ONLY that file is read, and it must exist: a typo
+    must never fall back to `.env`, which may point at another database and hold
+    live third-party credentials.
+    """
+    chosen = os.environ.get("OMS_ENV_FILE")
+    if chosen is None:
+        return ".env"
+    if not Path(chosen).is_file():
+        raise RuntimeError("OMS_ENV_FILE is set but that file does not exist. Refusing to start.")
+    return chosen
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",

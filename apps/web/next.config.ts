@@ -1,6 +1,14 @@
 import type { NextConfig } from "next"
 
 const nextConfig: NextConfig = {
+  // Tells the browser bundle whether this is a Vercel preview, so it can refuse
+  // to use the production API (lib/api-config.ts). VERCEL_ENV is set by Vercel
+  // ("production" | "preview" | "development") and always wins; the manual value
+  // is only for builds where it is absent, e.g. rehearsing a preview locally.
+  env: {
+    NEXT_PUBLIC_DEPLOY_ENV:
+      process.env.VERCEL_ENV ?? process.env.NEXT_PUBLIC_DEPLOY_ENV ?? "",
+  },
   // "standalone" output is only for the self-hosted Docker image
   // (docker/web.Dockerfile copies .next/standalone). Vercel's build
   // pipeline does its own function bundling/tracing and doesn't need
