@@ -46,6 +46,7 @@ from app.core.logging import get_logger
 from app.db.session import get_db
 from app.integrations.cashfree.normalizer import (
     RECOGNIZED_WEBHOOK_TYPES,
+    SETTLEMENT_WEBHOOK_TYPES,
     extract_decimal_amount,
     extract_error_details,
     extract_gateway_details,
@@ -57,6 +58,7 @@ from app.integrations.cashfree.webhooks import resolve_webhook_secret, verify_we
 from app.integrations.shopify.live_webhooks import process_live_webhook
 from app.models.integration import IntegrationCode
 from app.repositories.integration import IntegrationRepository
+from app.services.cashfree_gateway_sync_service import CashfreeGatewaySyncService
 from app.services.cashfree_payment_service import CashfreePaymentService
 from app.services.webhook_service import WebhookService
 
@@ -245,4 +247,82 @@ async def receive_cashfree_payment_webhook(
             reason=result.reason,
         )
 
+    return {"success": True}
+
+
+@router.post("/settlement", status_code=200)
+async def receive_cashfree_settlement_webhook(
+    request: Request,
+    x_webhook_signature: str | None = Header(default=None, alias="x-webhook-signature"),
+    x_webhook_timestamp: str | None = Header(default=None, alias="x-webhook-timestamp"),
+    session: AsyncSession = Depends(get_db),
+) -> dict[str, bool]:
+    """Settlement status webhooks (SETTLEMENT_INITIATED / _SUCCESS /
+    _FAILED / _REVERSED). Same signature verification over the RAW body as
+    the payment webhook. Updates only the settlement lot's status/UTR and
+    its lines' status (never backwards, idempotent) and links bank evidence
+    by UTR; it does NOT mark anything bank-confirmed by itself.
+    """
+    raw_body = await request.body()
+    secret = resolve_webhook_secret(
+        client_secret=settings.CASHFREE_CLIENT_SECRET,
+        webhook_secret=settings.CASHFREE_WEBHOOK_SECRET,
+    )
+    if not verify_webhook_signature(
+        raw_body=raw_body,
+        timestamp=x_webhook_timestamp,
+        signature=x_webhook_signature,
+        secret=secret,
+    ):
+        logger.warning("cashfree_settlement_webhook_rejected", reason="invalid_signature")
+        raise HTTPException(status_code=401, detail="Invalid or missing webhook signature.")
+    try:
+        payload = json.loads(raw_body)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object payload.")
+
+    event_type = payload.get("type")
+    if event_type not in SETTLEMENT_WEBHOOK_TYPES or settings.SHOPIFY_LIVE_MODE:
+        # Acked so Cashfree does not retry; nothing is applied or fabricated.
+        logger.info("cashfree_settlement_webhook_ignored", event_type=str(event_type))
+        return {"success": True}
+
+    settlement = (payload.get("data") or {}).get("settlement") or {}
+    settlement_id = settlement.get("settlement_id") or settlement.get("cf_settlement_id")
+    if not settlement_id:
+        raise HTTPException(status_code=400, detail="Payload is missing data.settlement.id.")
+
+    event_id: Any = None
+    integration = await IntegrationRepository(session).get_by_code(IntegrationCode.CASHFREE)
+    if integration is not None:
+        webhook_service = WebhookService(session)
+        event, created = await webhook_service.ingest(
+            integration_id=integration.id,
+            event_type=str(event_type),
+            payload=payload,
+            external_event_id=f"{event_type}:{settlement_id}:{payload.get('event_time') or ''}",
+            external_resource_id=str(settlement_id),
+        )
+        event_id = event.id
+        if not created:
+            return {"success": True}
+        await webhook_service.mark_processing(event_id)
+
+    try:
+        result = await CashfreeGatewaySyncService(session).apply_settlement_webhook(payload)
+    except Exception as exc:  # noqa: BLE001 - recorded, then Cashfree is told to retry
+        await session.rollback()
+        if integration is not None and event_id is not None:
+            await WebhookService(session).mark_failed(event_id, error_message=str(exc))
+        logger.error("cashfree_settlement_webhook_failed", error=type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Internal error processing webhook.") from exc
+
+    if integration is not None and event_id is not None:
+        service = WebhookService(session)
+        if result.get("applied"):
+            await service.mark_processed(event_id)
+        else:
+            await service.mark_ignored(event_id, reason=str(result.get("reason") or "not_applied"))
     return {"success": True}

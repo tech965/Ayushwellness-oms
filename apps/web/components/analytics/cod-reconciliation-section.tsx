@@ -143,7 +143,7 @@ export function CodReconciliationSection({ paymentType, label, dateFrom, dateTo 
         cell: (o) =>
           o.bank_verified ? (
             <span title={o.bank_credit_reference ?? ""} className="text-emerald-600">
-              Verified {money(o.bank_credit_amount, o.currency)}
+              Manually verified {money(o.bank_credit_amount, o.currency)}
             </span>
           ) : (
             <span className="text-muted-foreground">Not verified</span>
@@ -234,7 +234,7 @@ export function CodReconciliationSection({ paymentType, label, dateFrom, dateTo 
               ["Collected by Shiprocket", fin.collected_amount],
               ["Remitted by Shiprocket", fin.remitted_amount],
               ["Pending remittance", fin.pending_remittance],
-              ["Bank-verified credit", fin.bank_verified_amount],
+              ["Manually bank-verified credit", fin.bank_verified_amount],
             ].map(([k, v]) => (
               <div key={k}>
                 <div className="text-muted-foreground text-xs">{k}</div>

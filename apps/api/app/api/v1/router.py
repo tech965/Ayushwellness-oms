@@ -40,6 +40,7 @@ from app.api.v1.endpoints import (
     permissions,
     products,
     reconciliation,
+    remittance_reconciliation,
     revenue_reconciliation,
     shiprocket_wallet,
     refunds,
@@ -181,6 +182,11 @@ api_router.include_router(
     revenue_reconciliation.router,
     prefix="/revenue-reconciliation",
     tags=["revenue-reconciliation"],
+)
+api_router.include_router(
+    remittance_reconciliation.router,
+    prefix="/remittance-reconciliation",
+    tags=["remittance-reconciliation"],
 )
 api_router.include_router(
     shiprocket_wallet.router, prefix="/shiprocket-wallet", tags=["shiprocket-wallet"]

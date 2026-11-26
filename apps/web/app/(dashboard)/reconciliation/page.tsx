@@ -5,6 +5,7 @@ import { toast } from "sonner"
 
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table"
 import { FilterBar } from "@/components/shared/filter-bar"
+import { ReconciliationTabs } from "@/components/remittance/reconciliation-tabs"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaginationBar } from "@/components/shared/pagination-bar"
 import { QueryStates } from "@/components/shared/query-states"
@@ -226,6 +227,7 @@ function StoredDataReconciliationPage() {
         description="Compares OMS records against Shopify and Shiprocket without ever auto-correcting — mismatches and missing records are reported here for review."
         actions={<TriggerRunButton />}
       />
+      <ReconciliationTabs />
       <div className="flex flex-col gap-8">
         <section className="flex flex-col gap-3">
           <h2 className="text-sm font-semibold">Runs</h2>

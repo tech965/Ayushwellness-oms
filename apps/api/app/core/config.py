@@ -235,6 +235,16 @@ class Settings(BaseSettings):
     # back to a same-origin-safe default (no redirect) when unset, since
     # a wrong/unset return_url must never break checkout creation.
     CASHFREE_RETURN_URL: str | None = None
+    # Scheduled settlement/transaction synchronisation (Module 7). It only
+    # ever runs when the credentials above are present; with none it is a
+    # no-op and the UI shows "Not Configured". Cashfree rate-limits Get
+    # Settlements (30/min in production), so the default is hourly.
+    CASHFREE_SYNC_ENABLED: bool = True
+    CASHFREE_SYNC_INTERVAL_MINUTES: int = 60
+    CASHFREE_SYNC_INITIAL_DAYS: int = 30
+    # Each sync re-reads this many days before the last successful sync so
+    # a settlement that changed status since is refreshed (idempotent).
+    CASHFREE_SYNC_LOOKBACK_DAYS: int = 7
 
     # --- Address Validation ---
     # Primary/real provider: Google's Address Validation API

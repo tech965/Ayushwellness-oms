@@ -33,16 +33,20 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.remittance import normalize_cod_remittance
+from app.models.auth import User
 from app.models.cod_remittance import CodRemittance
 from app.models.enums import CancellationStatus, FulfillmentStatus, OrderStatus, PaymentType
 from app.models.order import Order
 from app.models.order_workflow import OrderWorkflow
+from app.models.remittance_reconciliation import BankCredit
 from app.models.shipment import Shipment
 from app.models.shipment_ref import ShipmentRef
 from app.repositories.order import OrderRepository
+from app.services.audit_service import AuditService
 from app.services.live_collect import collect_orders
 from app.services.live_orders import get_reader
 from app.services.order_ref import get_workflow_by_external_ids, ref_id_for
+from app.services.remittance_common import load_ledger, lock_bank_credits
 
 logger = get_logger(__name__)
 
@@ -214,20 +218,77 @@ class CodReconciliationService:
         amount: Decimal,
         reference: str,
         credited_on: datetime,
-        user_id: uuid.UUID | None,
+        reason: str,
+        user: User | None,
     ) -> CodRemittance:
+        """ADMIN manual verification of a Shiprocket-reported remittance. Reason,
+        bank reference and amount are mandatory and audit logged. The amount
+        can exceed neither the reported remittance nor, when a bank statement
+        has that reference, what is still free on those credits.
+        """
         if amount <= 0 or not reference.strip():
             raise ValidationError("Bank credit needs a positive amount and a bank reference.")
+        if len(reason.strip()) < 3:
+            raise ValidationError("A reason is required for a manual bank verification.")
+        statement_ids = list(
+            (
+                await self.session.execute(
+                    select(BankCredit.id).where(
+                        func.lower(func.trim(BankCredit.reference)) == reference.strip().lower()
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        await lock_bank_credits(self.session, statement_ids)
         rem = (
             await self.session.execute(select(CodRemittance).where(CodRemittance.awb == awb))
         ).scalar_one_or_none()
         if rem is None:
             raise NotFoundError(f"No Shiprocket remittance record for AWB {awb}.")
+        remitted = rem.remitted_amount or ZERO
+        if amount > remitted:
+            raise ValidationError(
+                f"The amount cannot exceed the reported remittance of {remitted}."
+            )
+        if statement_ids:
+            ledger = await load_ledger(self.session, exclude_awb=awb)
+            free = sum((ledger.free(c) for c in ledger.credits if c.id in statement_ids), ZERO)
+            if amount > free:
+                raise ValidationError(
+                    f"Only {free} of the bank credit with this reference is still unallocated."
+                )
+        previous = (
+            {
+                "amount": str(rem.bank_credit_amount),
+                "bank_reference": rem.bank_credit_reference,
+                "reason": rem.bank_verification_reason,
+            }
+            if rem.bank_verified_at
+            else None
+        )
         rem.bank_credit_amount = amount
         rem.bank_credit_reference = reference.strip()[:128]
         rem.bank_credited_on = credited_on
         rem.bank_verified_at = datetime.now(UTC)
-        rem.bank_verified_by = user_id
+        rem.bank_verified_by = user.id if user else None
+        rem.bank_verification_reason = reason.strip()[:255]
+        await AuditService(self.session).record(
+            user=user,
+            action="remittance.cod.bank_verification",
+            entity_type="cod_remittance",
+            entity_id=str(rem.id),
+            previous_value=previous,
+            new_value={
+                "verification": "manually_verified",
+                "awb": awb,
+                "amount": str(amount),
+                "bank_reference": reference.strip(),
+                "reason": reason.strip(),
+                "credited_on": credited_on.isoformat(),
+            },
+        )
         await self.session.commit()
         return rem
 

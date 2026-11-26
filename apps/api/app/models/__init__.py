@@ -51,6 +51,15 @@ from app.models.product import CatalogVariant, Product, ProductVariant
 from app.models.rbac import Permission, Role, RolePermission, UserRole
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.models.refund import Refund
+from app.models.remittance_reconciliation import (
+    BankCredit,
+    BankCreditLink,
+    CodRemittanceLine,
+    GatewaySettlementLine,
+    GatewaySyncState,
+    ReconciliationAdjustment,
+    SettlementFile,
+)
 from app.models.returns import Return
 from app.models.rto import RTO
 from app.models.settings import AppSettings
@@ -132,7 +141,14 @@ __all__ = [
     "Warehouse",
     "CheckoutWorkflow",
     "ShipmentRef",
+    "BankCredit",
+    "BankCreditLink",
     "CodRemittance",
+    "CodRemittanceLine",
+    "GatewaySettlementLine",
+    "GatewaySyncState",
+    "ReconciliationAdjustment",
+    "SettlementFile",
     "ShiprocketWalletCheck",
     "ShiprocketWalletSnapshot",
     "ShiprocketWalletTransaction",
