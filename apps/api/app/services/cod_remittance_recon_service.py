@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import User
 from app.models.cod_remittance import CodRemittance
-from app.models.enums import PaymentType
+from app.models.enums import OrderStatus, PaymentType
 from app.models.order import Order
 from app.models.remittance_reconciliation import (
     BankCreditLink,
@@ -97,6 +97,20 @@ from app.services.remittance_common import (
 MODULE = "cod"
 COD_STATUSES = ("pending", "partially_reconciled", "matched", "short", "excess")
 
+# The 5-KPI payment-status view groups the same `cod_status()` outcomes into
+# 3 buckets instead of showing all 5 individually:
+#   - payment_success:   "matched"   -- fully remitted AND bank-confirmed.
+#   - payment_initiated: "partially_reconciled" / "short" / "excess" -- the
+#     courier has reported *something* (a remittance exists), but it is not
+#     yet a clean, bank-confirmed match.
+#   - payment_pending:   "pending"   -- no courier-reported remittance at all.
+# This is a derived grouping of the OMS's own computed reconciliation status
+# (`cod_status()`), not a parse of Shiprocket's raw remittance-status text --
+# that field's real vocabulary has never been confirmed against a live
+# account (see `app/integrations/shiprocket/remittance.py`), so it is not
+# used for this classification.
+PAYMENT_INITIATED_STATUSES = ("partially_reconciled", "short", "excess")
+
 # KPI / percentage drill selector -> predicate over a record.
 SELECTORS = {
     "delivered": lambda r: True,
@@ -108,6 +122,9 @@ SELECTORS = {
     "excess": lambda r: r["status"] == "excess",
     "reconciled": lambda r: r["status"] == "matched",
     "partial": lambda r: r["status"] == "partially_reconciled",
+    "payment_success": lambda r: r["status"] == "matched",
+    "payment_initiated": lambda r: r["status"] in PAYMENT_INITIATED_STATUSES,
+    "payment_pending": lambda r: r["status"] == "pending",
     **BANK_SELECTORS,
 }
 
@@ -120,6 +137,15 @@ MEASURES = {
     "pending": ("Pending COD", lambda r: r["expected_amount"] + r["adjustment_amount"]),
     "short": ("Short amount", lambda r: -r["difference"]),
     "excess": ("Excess amount", lambda r: r["difference"]),
+    "payment_success": ("Payment success (matched COD)", lambda r: r["expected_amount"]),
+    "payment_initiated": (
+        "Payment initiated (reported, not yet bank-confirmed)",
+        lambda r: r["expected_amount"],
+    ),
+    "payment_pending": (
+        "Payment pending (no remittance reported yet)",
+        lambda r: r["expected_amount"] + r["adjustment_amount"],
+    ),
     **BANK_MEASURES,
 }
 
@@ -814,6 +840,22 @@ class CodRemittanceReconciliationService:
 
     # ---------------------------------------------------------------- views
 
+    async def _total_cod_orders(self, f: Filters) -> tuple[int, Decimal]:
+        """Every non-cancelled COD order in range -- not just the delivered
+        ones this module otherwise reconciles. A distinct, wider population
+        from `delivered_orders`, so it is computed separately rather than
+        derived from `_records()`."""
+        stmt = select(func.count(Order.id), func.coalesce(func.sum(Order.total_amount), 0)).where(
+            Order.payment_type == PaymentType.COD,
+            Order.status != OrderStatus.CANCELLED,
+        )
+        if f.date_from:
+            stmt = stmt.where(Order.order_datetime >= f.date_from)
+        if f.date_to:
+            stmt = stmt.where(Order.order_datetime <= f.date_to)
+        count, amount = (await self.session.execute(stmt)).one()
+        return count, dec(amount)
+
     async def summary(self, f: Filters) -> dict[str, Any]:
         records, shared = await self._records(f)
         if f.status:  # the status filter narrows every card, percentage and chart too
@@ -833,6 +875,10 @@ class CodRemittanceReconciliationService:
         short_amount = money(sum((-r["difference"] for r in short), ZERO))
         excess_amount = money(sum((r["difference"] for r in excess), ZERO))
         matched = by_status["matched"]
+        initiated = [r for r in records if r["status"] in PAYMENT_INITIATED_STATUSES]
+        initiated_amount = money(sum((r["expected_amount"] for r in initiated), ZERO))
+        matched_amount = money(sum((r["expected_amount"] for r in matched), ZERO))
+        total_cod_orders, total_cod_amount = await self._total_cod_orders(f)
         unmatched_lines = [u for u in unmatched if u["kind"] == "remittance_line"]
         unmatched_credits = [u for u in unmatched if u["kind"] == "bank_credit"]
         unmatched_line_amount = money(sum((u["amount"] for u in unmatched_lines), ZERO))
@@ -858,9 +904,16 @@ class CodRemittanceReconciliationService:
             },
             "reconciled": {
                 "count": len(matched),
-                "amount": money(sum((r["expected_amount"] for r in matched), ZERO)),
+                "amount": matched_amount,
             },
             "partially_reconciled": _kpi(by_status["partially_reconciled"]),
+            # The 5-KPI payment-status summary (see PAYMENT_INITIATED_STATUSES).
+            # "total_cod_orders" is a wider population (every COD order, not
+            # just delivered ones) so it has no drilldown in this module.
+            "total_cod_orders": {"count": total_cod_orders, "amount": money(total_cod_amount)},
+            "payment_success": {"count": len(matched), "amount": matched_amount},
+            "payment_initiated": {"count": len(initiated), "amount": initiated_amount},
+            "payment_pending": {"count": len(pending), "amount": pending_amount},
         }
         pct = [
             percentage_item(
@@ -997,6 +1050,8 @@ class CodRemittanceReconciliationService:
                 "delivered_orders": n,
                 "expected_amount": total_expected,
                 "remittance_lines": tx_total,
+                "total_cod_orders": total_cod_orders,
+                "total_cod_amount": money(total_cod_amount),
             },
         }
 
