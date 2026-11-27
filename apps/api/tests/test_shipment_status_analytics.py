@@ -387,6 +387,72 @@ async def test_status_analytics_percentage_math(db_session: AsyncSession) -> Non
     assert data["total_orders"] == 6
 
 
+async def test_status_analytics_shipment_coverage_and_rto_breakdown(
+    db_session: AsyncSession,
+) -> None:
+    """`orders_with_shipment_count`/`orders_without_shipment_count` must
+    sum to `total_orders`, and `rto_breakdown`'s 3 sub-statuses must sum
+    to `total_rto` -- the fields that let a caller reconcile this OMS's
+    order-level counts against a courier's shipment-level export instead
+    of the gap looking like missing/wrong data.
+    """
+    user = await _make_shipments_reader(db_session, email="coverage@example.com")
+
+    # No Shipment row at all -- never pushed to Shiprocket.
+    await make_order(db_session, order_number="COV-NOSHIP", status=OrderStatus.CONFIRMED)
+
+    # Has a Shipment row.
+    with_shipment = await make_order(
+        db_session, order_number="COV-PICKED", status=OrderStatus.CONFIRMED
+    )
+    await _add_shipment(
+        db_session, order=with_shipment, current_status=ShipmentStatus.PICKED_UP
+    )
+
+    # All 3 RTO sub-statuses, one order each.
+    rto_initiated = await make_order(
+        db_session, order_number="COV-RTO-INIT", status=OrderStatus.CONFIRMED
+    )
+    await _add_shipment(
+        db_session, order=rto_initiated, current_status=ShipmentStatus.RTO_INITIATED
+    )
+    rto_transit = await make_order(
+        db_session, order_number="COV-RTO-TRANSIT", status=OrderStatus.CONFIRMED
+    )
+    await _add_shipment(
+        db_session,
+        order=rto_transit,
+        current_status=ShipmentStatus.RTO_INITIATED,
+        rto_status=RTOStatus.IN_TRANSIT,
+    )
+    rto_delivered = await make_order(
+        db_session, order_number="COV-RTO-DELIVERED", status=OrderStatus.CONFIRMED
+    )
+    await _add_shipment(
+        db_session, order=rto_delivered, current_status=ShipmentStatus.RTO_DELIVERED
+    )
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.get("/api/v1/shipments/status-analytics")
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+    assert data["total_orders"] == 5
+    assert data["orders_with_shipment_count"] == 4
+    assert data["orders_without_shipment_count"] == 1
+    assert (
+        data["orders_with_shipment_count"] + data["orders_without_shipment_count"]
+        == data["total_orders"]
+    )
+
+    assert data["total_rto"] == 3
+    rto_breakdown = data["rto_breakdown"]
+    assert rto_breakdown["rto_initiated"] == 1
+    assert rto_breakdown["rto_in_transit"] == 1
+    assert rto_breakdown["rto_delivered"] == 1
+    assert sum(rto_breakdown.values()) == data["total_rto"]
+
+
 async def test_status_analytics_courier_filter(db_session: AsyncSession) -> None:
     user = await _make_shipments_reader(db_session, email="courier@example.com")
     courier_a = Courier(name="Shiprocket", code="SR-TEST")

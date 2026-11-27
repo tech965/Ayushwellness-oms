@@ -156,6 +156,85 @@ async def test_fulfillment_payment_breakdown_zero_population(db_session: AsyncSe
     assert data["fulfilled"]["cod"]["percent_of_bucket_amount"] == 0.0
 
 
+async def test_fulfillment_payment_breakdown_excludes_cancelled_from_unfulfilled(
+    db_session: AsyncSession,
+) -> None:
+    """A cancelled order (large amount, Shopify UNFULFILLED) must not
+    inflate the "Unfulfilled" bucket's count/amount -- it was never
+    genuinely pending fulfilment. Still counted in the grand total.
+    """
+    user = await _make_analytics_reader(db_session, email="cancel-excl@example.com")
+
+    await make_order(
+        db_session,
+        order_number="CANCEL-UNFULFILLED",
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("9999"),
+        status=OrderStatus.CANCELLED,
+    )
+    await make_order(
+        db_session,
+        order_number="REAL-UNFULFILLED",
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("50"),
+        status=OrderStatus.CONFIRMED,
+    )
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.get("/api/v1/analytics/fulfillment-payment-breakdown")
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+    # Grand total includes the cancelled order's amount -- it's still a
+    # real order that existed in the range.
+    assert data["total_orders"] == 2
+    assert Decimal(data["total_amount"]) == Decimal("10049")
+
+    # "Unfulfilled" excludes it entirely.
+    unfulfilled = data["unfulfilled"]
+    assert unfulfilled["order_count"] == 1
+    assert Decimal(unfulfilled["amount"]) == Decimal("50")
+    assert Decimal(unfulfilled["cod"]["amount"]) == Decimal("50")
+
+
+async def test_cod_dashboard_excludes_cancelled_from_unfulfilled_cod(
+    db_session: AsyncSession,
+) -> None:
+    user = await _make_analytics_reader(db_session, email="cancel-cod@example.com")
+
+    await make_order(
+        db_session,
+        order_number="CODCANCEL",
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("500"),
+        status=OrderStatus.CANCELLED,
+    )
+    await make_order(
+        db_session,
+        order_number="CODREAL",
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("40"),
+        status=OrderStatus.CONFIRMED,
+    )
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.get("/api/v1/analytics/cod-dashboard")
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+    # Total COD includes the cancelled order -- it's still a real COD order.
+    assert data["total_cod"]["order_count"] == 2
+    assert Decimal(data["total_cod"]["amount"]) == Decimal("540")
+
+    # Unfulfilled COD excludes it.
+    assert data["unfulfilled_cod"]["order_count"] == 1
+    assert Decimal(data["unfulfilled_cod"]["amount"]) == Decimal("40")
+
+
 # ---------------------------------------------------------------------------
 # 2. Classification within a slice — reuses Module 2's unified statuses,
 #    sums to ~100% of the slice, and never double-counts a reshipped order.
@@ -211,6 +290,57 @@ async def test_fulfillment_payment_classification_sums_to_slice_amount(
         row["percent_of_slice_amount"] for row in data["classifications"] if row["order_count"]
     )
     assert non_zero_pct == pytest.approx(100.0, abs=0.01)
+
+
+async def test_fulfillment_payment_classification_cancelled_visible_but_excluded_from_slice(
+    db_session: AsyncSession,
+) -> None:
+    """The "cancelled" row stays visible (real, countable record) but its
+    amount is excluded from `slice_amount`/`slice_count`, keeping this
+    endpoint's denominator in agreement with `get_fulfillment_payment_
+    breakdown`'s own cancelled-order exclusion from "unfulfilled" for the
+    identical slice.
+    """
+    user = await _make_analytics_reader(db_session, email="classify-cancel@example.com")
+
+    await make_order(
+        db_session,
+        order_number="CLC-CANCELLED",
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("500"),
+        status=OrderStatus.CANCELLED,
+    )
+    await make_order(
+        db_session,
+        order_number="CLC-PLACED",
+        fulfillment_status=FulfillmentStatus.UNFULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("80"),
+        status=OrderStatus.PENDING,
+    )
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.get(
+            "/api/v1/analytics/fulfillment-payment-classification",
+            params={"fulfillment_status": "unfulfilled", "payment_type": "cod"},
+        )
+        breakdown_response = await client.get("/api/v1/analytics/fulfillment-payment-breakdown")
+        assert response.status_code == 200
+        data = response.json()["data"]
+        breakdown = breakdown_response.json()["data"]
+
+    rows = {row["unified_status"]: row for row in data["classifications"]}
+    # The cancelled row is still present and shows the real ₹500.
+    assert rows["cancelled"]["order_count"] == 1
+    assert Decimal(rows["cancelled"]["amount"]) == Decimal("500")
+
+    # But the slice denominator excludes it -- matches the breakdown
+    # endpoint's "unfulfilled" bucket for the same slice exactly.
+    assert data["slice_order_count"] == 1
+    assert Decimal(data["slice_amount"]) == Decimal("80")
+    assert data["slice_order_count"] == breakdown["unfulfilled"]["order_count"]
+    assert Decimal(data["slice_amount"]) == Decimal(breakdown["unfulfilled"]["amount"])
 
 
 async def test_fulfillment_payment_classification_reshipment_not_double_counted(

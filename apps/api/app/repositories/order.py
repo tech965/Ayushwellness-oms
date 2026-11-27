@@ -730,6 +730,65 @@ class OrderRepository(BaseRepository[Order]):
             result[status] = {"count": count, "amount": Decimal(amount)}
         return result
 
+    async def unified_status_shipment_coverage(
+        self,
+        *,
+        courier_id: uuid.UUID | None = None,
+        payment_type: str | None = None,
+        fulfillment_status: str | None = None,
+        sku: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> dict[str, int | Decimal]:
+        """Orders split by whether they have a "controlling" `Shipment`
+        row at all (the same most-recent-shipment join every other
+        `unified_status_*` method uses), independent of what unified
+        status that shipment (or its absence) classifies into. This is
+        the Module 2 dashboard's own population vs. a courier's
+        shipment-level export: an order can land in `order_placed`/
+        `ready_to_ship`/`fulfilled_tracking_unavailable`/`cancelled`
+        with zero local `Shipment` row (never pushed to Shiprocket, or
+        fulfilled directly through Shopify -- see `unified_status_base_
+        query`'s own docstring), and none of those orders will ever
+        appear in Shiprocket's own counts, correctly. Surfacing the
+        split explicitly here is what lets the dashboard self-explain a
+        gap like "7,491 OMS orders vs. 4,997 Shiprocket shipments"
+        instead of that gap looking like missing/wrong data.
+        `with_count + without_count` always equals the matching
+        `unified_status_counts` call's `total_orders`.
+        """
+        base_stmt, active_shipment = self.unified_status_base_query(
+            courier_id=courier_id,
+            payment_type=payment_type,
+            fulfillment_status=fulfillment_status,
+            sku=sku,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        has_shipment = active_shipment.id.is_not(None)
+        narrowed = base_stmt.order_by(None).with_only_columns(
+            has_shipment.label("has_shipment"), Order.total_amount.label("total_amount")
+        )
+        subquery = narrowed.subquery()
+        stmt = select(
+            subquery.c.has_shipment,
+            func.count(),
+            func.coalesce(func.sum(subquery.c.total_amount), 0),
+        ).group_by(subquery.c.has_shipment)
+        rows = (await self.session.execute(stmt)).all()
+        with_count = with_amount = without_count = without_amount = 0
+        for has_shipment_value, count, amount in rows:
+            if has_shipment_value:
+                with_count, with_amount = count, Decimal(amount)
+            else:
+                without_count, without_amount = count, Decimal(amount)
+        return {
+            "orders_with_shipment_count": with_count,
+            "orders_with_shipment_amount": Decimal(with_amount),
+            "orders_without_shipment_count": without_count,
+            "orders_without_shipment_amount": Decimal(without_amount),
+        }
+
     async def unified_status_counts_by_courier(
         self,
         *,

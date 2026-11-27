@@ -192,7 +192,20 @@ class AnalyticsService:
                     func.count(),
                     func.coalesce(func.sum(Order.total_amount), 0),
                     _count_if(Order.fulfillment_status == FulfillmentStatus.FULFILLED),
-                    _count_if(Order.fulfillment_status == FulfillmentStatus.UNFULFILLED),
+                    # Excludes CANCELLED orders: a cancelled order was
+                    # never genuinely "unfulfilled" in the actionable
+                    # sense this tile is meant to convey (nothing is
+                    # pending fulfilment on it), and `get_fulfillment_
+                    # payment_breakdown`'s own "unfulfilled" bucket
+                    # (below) applies the same exclusion -- this keeps
+                    # the Main Dashboard tile and the breakdown page's
+                    # own Unfulfilled KPI in agreement instead of
+                    # silently disagreeing by whatever count of
+                    # cancelled orders exists in the range.
+                    _count_if(
+                        (Order.fulfillment_status == FulfillmentStatus.UNFULFILLED)
+                        & (Order.status != OrderStatus.CANCELLED)
+                    ),
                     _count_if(Order.payment_type == PaymentType.COD),
                     _count_if(Order.payment_type == PaymentType.PREPAID),
                     # `Order.status` (OMS-internal pack/ship workflow) is a
@@ -881,7 +894,17 @@ class AnalyticsService:
             return func.coalesce(func.sum(case((condition, Order.total_amount))), 0)
 
         fulfilled = Order.fulfillment_status == FulfillmentStatus.FULFILLED
-        unfulfilled = Order.fulfillment_status == FulfillmentStatus.UNFULFILLED
+        # Excludes CANCELLED orders (user-approved fix: a cancelled
+        # order's full pre-cancellation `total_amount` was otherwise
+        # inflating "Unfulfilled" -- it was never actually pending
+        # fulfilment). A cancelled order can only ever have
+        # `fulfillment_status == UNFULFILLED` in this schema (an order
+        # is never marked FULFILLED after being cancelled -- see
+        # `app.services.shipment_status`'s own `OrderStatus.CANCELLED`
+        # check), so "Fulfilled" needs no matching change.
+        unfulfilled = (Order.fulfillment_status == FulfillmentStatus.UNFULFILLED) & (
+            Order.status != OrderStatus.CANCELLED
+        )
         is_cod = Order.payment_type == PaymentType.COD
         is_prepaid = Order.payment_type == PaymentType.PREPAID
 
@@ -1005,8 +1028,24 @@ class AnalyticsService:
             date_from=r.date_from,
             date_to=r.date_to,
         )
-        slice_amount = sum((v["amount"] for v in amounts.values()), Decimal("0"))
-        slice_count = sum(int(v["count"]) for v in amounts.values())
+        # The "cancelled" unified-status row is always shown below for
+        # transparency (a cancelled order is still a real, visible
+        # record), but is excluded from `slice_amount`/`slice_count` so
+        # this denominator agrees with `get_fulfillment_payment_
+        # breakdown`'s own cancelled-order exclusion from its
+        # "unfulfilled" bucket (user-approved fix) -- without this,
+        # the classification rows' percentages would be "% of a larger
+        # slice than the parent KPI actually reports," and this
+        # endpoint's `slice_amount` would silently disagree with the
+        # breakdown endpoint's `unfulfilled.amount` for the identical
+        # (fulfillment_status, payment_type) pair. Rows for a
+        # "fulfilled" slice are unaffected (cancelled orders are never
+        # Shopify-FULFILLED, so `amounts["cancelled"]` is already 0
+        # there).
+        slice_amount = sum(
+            (v["amount"] for status, v in amounts.items() if status != "cancelled"), Decimal("0")
+        )
+        slice_count = sum(int(v["count"]) for status, v in amounts.items() if status != "cancelled")
 
         def _pct(amount: Decimal) -> float:
             return float(amount / slice_amount * 100) if slice_amount else 0.0
@@ -1151,7 +1190,14 @@ class AnalyticsService:
 
         is_cod = Order.payment_type == PaymentType.COD
         fulfilled_cod = is_cod & (Order.fulfillment_status == FulfillmentStatus.FULFILLED)
-        unfulfilled_cod = is_cod & (Order.fulfillment_status == FulfillmentStatus.UNFULFILLED)
+        # Same cancelled-order exclusion as `get_fulfillment_payment_
+        # breakdown`'s "unfulfilled" bucket -- kept consistent so this
+        # dashboard's Unfulfilled COD agrees with that one.
+        unfulfilled_cod = (
+            is_cod
+            & (Order.fulfillment_status == FulfillmentStatus.UNFULFILLED)
+            & (Order.status != OrderStatus.CANCELLED)
+        )
 
         row = (
             await self.session.execute(

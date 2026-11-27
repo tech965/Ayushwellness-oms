@@ -386,7 +386,12 @@ function DashboardContent() {
             icon={PackageCheck}
             kpi={summary?.fulfilled_orders}
             format={count}
-            href={ordersHref({ fulfillment_status: "fulfilled" })}
+            // Opens the Order Breakdown page's Fulfilled/Unfulfilled panel
+            // (not the generic Orders list every other KPI here drills
+            // into) with "fulfilled" pre-selected, same date range carried
+            // over — fixes a production bug where this previously fell
+            // through to `ordersHref` and landed on plain `/orders`.
+            href={`/orders/breakdown?${orderQueryString}&fulfillment_status=fulfilled`}
             accent="emerald"
           />
           <KpiCard
@@ -394,13 +399,14 @@ function DashboardContent() {
             icon={PackageX}
             kpi={summary?.unfulfilled_orders}
             format={count}
-            // A Team Leader lacks `orders.read` (so `/orders` would 403
-            // for them) — send them to the team-scoped equivalent
-            // instead. Admin/every other role keeps the existing link.
+            // A Team Leader lacks `orders.read`/`analytics.read` for the
+            // breakdown page — send them to the team-scoped equivalent
+            // instead. Admin/every other role gets the breakdown panel
+            // (see "Fulfilled Orders" above for why not plain `/orders`).
             href={
               hasRole("TEAM_LEADER")
                 ? "/team/orders/unfulfilled"
-                : ordersHref({ fulfillment_status: "unfulfilled" })
+                : `/orders/breakdown?${orderQueryString}&fulfillment_status=unfulfilled`
             }
             accent="amber"
             invert

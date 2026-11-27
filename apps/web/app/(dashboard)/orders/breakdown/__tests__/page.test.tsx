@@ -153,13 +153,20 @@ describe("OrderBreakdownPage", () => {
     expect(pendingLink?.getAttribute("href")).toContain("status=pending")
     expect(pendingLink?.getAttribute("href")).not.toContain("payment_status=pending")
 
-    // Fulfilled / Unfulfilled
-    expect(screen.getByText("Fulfilled Orders").closest("a")?.getAttribute("href")).toContain(
-      "fulfillment_status=fulfilled"
-    )
-    expect(screen.getByText("Unfulfilled Orders").closest("a")?.getAttribute("href")).toContain(
-      "fulfillment_status=unfulfilled"
-    )
+    // Fulfilled / Unfulfilled -- root-cause fix: these previously fell
+    // through to `ordersHref` and opened the generic `/orders` list
+    // instead of scrolling to this page's own panel below. Must stay on
+    // this page (relative, no `/orders` prefix) with the right param.
+    const fulfilledHref = screen.getByText("Fulfilled Orders").closest("a")?.getAttribute("href")
+    expect(fulfilledHref).toContain("fulfillment_status=fulfilled")
+    expect(fulfilledHref).not.toMatch(/^\/orders\?/)
+
+    const unfulfilledHref = screen
+      .getByText("Unfulfilled Orders")
+      .closest("a")
+      ?.getAttribute("href")
+    expect(unfulfilledHref).toContain("fulfillment_status=unfulfilled")
+    expect(unfulfilledHref).not.toMatch(/^\/orders\?/)
 
     // Cancelled — derived from the order_status breakdown (count 5/100 = 5.0%)
     const cancelledLink = screen.getByText("Cancelled Orders").closest("a")
