@@ -45,7 +45,23 @@ def _dt(value: Any) -> datetime | None:
     if not value:
         return None
     text = str(value).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d %b %Y", "%d-%m-%Y", "%d %b %Y, %I:%M %p"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d %b %Y",
+        "%d-%m-%Y",
+        "%d %b %Y, %I:%M %p",
+        # Other common day-first / month-name renderings. Parsing only: a date that
+        # still fails to parse is dropped, so these keep a reported date from being lost.
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M",
+        "%d/%m/%Y",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%b %d, %Y",
+        "%d %b %Y %H:%M:%S",
+        "%d %b %Y %H:%M",
+    ):
         try:
             return datetime.strptime(text, fmt).replace(tzinfo=UTC)
         except ValueError:

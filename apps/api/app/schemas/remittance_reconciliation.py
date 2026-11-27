@@ -96,6 +96,9 @@ class CodRecordRow(BankPositionFields):
     source: str | None
     age_days: int
     line_count: int
+    # True: no remittance AMOUNT is known (status stays "pending") but Shiprocket's
+    # order API reports a payout reference or date. Counts as Payment Initiated.
+    payout_reported: bool = False
 
 
 class PrepaidRecordRow(BankPositionFields):
@@ -195,6 +198,9 @@ class SummaryResponse(BaseModel):
     partners: list[dict[str, Any]] | None = None
     gateways: list[dict[str, Any]] | None = None
     denominators: dict[str, Any]
+    # COD only: which remittance / bank evidence is loaded (see
+    # `CodRemittanceReconciliationService._data_coverage`).
+    data_coverage: dict[str, Any] | None = None
 
 
 class UploadResult(BaseModel):

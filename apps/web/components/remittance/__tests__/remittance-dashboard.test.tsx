@@ -321,6 +321,89 @@ describe("COD remittance dashboard", () => {
     expect(pending).toHaveTextContent("₹1,000.00")
   })
 
+  const COVERAGE = {
+    has_remittance_data: true,
+    has_bank_data: true,
+    pending_is_data_limited: false,
+    api_sync_configured: false,
+    remittance_lines: 6,
+    api_reported_remittances: 0,
+    bank_credits: 2,
+    manual_bank_verifications: 0,
+    last_upload_at: null,
+    last_api_sync_at: null,
+  }
+
+  it("says no remittance data is loaded, so Pending is not confirmed non-payment", () => {
+    setup({
+      ...COD_SUMMARY,
+      data_coverage: {
+        ...COVERAGE,
+        has_remittance_data: false,
+        has_bank_data: false,
+        pending_is_data_limited: true,
+        remittance_lines: 0,
+        bank_credits: 0,
+      },
+    })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const notice = screen.getByTestId("payment-data-notice")
+    expect(notice).toHaveTextContent("No Shiprocket remittance data loaded")
+    expect(notice).toHaveTextContent("not confirmed non-payment")
+    expect(notice).toHaveTextContent("run the Shiprocket order sync")
+    // The five cards are still the same five.
+    expect(
+      within(screen.getByTestId("payment-status-kpi-grid")).getAllByRole("button")
+    ).toHaveLength(4)
+  })
+
+  it("says bank data is missing when remittances are loaded but no bank evidence is", () => {
+    setup({
+      ...COD_SUMMARY,
+      data_coverage: { ...COVERAGE, has_bank_data: false, bank_credits: 0 },
+    })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    expect(screen.getByTestId("payment-data-notice")).toHaveTextContent(
+      "No bank statement imported"
+    )
+  })
+
+  it("warns that some Payment Pending orders were never checked, even when data is loaded", () => {
+    setup({
+      ...COD_SUMMARY,
+      data_coverage: { ...COVERAGE, pending_orders: 40, pending_unchecked_orders: 37 },
+    })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const notice = screen.getByTestId("payment-data-notice")
+    expect(notice).toHaveTextContent("37 of 40 Payment Pending orders were never checked")
+    expect(notice).toHaveTextContent("Pending means unknown, not unpaid")
+    expect(notice).not.toHaveTextContent("No bank statement imported")
+  })
+
+  it("says the never-checked split is unavailable instead of hiding it", () => {
+    setup({
+      ...COD_SUMMARY,
+      data_coverage: {
+        ...COVERAGE,
+        pending_orders: 40,
+        pending_unchecked_orders: null,
+        pending_check_available: false,
+      },
+    })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const notice = screen.getByTestId("payment-data-notice")
+    expect(notice).toHaveTextContent(
+      "Cannot tell which Payment Pending orders were never checked"
+    )
+    expect(notice).toHaveTextContent("Treat Pending as unknown, not unpaid")
+  })
+
+  it("shows no data notice when remittance and bank data are both loaded", () => {
+    setup({ ...COD_SUMMARY, data_coverage: COVERAGE })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    expect(screen.queryByTestId("payment-data-notice")).not.toBeInTheDocument()
+  })
+
   it("clicking Payment Success opens exactly that KPI's drilldown", async () => {
     renderWithProviders(<RemittanceDashboard module="cod" />)
     const grid = screen.getByTestId("payment-status-kpi-grid")

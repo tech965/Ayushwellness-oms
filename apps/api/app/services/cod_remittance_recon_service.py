@@ -33,19 +33,24 @@ from typing import Any
 
 from openpyxl import Workbook
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import User
 from app.models.cod_remittance import CodRemittance
 from app.models.enums import OrderStatus, PaymentType
 from app.models.order import Order
 from app.models.remittance_reconciliation import (
+    BankCredit,
     BankCreditLink,
     CodRemittanceLine,
     ReconciliationAdjustment,
+    SettlementFile,
 )
 from app.models.shipment import Shipment
+from app.models.shiprocket_finance import ShiprocketShipmentCharge
 from app.repositories.order import OrderRepository
 from app.repositories.shipment_effective import (
     effective_courier_name,
@@ -109,7 +114,34 @@ COD_STATUSES = ("pending", "partially_reconciled", "matched", "short", "excess")
 # that field's real vocabulary has never been confirmed against a live
 # account (see `app/integrations/shiprocket/remittance.py`), so it is not
 # used for this classification.
+#
+# One addition, from Shiprocket's DOCUMENTED order-detail response
+# (`GET /orders/show/{id}`: `remittance_utr`, `remittance_date`): an order whose
+# status is still "pending" because no remittance AMOUNT is known, but for which
+# Shiprocket reports a payout reference or date, is `payout_reported` and counts
+# as Payment Initiated, never Success. Shiprocket documents no remitted amount,
+# CRF id, or bank settlement, so that API alone can never establish "success";
+# the order keeps status "pending" and every amount stays as it was.
 PAYMENT_INITIATED_STATUSES = ("partially_reconciled", "short", "excess")
+
+
+def _is_payment_success(r: dict) -> bool:
+    """Only bank-confirmed reconciliation. `matched` also covers an order settled
+    purely by a manual adjustment (no courier remittance, no bank credit); that is
+    a write-off, not a payment, so it needs actual bank-confirmed money behind it."""
+    return r["status"] == "matched" and r["amount_received"] > 0
+
+
+def _is_payment_initiated(r: dict) -> bool:
+    return r["status"] in PAYMENT_INITIATED_STATUSES or bool(r.get("payout_reported"))
+
+
+def _is_payment_pending(r: dict) -> bool:
+    """Everything that is neither Success nor Initiated, so the three always
+    partition the delivered orders: no courier remittance or payout reported
+    (including an adjustment-only `matched` order with no bank-confirmed money)."""
+    return not _is_payment_success(r) and not _is_payment_initiated(r)
+
 
 # KPI / percentage drill selector -> predicate over a record.
 SELECTORS = {
@@ -122,9 +154,9 @@ SELECTORS = {
     "excess": lambda r: r["status"] == "excess",
     "reconciled": lambda r: r["status"] == "matched",
     "partial": lambda r: r["status"] == "partially_reconciled",
-    "payment_success": lambda r: r["status"] == "matched",
-    "payment_initiated": lambda r: r["status"] in PAYMENT_INITIATED_STATUSES,
-    "payment_pending": lambda r: r["status"] == "pending",
+    "payment_success": _is_payment_success,
+    "payment_initiated": _is_payment_initiated,
+    "payment_pending": _is_payment_pending,
     **BANK_SELECTORS,
 }
 
@@ -137,14 +169,14 @@ MEASURES = {
     "pending": ("Pending COD", lambda r: r["expected_amount"] + r["adjustment_amount"]),
     "short": ("Short amount", lambda r: -r["difference"]),
     "excess": ("Excess amount", lambda r: r["difference"]),
-    "payment_success": ("Payment success (matched COD)", lambda r: r["expected_amount"]),
+    "payment_success": ("Payment success (bank-confirmed COD)", lambda r: r["expected_amount"]),
     "payment_initiated": (
         "Payment initiated (reported, not yet bank-confirmed)",
         lambda r: r["expected_amount"],
     ),
     "payment_pending": (
         "Payment pending (no remittance reported yet)",
-        lambda r: r["expected_amount"] + r["adjustment_amount"],
+        lambda r: r["expected_amount"],
     ),
     **BANK_MEASURES,
 }
@@ -631,6 +663,7 @@ class CodRemittanceReconciliationService:
             lines = lines_by_order.get(order.id, [])
             expected = dec(order.total_amount)
             adj = adjustments.get(order.id, ZERO)
+            payout_indicator = False
             source = None
             remitted = ZERO
             confirmed = ZERO
@@ -675,6 +708,14 @@ class CodRemittanceReconciliationService:
                         manual = confirmed
                         covered = confirmed >= remitted - TOLERANCE
                         bank_date = rem.bank_credited_on
+                elif rem.remittance_reference or rem.settlement_date:
+                    # Order-detail payout indicator (UTR / date), no amount: the
+                    # amount, and so the reconciliation status, stays unknown.
+                    source = "shiprocket_order"
+                    payout_indicator = True
+                    remitted_on = rem.settlement_date
+                    if rem.remittance_reference:
+                        references.append(rem.remittance_reference)
             status = cod_status(expected, remitted, adj, confirmed, covered)
             before = remitted - expected
             order_dt = delivery_date or order.order_datetime
@@ -711,6 +752,7 @@ class CodRemittanceReconciliationService:
                     "status": status,
                     "status_label": STATUS_LABELS[status],
                     "source": source,
+                    "payout_reported": status == "pending" and payout_indicator,
                     "age_days": age_days,
                     "line_count": len(lines),
                     "_settlement_days": sorted(
@@ -875,8 +917,12 @@ class CodRemittanceReconciliationService:
         short_amount = money(sum((-r["difference"] for r in short), ZERO))
         excess_amount = money(sum((r["difference"] for r in excess), ZERO))
         matched = by_status["matched"]
-        initiated = [r for r in records if r["status"] in PAYMENT_INITIATED_STATUSES]
+        initiated = [r for r in records if _is_payment_initiated(r)]
         initiated_amount = money(sum((r["expected_amount"] for r in initiated), ZERO))
+        payment_pending = [r for r in records if _is_payment_pending(r)]
+        payment_pending_amount = money(sum((r["expected_amount"] for r in payment_pending), ZERO))
+        payment_success = [r for r in records if _is_payment_success(r)]
+        payment_success_amount = money(sum((r["expected_amount"] for r in payment_success), ZERO))
         matched_amount = money(sum((r["expected_amount"] for r in matched), ZERO))
         total_cod_orders, total_cod_amount = await self._total_cod_orders(f)
         unmatched_lines = [u for u in unmatched if u["kind"] == "remittance_line"]
@@ -911,9 +957,9 @@ class CodRemittanceReconciliationService:
             # "total_cod_orders" is a wider population (every COD order, not
             # just delivered ones) so it has no drilldown in this module.
             "total_cod_orders": {"count": total_cod_orders, "amount": money(total_cod_amount)},
-            "payment_success": {"count": len(matched), "amount": matched_amount},
+            "payment_success": {"count": len(payment_success), "amount": payment_success_amount},
             "payment_initiated": {"count": len(initiated), "amount": initiated_amount},
-            "payment_pending": {"count": len(pending), "amount": pending_amount},
+            "payment_pending": {"count": len(payment_pending), "amount": payment_pending_amount},
         }
         pct = [
             percentage_item(
@@ -1053,6 +1099,101 @@ class CodRemittanceReconciliationService:
                 "total_cod_orders": total_cod_orders,
                 "total_cod_amount": money(total_cod_amount),
             },
+            "data_coverage": await self._data_coverage(payment_pending),
+        }
+
+    async def _charges_table_exists(self) -> bool:
+        """Probes `shiprocket_shipment_charges` (migration f2b8d4a6c0e1, which a database
+        may not have yet) inside a SAVEPOINT, so a missing table rolls back only the
+        probe and never aborts the summary's transaction."""
+        try:
+            async with self.session.begin_nested():
+                await self.session.execute(select(ShiprocketShipmentCharge.id).limit(1))
+        except (ProgrammingError, OperationalError):
+            return False
+        return True
+
+    async def _unchecked_pending(self, pending: list[dict]) -> int | None:
+        """Payment-Pending orders whose Shiprocket order record was never read
+        (`GET /orders/show` leaves a `ShiprocketShipmentCharge` row per AWB, even
+        when its payout fields are blank). Such an order is "unknown", not "no
+        payout"; it can only be Pending because nothing says otherwise."""
+        if not await self._charges_table_exists():
+            return None  # unknown, never reported as 0: the dashboard says so
+        awbs = sorted({r["awb"] for r in pending if r["awb"]})
+        checked: set[str] = set()
+        for part in chunks(awbs):
+            checked.update(
+                (
+                    await self.session.execute(
+                        select(ShiprocketShipmentCharge.awb).where(
+                            ShiprocketShipmentCharge.awb.in_(list(part))
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return sum(1 for r in pending if not r["awb"] or r["awb"] not in checked)
+
+    async def _data_coverage(self, payment_pending: list[dict]) -> dict[str, Any]:
+        """What remittance / bank evidence OMS holds at all (all time, not the
+        selected date range). Lets the dashboard tell "no remittance reported"
+        apart from "no remittance data has been loaded": with no evidence
+        loaded, every delivered order is `pending` simply because nothing can
+        say otherwise, which is a data limitation, not confirmed non-payment."""
+
+        async def count(stmt) -> int:  # noqa: ANN001
+            return int((await self.session.execute(stmt)).scalar_one() or 0)
+
+        lines = await count(select(func.count(CodRemittanceLine.id)))
+        api_reported = await count(
+            select(func.count(CodRemittance.id)).where(CodRemittance.remitted_amount > 0)
+        )
+        # Shiprocket order-detail payout indicators (UTR / date) with no amount.
+        order_payouts = await count(
+            select(func.count(CodRemittance.id)).where(
+                (CodRemittance.remitted_amount.is_(None) | (CodRemittance.remitted_amount <= 0)),
+                (
+                    CodRemittance.remittance_reference.is_not(None)
+                    | CodRemittance.settlement_date.is_not(None)
+                ),
+            )
+        )
+        bank_credits = await count(select(func.count(BankCredit.id)))
+        manual_verifications = await count(
+            select(func.count(CodRemittance.id)).where(CodRemittance.bank_verified_at.is_not(None))
+        )
+        last_upload = (
+            await self.session.execute(
+                select(func.max(SettlementFile.created_at)).where(SettlementFile.module == MODULE)
+            )
+        ).scalar_one()
+        last_api_sync = (
+            await self.session.execute(select(func.max(CodRemittance.synced_at)))
+        ).scalar_one()
+        has_remittance_data = lines > 0 or api_reported > 0 or order_payouts > 0
+        return {
+            "remittance_lines": lines,
+            "api_reported_remittances": api_reported,
+            "order_payout_references": order_payouts,
+            "bank_credits": bank_credits,
+            "manual_bank_verifications": manual_verifications,
+            "last_upload_at": last_upload,
+            "last_api_sync_at": last_api_sync,
+            "api_sync_configured": bool(settings.SHIPROCKET_REMITTANCE_PATH),
+            "has_remittance_data": has_remittance_data,
+            "has_bank_data": bank_credits > 0 or manual_verifications > 0,
+            # True: "Payment Pending" means "nothing loaded to say otherwise".
+            "pending_is_data_limited": not has_remittance_data,
+            # In the selected period: Payment-Pending orders and how many of them were
+            # never checked against Shiprocket's order API (nor are in any report).
+            "pending_orders": len(payment_pending),
+            "pending_unchecked_orders": (
+                unchecked := await self._unchecked_pending(payment_pending)
+            ),
+            # False: the "was it read from Shiprocket" evidence cannot be queried yet.
+            "pending_check_available": unchecked is not None,
         }
 
     async def drilldown_records(self, f: Filters, kpi: str | None) -> tuple[list[dict], dict]:

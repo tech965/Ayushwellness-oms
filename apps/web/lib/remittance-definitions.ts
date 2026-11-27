@@ -33,11 +33,11 @@ export const COD_DEFINITIONS = {
   total_cod_orders:
     "Every non-cancelled COD order in the period, delivered or not. Wider than every other figure on this page, which covers delivered COD orders only -- so this card has no drilldown here.",
   payment_success:
-    "Delivered COD orders that are fully remitted and bank-confirmed (status: matched).",
+    "Delivered COD orders that are fully remitted by the courier AND bank-confirmed -- a bank statement credit linked to the remittance, or a person-verified bank credit. Shiprocket's own payout fields are a courier report, never bank confirmation, and an order settled only by a manual adjustment is not a payment.",
   payment_initiated:
-    "Delivered COD orders with a courier-reported remittance that is not yet a clean, bank-confirmed match (status: partially reconciled, short or excess).",
+    "Delivered COD orders where the courier has reported a remittance that is not yet a clean, bank-confirmed match: a remittance that is partial, short, excess or not yet bank-confirmed, or an order whose Shiprocket record shows a payout reference (UTR) or date but no amount. A courier payout is not a bank settlement.",
   payment_pending:
-    "Delivered COD orders with no courier-reported remittance yet (status: pending). Same figure as \"Pending Settlement\" above.",
+    'Delivered COD orders with no courier-reported remittance and no Shiprocket payout reference or date. It means "none on record", not "none issued": orders never read from Shiprocket or listed in a CRF report are included (see the data notice above). Can be lower than "Pending Settlement", which also counts orders whose payout reference is known but whose amount is not.',
 } as const
 
 export const PREPAID_DEFINITIONS = {

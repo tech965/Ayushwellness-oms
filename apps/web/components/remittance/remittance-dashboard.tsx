@@ -12,6 +12,7 @@ import { useDebouncedValue } from "@/components/shared/order-drilldown"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { SelectableStatCard } from "@/components/shared/selectable-stat-card"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -331,7 +332,7 @@ function paymentStatusCards(s: RemittanceSummary): KpiCard[] {
       label: "Payment Success",
       value: count("payment_success").toLocaleString("en-IN"),
       detail: `${rupees(amt("payment_success"))} · ${share(count("payment_success"), delivered)} of delivered`,
-      description: "Fully remitted by the courier and bank-confirmed",
+      description: "Fully remitted by the courier and bank-confirmed (a courier payout alone is not)",
       drill: "payment_success",
       accent: "green",
     },
@@ -340,7 +341,7 @@ function paymentStatusCards(s: RemittanceSummary): KpiCard[] {
       label: "Payment Initiated",
       value: count("payment_initiated").toLocaleString("en-IN"),
       detail: `${rupees(amt("payment_initiated"))} · ${share(count("payment_initiated"), delivered)} of delivered`,
-      description: "Reported by the courier, not yet a clean bank-confirmed match",
+      description: "Courier remittance or payout reported, not yet bank-confirmed",
       drill: "payment_initiated",
       accent: "amber",
     },
@@ -349,11 +350,58 @@ function paymentStatusCards(s: RemittanceSummary): KpiCard[] {
       label: "Payment Pending",
       value: count("payment_pending").toLocaleString("en-IN"),
       detail: `${rupees(amt("payment_pending"))} · ${share(count("payment_pending"), delivered)} of delivered`,
-      description: "No courier-reported remittance yet",
+      description: "No courier remittance or payout reported",
       drill: "payment_pending",
       accent: "red",
     },
   ]
+}
+
+/** Says so when the Payment Success / Initiated / Pending figures rest on missing
+ * data: with no remittance loaded every delivered order is "pending" only
+ * because nothing reports otherwise, and without bank data nothing can be
+ * "success". Renders nothing once both kinds of evidence are present. */
+function PaymentDataNotice({
+  coverage,
+}: {
+  coverage: RemittanceSummary["data_coverage"]
+}) {
+  if (!coverage) return null
+  const unchecked = coverage.pending_unchecked_orders ?? 0
+  const notices: { title: string; body: string }[] = []
+  if (!coverage.has_remittance_data) {
+    notices.push({
+      title: "No Shiprocket remittance data loaded",
+      body: "OMS holds no COD remittance, CRF or payout records yet, so delivered orders show as Payment Pending only because nothing reports otherwise. That is not confirmed non-payment. Upload the Shiprocket COD remittance (CRF) report under Files & sources, or run the Shiprocket order sync.",
+    })
+  } else if (coverage.pending_check_available === false) {
+    notices.push({
+      title: "Cannot tell which Payment Pending orders were never checked",
+      body: "The Shiprocket order-read record is not available yet (a database update is pending), so Payment Pending cannot be separated into unpaid and never-checked orders. Treat Pending as unknown, not unpaid.",
+    })
+  } else if (unchecked > 0) {
+    notices.push({
+      title: `${unchecked.toLocaleString("en-IN")} of ${Number(coverage.pending_orders ?? 0).toLocaleString("en-IN")} Payment Pending orders were never checked`,
+      body: "They are in no uploaded remittance report and their Shiprocket order record has not been read, so a payout may already exist. For these orders Pending means unknown, not unpaid. Upload the CRF report or run the Shiprocket order sync.",
+    })
+  }
+  if (!coverage.has_bank_data) {
+    notices.push({
+      title: "No bank statement imported",
+      body: "Payment Success needs bank confirmation. Until a bank statement is imported or a credit is verified, fully remitted orders stay under Payment Initiated.",
+    })
+  }
+  if (notices.length === 0) return null
+  return (
+    <Alert data-testid="payment-data-notice">
+      {notices.map((notice) => (
+        <React.Fragment key={notice.title}>
+          <AlertTitle>{notice.title}</AlertTitle>
+          <AlertDescription>{notice.body}</AlertDescription>
+        </React.Fragment>
+      ))}
+    </Alert>
+  )
 }
 
 function prepaidCards(s: RemittanceSummary): KpiCard[] {
@@ -955,6 +1003,7 @@ export function RemittanceDashboard({ module }: Props) {
               {isCod && (
                 <section className="space-y-2" aria-label="Payment status">
                   <h3 className="text-base font-semibold">Payment status</h3>
+                  <PaymentDataNotice coverage={summary.data_coverage} />
                   <div
                     className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5"
                     data-testid="payment-status-kpi-grid"
