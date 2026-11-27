@@ -121,6 +121,13 @@ class ShipmentStatusAnalyticsService:
             date_from=date_from,
             date_to=date_to,
         )
+        coverage = await self.orders.unified_status_shipment_coverage(
+            courier_id=courier_id,
+            payment_type=payment_type,
+            sku=sku,
+            date_from=date_from,
+            date_to=date_to,
+        )
         total_orders = sum(counts.values())
         total_eligible = sum(
             c for status, c in counts.items() if status not in _NOT_ELIGIBLE_STATUSES
@@ -137,6 +144,20 @@ class ShipmentStatusAnalyticsService:
             "total_fulfilled": sum(c for st, c in counts.items() if st in FULFILLED_STATUSES),
             "total_delivered": counts["delivered"],
             "total_rto": rto_count,
+            # Additive fields (existing `total_*` fields above are
+            # unchanged) so a caller comparing this OMS's order-level
+            # counts against a courier's own shipment-level export can
+            # see why the two populations differ, instead of the gap
+            # looking like missing/wrong data. `orders_with_shipment_
+            # count + orders_without_shipment_count` always equals
+            # `total_orders`. `rto_breakdown`'s three values always sum
+            # to `total_rto` -- lets a caller pick the matching single
+            # sub-status when the courier's own RTO figure isn't the
+            # same 3-state combination this dashboard's `total_rto` is.
+            "orders_with_shipment_count": coverage["orders_with_shipment_count"],
+            "orders_without_shipment_count": coverage["orders_without_shipment_count"],
+            "orders_without_shipment_amount": coverage["orders_without_shipment_amount"],
+            "rto_breakdown": {status: counts[status] for status in RTO_STATUSES},
             "status_groups": [
                 {
                     "key": key,

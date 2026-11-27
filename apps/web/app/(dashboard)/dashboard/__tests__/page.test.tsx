@@ -285,3 +285,86 @@ describe("Dashboard analytics query gating", () => {
     }
   })
 })
+
+// Root-cause regression test: production testing found that clicking
+// "Fulfilled Orders"/"Unfulfilled Orders" on the Main Dashboard redirected
+// to the generic `/orders` list instead of the Order Breakdown page's
+// Fulfilled/Unfulfilled panel. Pins the fix so it can't silently regress.
+describe("Dashboard Fulfilled/Unfulfilled KPI navigation", () => {
+  beforeEach(() => {
+    mockedUseAuth.mockReturnValue({
+      user: {
+        id: "1",
+        name: "Test",
+        email: "t@example.com",
+        phone: null,
+        is_active: true,
+        is_superuser: false,
+        roles: [],
+        permissions: [],
+      },
+      permissions: new Set(),
+      isLoading: false,
+      hasPermission: () => true,
+      hasRole: () => false,
+      logout: vi.fn(),
+    } as unknown as ReturnType<typeof useAuth>)
+    for (const hook of [
+      mockedSummary,
+      mockedBreakdowns,
+      mockedCourier,
+      mockedRecent,
+      mockedReturnsRefunds,
+      mockedTopProducts,
+      mockedTimeseries,
+    ]) {
+      const mocked = hook as unknown as {
+        mockReset: () => void
+        mockReturnValue: (value: unknown) => void
+      }
+      mocked.mockReset()
+      mocked.mockReturnValue({ data: undefined, isLoading: false })
+    }
+    searchParams = new URLSearchParams()
+  })
+
+  it("Fulfilled Orders links into /orders/breakdown with fulfillment_status=fulfilled, never /orders", () => {
+    renderWithProviders(<DashboardPage />)
+    const link = screen.getByRole("link", { name: /Fulfilled Orders/ })
+    const href = link.getAttribute("href") ?? ""
+    expect(href.startsWith("/orders/breakdown?")).toBe(true)
+    expect(href).toContain("fulfillment_status=fulfilled")
+  })
+
+  it("Unfulfilled Orders links into /orders/breakdown with fulfillment_status=unfulfilled, never /orders", () => {
+    renderWithProviders(<DashboardPage />)
+    const link = screen.getByRole("link", { name: /Unfulfilled Orders/ })
+    const href = link.getAttribute("href") ?? ""
+    expect(href.startsWith("/orders/breakdown?")).toBe(true)
+    expect(href).toContain("fulfillment_status=unfulfilled")
+  })
+
+  it("Unfulfilled Orders still routes a Team Leader to the team-scoped page, unaffected by the fix", () => {
+    mockedUseAuth.mockReturnValue({
+      user: {
+        id: "1",
+        name: "Test",
+        email: "t@example.com",
+        phone: null,
+        is_active: true,
+        is_superuser: false,
+        roles: [],
+        permissions: [],
+      },
+      permissions: new Set(),
+      isLoading: false,
+      hasPermission: () => true,
+      hasRole: (role: string) => role === "TEAM_LEADER",
+      logout: vi.fn(),
+    } as unknown as ReturnType<typeof useAuth>)
+
+    renderWithProviders(<DashboardPage />)
+    const link = screen.getByRole("link", { name: /Unfulfilled Orders/ })
+    expect(link.getAttribute("href")).toBe("/team/orders/unfulfilled")
+  })
+})

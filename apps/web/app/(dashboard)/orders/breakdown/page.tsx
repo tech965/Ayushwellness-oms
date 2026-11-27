@@ -29,7 +29,7 @@ import {
   useRevenueTimeseries,
 } from "@/services/analytics"
 
-const FILTER_DEFAULTS = { date_from: "", date_to: "" }
+const FILTER_DEFAULTS = { date_from: "", date_to: "", fulfillment_status: "" }
 
 function pct(part: number, total: number): string {
   if (total <= 0) return "0%"
@@ -59,6 +59,25 @@ export default function OrderBreakdownPage() {
 
 function OrderBreakdownContent() {
   const { filters } = useUrlFilters(FILTER_DEFAULTS)
+  const selectedFulfillment =
+    filters.fulfillment_status === "fulfilled" || filters.fulfillment_status === "unfulfilled"
+      ? filters.fulfillment_status
+      : null
+
+  const fulfilledPanelRef = React.useRef<HTMLDivElement>(null)
+  const unfulfilledPanelRef = React.useRef<HTMLDivElement>(null)
+
+  // Scrolls to and highlights the matching panel when arriving via a
+  // "Fulfilled Orders"/"Unfulfilled Orders" KPI link (Main Dashboard or
+  // this page's own tiles below) instead of leaving the user stranded at
+  // the top of the page — persists across refresh since it's a real URL
+  // query param, not component state.
+  React.useEffect(() => {
+    if (!selectedFulfillment) return
+    const target =
+      selectedFulfillment === "fulfilled" ? fulfilledPanelRef.current : unfulfilledPanelRef.current
+    target?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [selectedFulfillment])
 
   // Same resolution/default window as the Dashboard (last 30 days) so a
   // direct visit to this page (not via the drill-down link) still shows a
@@ -164,7 +183,10 @@ function OrderBreakdownContent() {
               }
               subtext={pct(Number(summary?.fulfilled_orders.current ?? 0), totalOrders)}
               accent="emerald"
-              href={ordersHref({ fulfillment_status: "fulfilled" })}
+              // Scrolls to the Fulfilled/Unfulfilled panel below (same
+              // page) instead of the generic Orders list every other tile
+              // drills into — matches the Main Dashboard's equivalent KPI.
+              href={`?${orderQueryString}&fulfillment_status=fulfilled`}
             />
             <StatTile
               label="Unfulfilled Orders"
@@ -174,7 +196,7 @@ function OrderBreakdownContent() {
               }
               subtext={pct(Number(summary?.unfulfilled_orders.current ?? 0), totalOrders)}
               accent="amber"
-              href={ordersHref({ fulfillment_status: "unfulfilled" })}
+              href={`?${orderQueryString}&fulfillment_status=unfulfilled`}
             />
             <StatTile
               label="Cancelled Orders"
@@ -234,20 +256,38 @@ function OrderBreakdownContent() {
             >
               {(data) => (
                 <div className="grid gap-6 lg:grid-cols-2">
-                  <FulfillmentPaymentClassificationPanel
-                    title="Fulfilled Orders — Payment Breakdown"
-                    fulfillmentStatus="fulfilled"
-                    bucket={data.fulfilled}
-                    dateFrom={dateParams.date_from}
-                    dateTo={dateParams.date_to}
-                  />
-                  <FulfillmentPaymentClassificationPanel
-                    title="Unfulfilled Orders — Payment Breakdown"
-                    fulfillmentStatus="unfulfilled"
-                    bucket={data.unfulfilled}
-                    dateFrom={dateParams.date_from}
-                    dateTo={dateParams.date_to}
-                  />
+                  <div
+                    ref={fulfilledPanelRef}
+                    className={
+                      selectedFulfillment === "fulfilled"
+                        ? "rounded-lg ring-2 ring-primary ring-offset-2"
+                        : undefined
+                    }
+                  >
+                    <FulfillmentPaymentClassificationPanel
+                      title="Fulfilled Orders — Payment Breakdown"
+                      fulfillmentStatus="fulfilled"
+                      bucket={data.fulfilled}
+                      dateFrom={dateParams.date_from}
+                      dateTo={dateParams.date_to}
+                    />
+                  </div>
+                  <div
+                    ref={unfulfilledPanelRef}
+                    className={
+                      selectedFulfillment === "unfulfilled"
+                        ? "rounded-lg ring-2 ring-primary ring-offset-2"
+                        : undefined
+                    }
+                  >
+                    <FulfillmentPaymentClassificationPanel
+                      title="Unfulfilled Orders — Payment Breakdown"
+                      fulfillmentStatus="unfulfilled"
+                      bucket={data.unfulfilled}
+                      dateFrom={dateParams.date_from}
+                      dateTo={dateParams.date_to}
+                    />
+                  </div>
                 </div>
               )}
             </QueryStates>

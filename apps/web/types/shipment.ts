@@ -264,6 +264,20 @@ export interface ShipmentStatusAnalytics {
   total_fulfilled?: number
   total_delivered?: number
   total_rto?: number
+  /** Orders whose most-recent shipment is a real, non-null row vs. none at all --
+   * explains why this order-level total can differ from a courier's own
+   * shipment-level export (e.g. orders fulfilled directly via Shopify never
+   * get a local Shipment row). with + without == total_orders. */
+  orders_with_shipment_count?: number
+  orders_without_shipment_count?: number
+  orders_without_shipment_amount?: string
+  /** total_rto's 3 sub-statuses, so a courier's single-status RTO figure can
+   * be compared against the matching sub-component instead of the combined total. */
+  rto_breakdown?: {
+    rto_initiated: number
+    rto_in_transit: number
+    rto_delivered: number
+  }
   status_groups?: StatusGroupCount[]
   status_breakdown: UnifiedStatusCount[]
   pickup_rate: number

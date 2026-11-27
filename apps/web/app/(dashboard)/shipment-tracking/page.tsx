@@ -359,6 +359,27 @@ function ShipmentTrackingPageContent() {
                 />
               </div>
 
+              <p className="text-muted-foreground text-xs">
+                Order coverage:{" "}
+                {data.orders_with_shipment_count ?? 0} order
+                {data.orders_with_shipment_count === 1 ? "" : "s"} matched to a shipment,{" "}
+                {data.orders_without_shipment_count ?? 0} order
+                {data.orders_without_shipment_count === 1 ? "" : "s"} have no shipment record
+                (fulfilled directly via Shopify, or not yet shipped) — these counts are
+                order-level, so they will not line up 1:1 with a courier&apos;s own
+                shipment-level export.
+                {data.rto_breakdown && (
+                  <>
+                    {" "}
+                    RTO breakdown: {data.rto_breakdown.rto_initiated} initiated,{" "}
+                    {data.rto_breakdown.rto_in_transit} in transit,{" "}
+                    {data.rto_breakdown.rto_delivered} delivered — compare against the matching
+                    single status on the courier&apos;s side rather than the combined total
+                    above.
+                  </>
+                )}
+              </p>
+
               <div className="grid gap-4 xl:grid-cols-2">
                 <section className="bg-card min-w-0 space-y-3 rounded-xl border p-4">
                   <div>

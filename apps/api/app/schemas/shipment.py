@@ -267,6 +267,15 @@ class ShipmentStatusAnalyticsResponse(BaseModel):
     total_fulfilled: int = 0
     total_delivered: int = 0
     total_rto: int = 0
+    # Additive: lets a caller see why this order-level dashboard's
+    # counts differ from a courier's own shipment-level export, instead
+    # of the gap looking like missing/wrong data. `orders_with_shipment_
+    # count + orders_without_shipment_count == total_orders`;
+    # `rto_breakdown`'s three values sum to `total_rto`.
+    orders_with_shipment_count: int = 0
+    orders_without_shipment_count: int = 0
+    orders_without_shipment_amount: Decimal = Decimal("0")
+    rto_breakdown: dict[str, int] = {}
     status_groups: list[StatusGroupCount] = []
     status_breakdown: list[UnifiedStatusCount]
     pickup_rate: float
