@@ -13,14 +13,21 @@ import {
 import { endOfDay, startOfDay, subDays } from "date-fns"
 
 import { DrilldownOrdersTable } from "@/components/analytics/drilldown-orders-table"
+import { FulfillmentPaymentClassificationPanel } from "@/components/analytics/fulfillment-payment-classification-panel"
 import { SplitTimelineChart } from "@/components/analytics/split-timeline-chart"
 import { StatusDonutCard } from "@/components/dashboard/status-donut-card"
 import { PageHeader } from "@/components/shared/page-header"
+import { QueryStates } from "@/components/shared/query-states"
 import { StatTile } from "@/components/shared/stat-tile"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatDate, formatMoney } from "@/lib/format"
 import { useUrlFilters } from "@/lib/use-url-filters"
-import { useAnalyticsSummary, useBreakdowns, useRevenueTimeseries } from "@/services/analytics"
+import {
+  useAnalyticsSummary,
+  useBreakdowns,
+  useFulfillmentPaymentBreakdown,
+  useRevenueTimeseries,
+} from "@/services/analytics"
 
 const FILTER_DEFAULTS = { date_from: "", date_to: "" }
 
@@ -70,6 +77,7 @@ function OrderBreakdownContent() {
   const summaryQuery = useAnalyticsSummary(dateParams)
   const breakdownsQuery = useBreakdowns(dateParams)
   const timeseriesQuery = useRevenueTimeseries({ ...dateParams, interval: "day" })
+  const fulfillmentPaymentQuery = useFulfillmentPaymentBreakdown(dateParams)
   const summary = summaryQuery.data
 
   const ordersTimelineData = (timeseriesQuery.data?.points ?? []).map((p) => ({
@@ -206,6 +214,44 @@ function OrderBreakdownContent() {
             filters={dateParams}
             ordersHref={ordersHref({})}
           />
+
+          <section className="space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-lg font-semibold">Fulfilled / Unfulfilled Breakdown</h2>
+              <a
+                href={`/orders/breakdown/cod-dashboard?${orderQueryString}`}
+                className="text-primary text-sm font-medium hover:underline"
+              >
+                View COD Orders Dashboard →
+              </a>
+            </div>
+            <QueryStates
+              isLoading={fulfillmentPaymentQuery.isLoading}
+              isError={fulfillmentPaymentQuery.isError}
+              error={fulfillmentPaymentQuery.error}
+              data={fulfillmentPaymentQuery.data}
+              onRetry={() => fulfillmentPaymentQuery.refetch()}
+            >
+              {(data) => (
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <FulfillmentPaymentClassificationPanel
+                    title="Fulfilled Orders — Payment Breakdown"
+                    fulfillmentStatus="fulfilled"
+                    bucket={data.fulfilled}
+                    dateFrom={dateParams.date_from}
+                    dateTo={dateParams.date_to}
+                  />
+                  <FulfillmentPaymentClassificationPanel
+                    title="Unfulfilled Orders — Payment Breakdown"
+                    fulfillmentStatus="unfulfilled"
+                    bucket={data.unfulfilled}
+                    dateFrom={dateParams.date_from}
+                    dateTo={dateParams.date_to}
+                  />
+                </div>
+              )}
+            </QueryStates>
+          </section>
         </div>
       )}
     </>

@@ -81,6 +81,7 @@ from app.models.returns import Return
 from app.models.rto import RTO
 from app.models.shipment import Shipment
 from app.repositories.customer import CustomerRepository
+from app.repositories.order import OrderRepository
 from app.schemas.analytics import (
     AnalyticsSummaryResponse,
     BreakdownsResponse,
@@ -105,6 +106,7 @@ from app.schemas.analytics import (
     TimeseriesPoint,
     TopProduct,
 )
+from app.services.shipment_status import UNIFIED_STATUSES, unified_status_sql_case
 
 DEFAULT_WINDOW_DAYS = 30
 
@@ -849,6 +851,354 @@ class AnalyticsService:
                 for p_id, p_order_id, p_amount, p_status, p_created_at in payments
             ],
         )
+
+    async def get_fulfillment_payment_breakdown(
+        self, date_from: datetime | None, date_to: datetime | None
+    ) -> dict[str, object]:
+        """Total/COD/Prepaid amount + order count + % for Shopify-
+        fulfilled vs Shopify-unfulfilled orders (`Order.fulfillment_status`
+        -- the SAME field `_summary_counts`' `fulfilled_orders`/
+        `unfulfilled_orders` already uses; this does NOT introduce a
+        second "fulfilled" definition). `FulfillmentStatus.PARTIAL`
+        orders fall into neither bucket -- the exact same thing already
+        true of `fulfilled_orders + unfulfilled_orders` not summing to
+        `total_orders` in `_summary_counts`, not a new exclusion rule.
+
+        Within each bucket, `cod`/`prepaid` percentages are of that
+        BUCKET's own amount (not the grand total), so "what share of
+        Fulfilled revenue is COD" reads directly off the response.
+        `PaymentType.OTHER` orders count toward the bucket total but not
+        toward either cod/prepaid split -- same convention
+        `get_revenue_timeseries` already uses (COD + Prepaid need not
+        sum to the bucket total).
+        """
+        r = resolve_range(date_from, date_to)
+
+        def _count_if(condition):  # noqa: ANN001, ANN202
+            return func.count(case((condition, 1)))
+
+        def _sum_if(condition):  # noqa: ANN001, ANN202
+            return func.coalesce(func.sum(case((condition, Order.total_amount))), 0)
+
+        fulfilled = Order.fulfillment_status == FulfillmentStatus.FULFILLED
+        unfulfilled = Order.fulfillment_status == FulfillmentStatus.UNFULFILLED
+        is_cod = Order.payment_type == PaymentType.COD
+        is_prepaid = Order.payment_type == PaymentType.PREPAID
+
+        row = (
+            await self.session.execute(
+                select(
+                    func.count(),
+                    func.coalesce(func.sum(Order.total_amount), 0),
+                    _count_if(fulfilled),
+                    _sum_if(fulfilled),
+                    _count_if(fulfilled & is_cod),
+                    _sum_if(fulfilled & is_cod),
+                    _count_if(fulfilled & is_prepaid),
+                    _sum_if(fulfilled & is_prepaid),
+                    _count_if(unfulfilled),
+                    _sum_if(unfulfilled),
+                    _count_if(unfulfilled & is_cod),
+                    _sum_if(unfulfilled & is_cod),
+                    _count_if(unfulfilled & is_prepaid),
+                    _sum_if(unfulfilled & is_prepaid),
+                ).where(Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to)
+            )
+        ).one()
+        (
+            total_orders,
+            total_amount_raw,
+            f_count,
+            f_amount_raw,
+            f_cod_count,
+            f_cod_amount_raw,
+            f_prepaid_count,
+            f_prepaid_amount_raw,
+            u_count,
+            u_amount_raw,
+            u_cod_count,
+            u_cod_amount_raw,
+            u_prepaid_count,
+            u_prepaid_amount_raw,
+        ) = row
+        total_amount = Decimal(total_amount_raw)
+
+        def _pct(amount: Decimal, denom: Decimal) -> float:
+            return float(amount / denom * 100) if denom else 0.0
+
+        def _bucket(  # noqa: ANN001, ANN202
+            count, amount_raw, cod_count, cod_amount_raw, prepaid_count, prepaid_amount_raw
+        ):
+            amount = Decimal(amount_raw)
+            cod_amount = Decimal(cod_amount_raw)
+            prepaid_amount = Decimal(prepaid_amount_raw)
+            return {
+                "order_count": int(count),
+                "amount": amount,
+                "percent_of_total_amount": _pct(amount, total_amount),
+                "cod": {
+                    "order_count": int(cod_count),
+                    "amount": cod_amount,
+                    "percent_of_bucket_amount": _pct(cod_amount, amount),
+                },
+                "prepaid": {
+                    "order_count": int(prepaid_count),
+                    "amount": prepaid_amount,
+                    "percent_of_bucket_amount": _pct(prepaid_amount, amount),
+                },
+            }
+
+        return {
+            "date_from": r.date_from,
+            "date_to": r.date_to,
+            "total_orders": int(total_orders),
+            "total_amount": total_amount,
+            "fulfilled": _bucket(
+                f_count,
+                f_amount_raw,
+                f_cod_count,
+                f_cod_amount_raw,
+                f_prepaid_count,
+                f_prepaid_amount_raw,
+            ),
+            "unfulfilled": _bucket(
+                u_count,
+                u_amount_raw,
+                u_cod_count,
+                u_cod_amount_raw,
+                u_prepaid_count,
+                u_prepaid_amount_raw,
+            ),
+        }
+
+    async def get_fulfillment_payment_classification(
+        self,
+        *,
+        fulfillment_status: str,
+        payment_type: str,
+        date_from: datetime | None,
+        date_to: datetime | None,
+    ) -> dict[str, object]:
+        """Shipment-status classification (Module 2's 12 unified
+        statuses, reused as-is -- see `app.services.shipment_status`) for
+        one Fulfilled/Unfulfilled x COD/Prepaid slice. This is the
+        "clicking COD or Prepaid expands a detailed classification"
+        requirement: every classification row shows order count, amount
+        and % of the SLICE's own amount (so the rows sum to ~100% of the
+        slice, modulo rounding) -- not invented reason labels. The
+        request's "Fulfilled classification: Delivered, RTO, In Transit,
+        NDR, Awaiting Pickup" list IS this unified-status list (Awaiting
+        Pickup = `pickup_pending`); "Unfulfilled classification" reuses
+        the SAME list rather than inventing separate reason buckets like
+        "customer not answering"/"pincode issue" that have no backing
+        data anywhere in this schema -- an unfulfilled order shows up
+        under whichever real pipeline state it's actually in
+        (`order_placed`/`ready_to_ship`/`pickup_pending`/`cancelled`/
+        `ndr`/the RTO buckets). See `get_ndr_reason_breakdown` for the
+        one place real reason text does exist (NDR).
+        """
+        r = resolve_range(date_from, date_to)
+        repo = OrderRepository(self.session)
+        amounts = await repo.unified_status_amounts(
+            payment_type=payment_type,
+            fulfillment_status=fulfillment_status,
+            date_from=r.date_from,
+            date_to=r.date_to,
+        )
+        slice_amount = sum((v["amount"] for v in amounts.values()), Decimal("0"))
+        slice_count = sum(int(v["count"]) for v in amounts.values())
+
+        def _pct(amount: Decimal) -> float:
+            return float(amount / slice_amount * 100) if slice_amount else 0.0
+
+        return {
+            "fulfillment_status": fulfillment_status,
+            "payment_type": payment_type,
+            "date_from": r.date_from,
+            "date_to": r.date_to,
+            "slice_order_count": slice_count,
+            "slice_amount": slice_amount,
+            "classifications": [
+                {
+                    "unified_status": status,
+                    "order_count": int(amounts[status]["count"]),
+                    "amount": amounts[status]["amount"],
+                    "percent_of_slice_amount": _pct(amounts[status]["amount"]),
+                }
+                for status in UNIFIED_STATUSES
+            ],
+        }
+
+    async def get_ndr_reason_breakdown(
+        self,
+        *,
+        fulfillment_status: str | None,
+        payment_type: str | None,
+        date_from: datetime | None,
+        date_to: datetime | None,
+    ) -> dict[str, object]:
+        """Real NDR reasons (`NDR.normalized_reason`, falling back to
+        raw `NDR.reason`) for orders currently classified `ndr` by
+        Module 2's unified-status funnel, within one optional
+        Fulfilled/Unfulfilled x COD/Prepaid slice. This is the ONLY
+        place genuine "why unfulfilled" reason text exists in this
+        schema (confirmed in the preceding read-only audit -- no
+        `cancel_reason` is persisted anywhere, and persisting Shopify's
+        is explicitly out of scope for this task). An NDR'd order with
+        no `normalized_reason`/`reason` at all -- or more than one NDR
+        row with differing reasons, in which case the MOST RECENT row
+        (by `created_at`) wins, mirroring the "most-recent-shipment"
+        rule used everywhere else in Module 2 -- reports as
+        `Unknown/Unclassified` rather than guessing. Percentages are of
+        this NDR population's own amount.
+        """
+        r = resolve_range(date_from, date_to)
+        repo = OrderRepository(self.session)
+        base_stmt, active_shipment = repo.unified_status_base_query(
+            payment_type=payment_type,
+            fulfillment_status=fulfillment_status,
+            date_from=r.date_from,
+            date_to=r.date_to,
+        )
+        bucket = unified_status_sql_case(
+            order_status_col=Order.status,
+            fulfillment_status_col=Order.fulfillment_status,
+            shipment_current_status_col=active_shipment.current_status,
+            shipment_rto_status_col=active_shipment.rto_status,
+        )
+        ndr_orders = base_stmt.where(bucket == "ndr").with_only_columns(
+            Order.id.label("order_id"), Order.total_amount.label("total_amount")
+        )
+        ndr_subq = ndr_orders.subquery()
+
+        latest_ndr_id = (
+            select(NDR.id)
+            .where(NDR.order_id == ndr_subq.c.order_id)
+            .order_by(NDR.created_at.desc())
+            .limit(1)
+            .correlate(ndr_subq)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(
+                func.coalesce(NDR.normalized_reason, NDR.reason),
+                func.count(),
+                func.coalesce(func.sum(ndr_subq.c.total_amount), 0),
+            )
+            .select_from(ndr_subq)
+            .outerjoin(NDR, NDR.id == latest_ndr_id)
+            .group_by(func.coalesce(NDR.normalized_reason, NDR.reason))
+        )
+        rows = (await self.session.execute(stmt)).all()
+
+        ndr_amount = sum((Decimal(amount) for _, _, amount in rows), Decimal("0"))
+        ndr_count = sum(count for _, count, _ in rows)
+
+        def _pct(amount: Decimal) -> float:
+            return float(amount / ndr_amount * 100) if ndr_amount else 0.0
+
+        reasons = [
+            {
+                "reason": reason or "Unknown/Unclassified",
+                "order_count": count,
+                "amount": Decimal(amount),
+                "percent_of_ndr_amount": _pct(Decimal(amount)),
+            }
+            for reason, count, amount in rows
+        ]
+        reasons.sort(key=lambda item: item["amount"], reverse=True)
+
+        return {
+            "fulfillment_status": fulfillment_status,
+            "payment_type": payment_type,
+            "date_from": r.date_from,
+            "date_to": r.date_to,
+            "ndr_order_count": ndr_count,
+            "ndr_amount": ndr_amount,
+            "reasons": reasons,
+        }
+
+    async def get_cod_dashboard(
+        self, date_from: datetime | None, date_to: datetime | None
+    ) -> dict[str, object]:
+        """Total COD / Fulfilled COD / Unfulfilled COD / Delivered COD --
+        4 KPIs, each order count + amount + % of Total COD's own amount.
+        `Total COD` = every `payment_type == COD` order regardless of
+        fulfillment/shipment state (the true COD population, includes
+        `FulfillmentStatus.PARTIAL`) -- the denominator for the other 3,
+        so its own % is always 100.0. `Fulfilled COD`/`Unfulfilled COD`
+        reuse the exact same Shopify `fulfillment_status` definition as
+        `get_fulfillment_payment_breakdown` (no second "fulfilled"
+        definition invented for this dashboard) -- because `PARTIAL`
+        orders are in `Total COD` but neither sub-bucket, Fulfilled% +
+        Unfulfilled% need not sum to 100%, same convention as that
+        method. `Delivered COD` is intentionally the DIFFERENT,
+        shipment-status axis (Module 2's unified `delivered` bucket,
+        reused via `OrderRepository.unified_status_amounts` -- the same
+        most-recent-shipment join as everywhere else, so a reshipped
+        order is never double-counted) -- it is not mutually exclusive
+        with Fulfilled/Unfulfilled COD and is not expected to sum with
+        them.
+        """
+        r = resolve_range(date_from, date_to)
+        repo = OrderRepository(self.session)
+
+        def _count_if(condition):  # noqa: ANN001, ANN202
+            return func.count(case((condition, 1)))
+
+        def _sum_if(condition):  # noqa: ANN001, ANN202
+            return func.coalesce(func.sum(case((condition, Order.total_amount))), 0)
+
+        is_cod = Order.payment_type == PaymentType.COD
+        fulfilled_cod = is_cod & (Order.fulfillment_status == FulfillmentStatus.FULFILLED)
+        unfulfilled_cod = is_cod & (Order.fulfillment_status == FulfillmentStatus.UNFULFILLED)
+
+        row = (
+            await self.session.execute(
+                select(
+                    _count_if(is_cod),
+                    _sum_if(is_cod),
+                    _count_if(fulfilled_cod),
+                    _sum_if(fulfilled_cod),
+                    _count_if(unfulfilled_cod),
+                    _sum_if(unfulfilled_cod),
+                ).where(Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to)
+            )
+        ).one()
+        (
+            total_count,
+            total_amount_raw,
+            fulfilled_count,
+            fulfilled_amount_raw,
+            unfulfilled_count,
+            unfulfilled_amount_raw,
+        ) = row
+        total_amount = Decimal(total_amount_raw)
+
+        delivered_amounts = await repo.unified_status_amounts(
+            payment_type="cod", date_from=r.date_from, date_to=r.date_to
+        )
+        delivered_count = int(delivered_amounts["delivered"]["count"])
+        delivered_amount = Decimal(delivered_amounts["delivered"]["amount"])
+
+        def _pct(amount: Decimal) -> float:
+            return float(amount / total_amount * 100) if total_amount else 0.0
+
+        def _kpi(count, amount: Decimal):  # noqa: ANN001
+            return {
+                "order_count": int(count),
+                "amount": amount,
+                "percent_of_total_cod_amount": _pct(amount),
+            }
+
+        return {
+            "date_from": r.date_from,
+            "date_to": r.date_to,
+            "total_cod": _kpi(total_count, total_amount),
+            "fulfilled_cod": _kpi(fulfilled_count, Decimal(fulfilled_amount_raw)),
+            "unfulfilled_cod": _kpi(unfulfilled_count, Decimal(unfulfilled_amount_raw)),
+            "delivered_cod": _kpi(delivered_count, delivered_amount),
+        }
 
 
 # The OMS's business calendar day is IST, not UTC (spec: "this OMS operates
