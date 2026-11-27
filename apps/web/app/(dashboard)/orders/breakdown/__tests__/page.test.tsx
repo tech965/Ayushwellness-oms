@@ -3,9 +3,14 @@ import { screen } from "@testing-library/react"
 
 import { renderWithProviders } from "@/test-utils/render-with-providers"
 import OrderBreakdownPage from "@/app/(dashboard)/orders/breakdown/page"
-import { useAnalyticsSummary, useBreakdowns, useRevenueTimeseries } from "@/services/analytics"
+import {
+  useAnalyticsSummary,
+  useBreakdowns,
+  useFulfillmentPaymentBreakdown,
+  useRevenueTimeseries,
+} from "@/services/analytics"
 import { useOrders } from "@/services/orders"
-import type { AnalyticsSummary, Breakdowns, RevenueTimeseries } from "@/types/analytics"
+import type { AnalyticsSummary, Breakdowns, FulfillmentPaymentBreakdown, RevenueTimeseries } from "@/types/analytics"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
@@ -17,6 +22,9 @@ vi.mock("@/services/analytics", () => ({
   useAnalyticsSummary: vi.fn(),
   useBreakdowns: vi.fn(),
   useRevenueTimeseries: vi.fn(),
+  useFulfillmentPaymentBreakdown: vi.fn(),
+  useFulfillmentPaymentClassification: vi.fn(),
+  useNdrReasonBreakdown: vi.fn(),
 }))
 
 vi.mock("@/services/orders", () => ({
@@ -26,7 +34,27 @@ vi.mock("@/services/orders", () => ({
 const mockedUseSummary = vi.mocked(useAnalyticsSummary)
 const mockedUseBreakdowns = vi.mocked(useBreakdowns)
 const mockedUseRevenueTimeseries = vi.mocked(useRevenueTimeseries)
+const mockedUseFulfillmentPaymentBreakdown = vi.mocked(useFulfillmentPaymentBreakdown)
 const mockedUseOrders = vi.mocked(useOrders)
+
+function paymentBucket(amount: string, codAmount: string, prepaidAmount: string) {
+  return {
+    order_count: 1,
+    amount,
+    percent_of_total_amount: 50,
+    cod: { order_count: 1, amount: codAmount, percent_of_bucket_amount: 50 },
+    prepaid: { order_count: 1, amount: prepaidAmount, percent_of_bucket_amount: 50 },
+  }
+}
+
+const FULFILLMENT_PAYMENT_BREAKDOWN: FulfillmentPaymentBreakdown = {
+  date_from: "2026-08-01T00:00:00Z",
+  date_to: "2026-08-29T00:00:00Z",
+  total_orders: 100,
+  total_amount: "500000.00",
+  fulfilled: paymentBucket("300000.00", "200000.00", "100000.00"),
+  unfulfilled: paymentBucket("200000.00", "150000.00", "50000.00"),
+}
 
 const EMPTY_TIMESERIES: RevenueTimeseries = { interval: "day", points: [] }
 
@@ -85,6 +113,10 @@ describe("OrderBreakdownPage", () => {
       data: EMPTY_TIMESERIES,
       isLoading: false,
     } as unknown as ReturnType<typeof useRevenueTimeseries>)
+    mockedUseFulfillmentPaymentBreakdown.mockReturnValue({
+      data: FULFILLMENT_PAYMENT_BREAKDOWN,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useFulfillmentPaymentBreakdown>)
     mockedUseOrders.mockReturnValue({
       data: { data: [], meta: { total_items: 0 } },
       isLoading: false,
@@ -147,6 +179,10 @@ describe("OrderBreakdownPage", () => {
       data: undefined,
       isLoading: true,
     } as unknown as ReturnType<typeof useRevenueTimeseries>)
+    mockedUseFulfillmentPaymentBreakdown.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+    } as unknown as ReturnType<typeof useFulfillmentPaymentBreakdown>)
     mockedUseOrders.mockReturnValue({
       data: undefined,
       isLoading: true,

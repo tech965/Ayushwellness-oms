@@ -1,12 +1,17 @@
 import { useQuery } from "@tanstack/react-query"
 
 import { apiClient } from "@/lib/api-client"
-import type { ApiResponse } from "@/types/api"
+import type { ApiResponse, PaginatedResponse } from "@/types/api"
 import type {
   AnalyticsDateRangeParams,
   AnalyticsSummary,
   Breakdowns,
+  CodDashboard,
   CourierPerformance,
+  FulfillmentPaymentBreakdown,
+  FulfillmentPaymentClassification,
+  FulfillmentPaymentOrderRow,
+  NdrReasonBreakdown,
   OrdersTimeseries,
   PaymentStatusBreakdown,
   PaymentStatusTimeseries,
@@ -254,5 +259,178 @@ export function useRecentActivity(options?: QueryLifecycleOptions) {
     queryFn: fetchRecentActivity,
     enabled: options?.enabled ?? true,
     refetchInterval: options?.refetchInterval ?? false,
+  })
+}
+
+async function fetchFulfillmentPaymentBreakdown(
+  params: AnalyticsDateRangeParams
+): Promise<FulfillmentPaymentBreakdown> {
+  const response = await apiClient.get<ApiResponse<FulfillmentPaymentBreakdown>>(
+    "/analytics/fulfillment-payment-breakdown",
+    { params }
+  )
+  if (!response.data.data) throw new Error("Fulfillment/payment breakdown not available.")
+  return response.data.data
+}
+
+export function useFulfillmentPaymentBreakdown(
+  params: AnalyticsDateRangeParams,
+  options?: QueryLifecycleOptions
+) {
+  return useQuery({
+    queryKey: ["analytics", "fulfillment-payment-breakdown", params],
+    queryFn: () => fetchFulfillmentPaymentBreakdown(params),
+    placeholderData: (previous) => previous,
+    enabled: options?.enabled ?? true,
+    refetchInterval: options?.refetchInterval ?? false,
+  })
+}
+
+interface FulfillmentPaymentClassificationParams extends AnalyticsDateRangeParams {
+  fulfillmentStatus: "fulfilled" | "unfulfilled"
+  paymentType: "cod" | "prepaid"
+  /** Only fetch once the user has actually expanded a COD/Prepaid KPI. */
+  enabled?: boolean
+}
+
+export function useFulfillmentPaymentClassification(
+  params: FulfillmentPaymentClassificationParams
+) {
+  const { fulfillmentStatus, paymentType, enabled = true, ...dateRange } = params
+  return useQuery({
+    queryKey: [
+      "analytics",
+      "fulfillment-payment-classification",
+      { fulfillmentStatus, paymentType, ...dateRange },
+    ],
+    queryFn: async (): Promise<FulfillmentPaymentClassification> => {
+      const response = await apiClient.get<ApiResponse<FulfillmentPaymentClassification>>(
+        "/analytics/fulfillment-payment-classification",
+        { params: { ...dateRange, fulfillment_status: fulfillmentStatus, payment_type: paymentType } }
+      )
+      if (!response.data.data) throw new Error("Classification not available.")
+      return response.data.data
+    },
+    enabled,
+  })
+}
+
+interface NdrReasonBreakdownParams extends AnalyticsDateRangeParams {
+  fulfillmentStatus?: "fulfilled" | "unfulfilled"
+  paymentType?: "cod" | "prepaid"
+  enabled?: boolean
+}
+
+export function useNdrReasonBreakdown(params: NdrReasonBreakdownParams) {
+  const { fulfillmentStatus, paymentType, enabled = true, ...dateRange } = params
+  return useQuery({
+    queryKey: [
+      "analytics",
+      "fulfillment-payment-ndr-reasons",
+      { fulfillmentStatus, paymentType, ...dateRange },
+    ],
+    queryFn: async (): Promise<NdrReasonBreakdown> => {
+      const response = await apiClient.get<ApiResponse<NdrReasonBreakdown>>(
+        "/analytics/fulfillment-payment-ndr-reasons",
+        {
+          params: {
+            ...dateRange,
+            fulfillment_status: fulfillmentStatus,
+            payment_type: paymentType,
+          },
+        }
+      )
+      if (!response.data.data) throw new Error("NDR reason breakdown not available.")
+      return response.data.data
+    },
+    enabled,
+  })
+}
+
+async function fetchCodDashboard(params: AnalyticsDateRangeParams): Promise<CodDashboard> {
+  const response = await apiClient.get<ApiResponse<CodDashboard>>("/analytics/cod-dashboard", {
+    params,
+  })
+  if (!response.data.data) throw new Error("COD dashboard not available.")
+  return response.data.data
+}
+
+export function useCodDashboard(
+  params: AnalyticsDateRangeParams,
+  options?: QueryLifecycleOptions
+) {
+  return useQuery({
+    queryKey: ["analytics", "cod-dashboard", params],
+    queryFn: () => fetchCodDashboard(params),
+    placeholderData: (previous) => previous,
+    enabled: options?.enabled ?? true,
+    refetchInterval: options?.refetchInterval ?? false,
+  })
+}
+
+/** Keeps the previous page on screen only while paging/searching inside the
+ * SAME selection+filters -- same rule as `useShipmentStatusDrilldown`'s
+ * `keepPreviousForSameScope`, duplicated locally since that one lives in
+ * `services/shipments.ts` and isn't exported.
+ */
+function keepPreviousForSameFulfillmentPaymentScope<T>(scope: unknown) {
+  return (previous: T | undefined, previousQuery?: { queryKey: readonly unknown[] }) =>
+    previousQuery && JSON.stringify(previousQuery.queryKey.at(-2)) === JSON.stringify(scope)
+      ? previous
+      : undefined
+}
+
+interface FulfillmentPaymentOrdersParams extends AnalyticsDateRangeParams {
+  unifiedStatus?: string
+  fulfillmentStatus?: "fulfilled" | "unfulfilled"
+  paymentType?: "cod" | "prepaid"
+  q?: string
+  page: number
+  pageSize: number
+  /** Only fetch once a KPI/classification row has actually been selected. */
+  enabled?: boolean
+}
+
+/** Order-level drill-down shared by the Fulfilled/Unfulfilled
+ * classification rows AND every COD Orders dashboard KPI -- same
+ * endpoint, same guarantee that a drill-down always matches the count on
+ * the row/card that opened it (see `GET /analytics/fulfillment-payment-
+ * orders`'s docstring).
+ */
+export function useFulfillmentPaymentOrders(params: FulfillmentPaymentOrdersParams) {
+  const {
+    unifiedStatus,
+    fulfillmentStatus,
+    paymentType,
+    q,
+    page,
+    pageSize,
+    enabled = true,
+    ...dateRange
+  } = params
+  const selector = { unifiedStatus, fulfillmentStatus, paymentType, ...dateRange }
+  return useQuery({
+    queryKey: ["analytics", "fulfillment-payment-orders", selector, { q, page, pageSize }],
+    queryFn: async (): Promise<PaginatedResponse<FulfillmentPaymentOrderRow>> => {
+      const response = await apiClient.get<PaginatedResponse<FulfillmentPaymentOrderRow>>(
+        "/analytics/fulfillment-payment-orders",
+        {
+          params: {
+            ...dateRange,
+            unified_status: unifiedStatus,
+            fulfillment_status: fulfillmentStatus,
+            payment_type: paymentType,
+            q: q || undefined,
+            page,
+            page_size: pageSize,
+          },
+        }
+      )
+      return response.data
+    },
+    enabled,
+    placeholderData: keepPreviousForSameFulfillmentPaymentScope<
+      PaginatedResponse<FulfillmentPaymentOrderRow>
+    >(selector),
   })
 }

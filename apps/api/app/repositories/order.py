@@ -558,6 +558,7 @@ class OrderRepository(BaseRepository[Order]):
         *,
         courier_id: uuid.UUID | None = None,
         payment_type: str | None = None,
+        fulfillment_status: str | None = None,
         sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
@@ -608,6 +609,17 @@ class OrderRepository(BaseRepository[Order]):
             stmt = stmt.where(active_shipment.courier_id == courier_id)
         if payment_type:
             stmt = stmt.where(Order.payment_type == payment_type)
+        if fulfillment_status:
+            # Shopify's own `Order.fulfillment_status` (FULFILLED/
+            # UNFULFILLED/PARTIAL) -- a different axis from the unified
+            # 12-status classification above (e.g. a Shopify-FULFILLED
+            # order can still be `ready_to_ship` here if it has no local
+            # Shipment row -- see `fulfilled_tracking_unavailable` in
+            # `app.services.shipment_status`). Added for the Fulfilled/
+            # Unfulfilled dashboard, which filters on the Shopify
+            # definition first and then shows the unified-status
+            # classification *within* that slice.
+            stmt = stmt.where(Order.fulfillment_status == fulfillment_status)
         if sku:
             stmt = stmt.where(
                 exists(
@@ -627,6 +639,7 @@ class OrderRepository(BaseRepository[Order]):
         *,
         courier_id: uuid.UUID | None = None,
         payment_type: str | None = None,
+        fulfillment_status: str | None = None,
         sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
@@ -638,6 +651,7 @@ class OrderRepository(BaseRepository[Order]):
         base_stmt, active_shipment = self.unified_status_base_query(
             courier_id=courier_id,
             payment_type=payment_type,
+            fulfillment_status=fulfillment_status,
             sku=sku,
             date_from=date_from,
             date_to=date_to,
@@ -661,6 +675,60 @@ class OrderRepository(BaseRepository[Order]):
         for status, count in rows:
             counts[status] = count
         return counts
+
+    async def unified_status_amounts(
+        self,
+        *,
+        courier_id: uuid.UUID | None = None,
+        payment_type: str | None = None,
+        fulfillment_status: str | None = None,
+        sku: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """Like `unified_status_counts`, but also sums `Order.total_amount`
+        per bucket -- the Fulfilled/Unfulfilled analytics and COD Orders
+        dashboard both need amount, not just count, per unified-status
+        classification. Purely additive (new method, new return shape);
+        does not change `unified_status_counts`'s existing `dict[str,
+        int]` contract or any of its callers (Modules 2/3/4). Each order
+        contributes its `total_amount` exactly once -- same
+        most-recent-shipment join as every other unified-status query,
+        so a reshipped order is never double-summed.
+        """
+        base_stmt, active_shipment = self.unified_status_base_query(
+            courier_id=courier_id,
+            payment_type=payment_type,
+            fulfillment_status=fulfillment_status,
+            sku=sku,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        bucket = unified_status_sql_case(
+            order_status_col=Order.status,
+            fulfillment_status_col=Order.fulfillment_status,
+            shipment_current_status_col=active_shipment.current_status,
+            shipment_rto_status_col=active_shipment.rto_status,
+        )
+        classified = (
+            base_stmt.order_by(None)
+            .with_only_columns(
+                bucket.label("unified_status"), Order.total_amount.label("total_amount")
+            )
+            .subquery()
+        )
+        stmt = select(
+            classified.c.unified_status,
+            func.count(),
+            func.coalesce(func.sum(classified.c.total_amount), 0),
+        ).group_by(classified.c.unified_status)
+        rows = (await self.session.execute(stmt)).all()
+        result: dict[str, dict[str, object]] = {
+            status: {"count": 0, "amount": Decimal("0")} for status in UNIFIED_STATUSES
+        }
+        for status, count, amount in rows:
+            result[status] = {"count": count, "amount": Decimal(amount)}
+        return result
 
     async def unified_status_counts_by_courier(
         self,
@@ -822,6 +890,7 @@ class OrderRepository(BaseRepository[Order]):
         unified_statuses: Sequence[str] | None = None,
         courier_id: uuid.UUID | None = None,
         payment_type: str | None = None,
+        fulfillment_status: str | None = None,
         sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
@@ -836,6 +905,7 @@ class OrderRepository(BaseRepository[Order]):
         base_stmt, active_shipment = self.unified_status_base_query(
             courier_id=courier_id,
             payment_type=payment_type,
+            fulfillment_status=fulfillment_status,
             sku=sku,
             date_from=date_from,
             date_to=date_to,

@@ -58,6 +58,101 @@ class TimeseriesPoint(BaseModel):
     revenue: Decimal
 
 
+class PaymentSplitAmount(BaseModel):
+    order_count: int
+    amount: Decimal
+    percent_of_bucket_amount: float
+
+
+class FulfillmentPaymentBucket(BaseModel):
+    order_count: int
+    amount: Decimal
+    percent_of_total_amount: float
+    cod: PaymentSplitAmount
+    prepaid: PaymentSplitAmount
+
+
+class FulfillmentPaymentBreakdownResponse(BaseModel):
+    """Total/COD/Prepaid amount+count+% for Shopify-fulfilled vs
+    Shopify-unfulfilled orders -- see
+    `AnalyticsService.get_fulfillment_payment_breakdown`.
+    """
+
+    date_from: datetime
+    date_to: datetime
+    total_orders: int
+    total_amount: Decimal
+    fulfilled: FulfillmentPaymentBucket
+    unfulfilled: FulfillmentPaymentBucket
+
+
+class UnifiedStatusAmountRow(BaseModel):
+    unified_status: str
+    order_count: int
+    amount: Decimal
+    percent_of_slice_amount: float
+
+
+class FulfillmentPaymentClassificationResponse(BaseModel):
+    """Shipment-status (Module 2 unified-status) classification for one
+    Fulfilled/Unfulfilled x COD/Prepaid slice -- see
+    `AnalyticsService.get_fulfillment_payment_classification`.
+    """
+
+    fulfillment_status: str
+    payment_type: str
+    date_from: datetime
+    date_to: datetime
+    slice_order_count: int
+    slice_amount: Decimal
+    classifications: list[UnifiedStatusAmountRow]
+
+
+class NdrReasonRow(BaseModel):
+    reason: str
+    order_count: int
+    amount: Decimal
+    percent_of_ndr_amount: float
+
+
+class NdrReasonBreakdownResponse(BaseModel):
+    """Real NDR reasons for the `ndr`-classified orders in one optional
+    Fulfilled/Unfulfilled x COD/Prepaid slice -- see
+    `AnalyticsService.get_ndr_reason_breakdown`. `reason ==
+    "Unknown/Unclassified"` when no NDR reason text exists -- never a
+    guessed/invented reason.
+    """
+
+    fulfillment_status: str | None
+    payment_type: str | None
+    date_from: datetime
+    date_to: datetime
+    ndr_order_count: int
+    ndr_amount: Decimal
+    reasons: list[NdrReasonRow]
+
+
+class CodDashboardKpi(BaseModel):
+    order_count: int
+    amount: Decimal
+    percent_of_total_cod_amount: float
+
+
+class CodDashboardResponse(BaseModel):
+    """Total COD / Fulfilled COD / Unfulfilled COD / Delivered COD -- see
+    `AnalyticsService.get_cod_dashboard` for the exact definitions
+    (`Delivered COD` is the shipment-status axis, the other two the
+    Shopify-fulfillment axis; they are not mutually exclusive).
+    """
+
+    date_from: datetime
+    date_to: datetime
+    total_cod: CodDashboardKpi
+    fulfilled_cod: CodDashboardKpi
+    unfulfilled_cod: CodDashboardKpi
+    delivered_cod: CodDashboardKpi
+
+
 class OrdersTimeseriesResponse(BaseModel):
     interval: str
     points: list[TimeseriesPoint]

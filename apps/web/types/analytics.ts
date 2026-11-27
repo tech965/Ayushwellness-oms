@@ -196,3 +196,95 @@ export interface ReturnsRefundsSummary {
   returns: ReturnsSummary
   refunds: RefundsSummary
 }
+
+export interface PaymentSplitAmount {
+  order_count: number
+  amount: string
+  percent_of_bucket_amount: number
+}
+
+export interface FulfillmentPaymentBucket {
+  order_count: number
+  amount: string
+  percent_of_total_amount: number
+  cod: PaymentSplitAmount
+  prepaid: PaymentSplitAmount
+}
+
+export interface FulfillmentPaymentBreakdown {
+  date_from: string
+  date_to: string
+  total_orders: number
+  total_amount: string
+  fulfilled: FulfillmentPaymentBucket
+  unfulfilled: FulfillmentPaymentBucket
+}
+
+export interface UnifiedStatusAmountRow {
+  unified_status: string
+  order_count: number
+  amount: string
+  percent_of_slice_amount: number
+}
+
+export interface FulfillmentPaymentClassification {
+  fulfillment_status: "fulfilled" | "unfulfilled" | "partial"
+  payment_type: "cod" | "prepaid" | "other"
+  date_from: string
+  date_to: string
+  slice_order_count: number
+  slice_amount: string
+  classifications: UnifiedStatusAmountRow[]
+}
+
+export interface NdrReasonRow {
+  reason: string
+  order_count: number
+  amount: string
+  percent_of_ndr_amount: number
+}
+
+export interface NdrReasonBreakdown {
+  fulfillment_status: string | null
+  payment_type: string | null
+  date_from: string
+  date_to: string
+  ndr_order_count: number
+  ndr_amount: string
+  reasons: NdrReasonRow[]
+}
+
+export interface CodDashboardKpi {
+  order_count: number
+  amount: string
+  percent_of_total_cod_amount: number
+}
+
+export interface CodDashboard {
+  date_from: string
+  date_to: string
+  total_cod: CodDashboardKpi
+  fulfilled_cod: CodDashboardKpi
+  unfulfilled_cod: CodDashboardKpi
+  delivered_cod: CodDashboardKpi
+}
+
+export interface FulfillmentPaymentOrderRow {
+  order_id: string
+  order_number: string
+  order_datetime: string
+  customer_name: string | null
+  payment_type: "cod" | "prepaid" | "other"
+  sku_summary: string | null
+  total_amount: string
+  unified_status: string
+  shipment_id: string | null
+  awb: string | null
+  courier_name: string | null
+  expected_delivery_date: string | null
+  actual_delivery_date: string | null
+  shipment_status: string | null
+  current_location: string | null
+  last_tracking_update_at: string | null
+  pickup_date: string | null
+}
