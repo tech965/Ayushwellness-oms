@@ -46,7 +46,7 @@ interface FulfillmentPaymentOrdersTableProps {
   dateTo: string
   unifiedStatus?: string
   fulfillmentStatus?: "fulfilled" | "unfulfilled"
-  paymentType?: "cod" | "prepaid"
+  paymentType?: "cod" | "prepaid" | "other"
 }
 
 /** The order list behind any Fulfilled/Unfulfilled classification row or

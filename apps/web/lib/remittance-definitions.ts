@@ -30,6 +30,14 @@ export const COD_DEFINITIONS = {
     "Some, but not all, of the expected amount is bank confirmed. The actual credited amount counts; a credit covering several orders is split pro rata.",
   adjusted:
     "Orders with reasoned manual adjustments. Adjustments change the per-order status difference, never bank-confirmed money.",
+  total_cod_orders:
+    "Every non-cancelled COD order in the period, delivered or not. Wider than every other figure on this page, which covers delivered COD orders only -- so this card has no drilldown here.",
+  payment_success:
+    "Delivered COD orders that are fully remitted and bank-confirmed (status: matched).",
+  payment_initiated:
+    "Delivered COD orders with a courier-reported remittance that is not yet a clean, bank-confirmed match (status: partially reconciled, short or excess).",
+  payment_pending:
+    "Delivered COD orders with no courier-reported remittance yet (status: pending). Same figure as \"Pending Settlement\" above.",
 } as const
 
 export const PREPAID_DEFINITIONS = {

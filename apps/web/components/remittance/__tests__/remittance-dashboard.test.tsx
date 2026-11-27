@@ -131,6 +131,10 @@ const COD_SUMMARY: RemittanceSummary = {
     unmatched_bank_credits: { count: 1, amount: "820.00" },
     reconciled: { count: 1, amount: "1000.00" },
     partially_reconciled: { count: 2, amount: "2000.00" },
+    total_cod_orders: { count: 7, amount: "7000.00" },
+    payment_success: { count: 1, amount: "1000.00" },
+    payment_initiated: { count: 4, amount: "4000.00" },
+    payment_pending: { count: 1, amount: "1000.00" },
   },
   percentages: [
     pctItem("completion", "Reconciliation completion", 1, 6, "count", "reconciled"),
@@ -182,7 +186,13 @@ const COD_SUMMARY: RemittanceSummary = {
       completion_percent: 16.7,
     },
   ],
-  denominators: { delivered_orders: 6, expected_amount: "6000.00", remittance_lines: 6 },
+  denominators: {
+    delivered_orders: 6,
+    expected_amount: "6000.00",
+    remittance_lines: 6,
+    total_cod_orders: 7,
+    total_cod_amount: "7000.00",
+  },
 }
 
 const RECORD = {
@@ -288,6 +298,34 @@ describe("COD remittance dashboard", () => {
       "title",
       expect.stringContaining("Not proof of a bank credit")
     )
+  })
+
+  it("shows the 5-KPI payment status summary, with Total COD Orders display-only", () => {
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const grid = screen.getByTestId("payment-status-kpi-grid")
+    // Total COD Orders is not a button: it spans a wider population (every
+    // COD order, not just delivered ones) than this page's drilldowns cover.
+    expect(within(grid).getAllByRole("button")).toHaveLength(4)
+    expect(within(grid).getByText("Total COD Orders")).toBeInTheDocument()
+    expect(within(grid).getByText("7")).toBeInTheDocument()
+    expect(within(grid).getByText(/₹7,000\.00 total/)).toBeInTheDocument()
+    const success = within(grid).getByRole("button", { name: /^Payment Success/ })
+    expect(success).toHaveTextContent("1")
+    expect(success).toHaveTextContent("₹1,000.00")
+    expect(success).toHaveTextContent("16.7% of delivered")
+    const initiated = within(grid).getByRole("button", { name: /^Payment Initiated/ })
+    expect(initiated).toHaveTextContent("4")
+    expect(initiated).toHaveTextContent("₹4,000.00")
+    const pending = within(grid).getByRole("button", { name: /^Payment Pending/ })
+    expect(pending).toHaveTextContent("1")
+    expect(pending).toHaveTextContent("₹1,000.00")
+  })
+
+  it("clicking Payment Success opens exactly that KPI's drilldown", async () => {
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const grid = screen.getByTestId("payment-status-kpi-grid")
+    await userEvent.click(within(grid).getByRole("button", { name: /^Payment Success/ }))
+    expect(lastRecordsArgs()).toMatchObject({ kpi: "payment_success" })
   })
 
   it("shows one-decimal percentages with the denominator and a count/value tag", () => {
@@ -570,6 +608,11 @@ describe("Prepaid remittance dashboard", () => {
     permissions.clear()
     setup(PREPAID_SUMMARY)
     vi.mocked(useRemittanceReport).mockReturnValue(ok(PREPAID_SUMMARY.gateways) as never)
+  })
+
+  it("does not show the COD payment status summary on the prepaid dashboard", () => {
+    renderWithProviders(<RemittanceDashboard module="prepaid" />)
+    expect(screen.queryByTestId("payment-status-kpi-grid")).not.toBeInTheDocument()
   })
 
   it("is Cashfree API-first: shows the sync panel, with file upload only as a fallback", () => {

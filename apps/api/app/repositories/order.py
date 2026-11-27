@@ -563,6 +563,7 @@ class OrderRepository(BaseRepository[Order]):
         date_from: datetime | None = None,
         date_to: datetime | None = None,
         with_eager: bool = False,
+        exclude_cancelled: bool = False,
     ):
         """Every `Order` LEFT JOINed to its "controlling" `Shipment` —
         simply the most recently created one, if any — for OMS SOW
@@ -586,6 +587,28 @@ class OrderRepository(BaseRepository[Order]):
         narrow the `SELECT` to just a few columns via `with_only_columns`
         afterwards, and an eager-load option for an entity no longer in
         the `SELECT` list is itself an error.
+
+        `exclude_cancelled=True` drops `Order.status == CANCELLED` rows
+        from this population entirely (not just the "cancelled" unified-
+        status label) -- needed by the Fulfilled/Unfulfilled payment
+        breakdown's "fulfilled" slice specifically: a cancelled order
+        that was fulfilled and already has an active, non-cancelled
+        `Shipment` (e.g. shipped-then-cancelled, `current_status ==
+        DELIVERED`) classifies into that shipment's real unified status
+        (e.g. `delivered`), NOT `cancelled` -- `unified_status_sql_case`
+        checks the shipment's own status before the order-level
+        `CANCELLED` fallback, which only applies when there is no
+        `Shipment` row at all. Without this flag, such an order would be
+        excluded from `AnalyticsService.get_fulfillment_payment_
+        breakdown`'s "fulfilled" total (which filters `Order.status`
+        directly) but still counted into `get_fulfillment_payment_
+        classification`'s "fulfilled" slice and still appear in its
+        drill-down -- the exact reconciliation mismatch this flag
+        closes. Callers pass it only for the `fulfillment_status ==
+        "fulfilled"` case; Module 2's own Shipment Tracking page never
+        sets `fulfillment_status` at all, so it is never affected by
+        this flag and keeps showing cancelled orders under their own
+        `cancelled` bucket as before.
         """
         active_shipment = aliased(Shipment)
         latest_shipment_id = (
@@ -632,6 +655,8 @@ class OrderRepository(BaseRepository[Order]):
             stmt = stmt.where(Order.order_datetime >= date_from)
         if date_to:
             stmt = stmt.where(Order.order_datetime <= date_to)
+        if exclude_cancelled:
+            stmt = stmt.where(Order.status != OrderStatus.CANCELLED)
         return stmt, active_shipment
 
     async def unified_status_counts(
@@ -685,6 +710,7 @@ class OrderRepository(BaseRepository[Order]):
         sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        exclude_cancelled: bool = False,
     ) -> dict[str, dict[str, object]]:
         """Like `unified_status_counts`, but also sums `Order.total_amount`
         per bucket -- the Fulfilled/Unfulfilled analytics and COD Orders
@@ -694,7 +720,8 @@ class OrderRepository(BaseRepository[Order]):
         int]` contract or any of its callers (Modules 2/3/4). Each order
         contributes its `total_amount` exactly once -- same
         most-recent-shipment join as every other unified-status query,
-        so a reshipped order is never double-summed.
+        so a reshipped order is never double-summed. `exclude_cancelled`
+        -- see `unified_status_base_query`'s docstring.
         """
         base_stmt, active_shipment = self.unified_status_base_query(
             courier_id=courier_id,
@@ -703,6 +730,7 @@ class OrderRepository(BaseRepository[Order]):
             sku=sku,
             date_from=date_from,
             date_to=date_to,
+            exclude_cancelled=exclude_cancelled,
         )
         bucket = unified_status_sql_case(
             order_status_col=Order.status,
@@ -953,13 +981,15 @@ class OrderRepository(BaseRepository[Order]):
         sku: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        exclude_cancelled: bool = False,
     ):
         """Every order whose derived unified status equals
         `unified_status` — the SOW's "ability to view individual orders
         under each status". Same filters/join as the aggregate counts,
         just with an extra `WHERE` on the classification expression
         itself (a `case()` is a normal SQL column expression, usable in
-        `WHERE` exactly like any other).
+        `WHERE` exactly like any other). `exclude_cancelled` -- see
+        `unified_status_base_query`'s docstring.
         """
         base_stmt, active_shipment = self.unified_status_base_query(
             courier_id=courier_id,
@@ -969,6 +999,7 @@ class OrderRepository(BaseRepository[Order]):
             date_from=date_from,
             date_to=date_to,
             with_eager=True,
+            exclude_cancelled=exclude_cancelled,
         )
         bucket = unified_status_sql_case(
             order_status_col=Order.status,

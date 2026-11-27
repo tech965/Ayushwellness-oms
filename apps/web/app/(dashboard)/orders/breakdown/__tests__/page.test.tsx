@@ -44,6 +44,7 @@ function paymentBucket(amount: string, codAmount: string, prepaidAmount: string)
     percent_of_total_amount: 50,
     cod: { order_count: 1, amount: codAmount, percent_of_bucket_amount: 50 },
     prepaid: { order_count: 1, amount: prepaidAmount, percent_of_bucket_amount: 50 },
+    other: { order_count: 0, amount: "0", percent_of_bucket_amount: 0 },
   }
 }
 

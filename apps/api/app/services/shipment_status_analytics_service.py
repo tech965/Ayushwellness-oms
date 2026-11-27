@@ -221,6 +221,17 @@ class ShipmentStatusAnalyticsService:
         filters and same join as the counts, so a drilldown total always
         equals the number on the card/row that opened it. Each order
         appears once (the controlling shipment is a single LEFT JOINed row).
+
+        `fulfillment_status == "fulfilled"` additionally excludes
+        cancelled orders at the `Order.status` level (not just the
+        `cancelled` unified-status label), mirroring
+        `AnalyticsService.get_fulfillment_payment_classification`'s
+        `exclude_cancelled` use -- otherwise a shipped-then-cancelled
+        order (e.g. `current_status == DELIVERED`) would still surface
+        in a `fulfillment_status=fulfilled` drilldown even though it's
+        excluded from the breakdown's/classification's "fulfilled"
+        totals. Module 2's own Shipment Tracking drilldown never passes
+        `fulfillment_status`, so this never affects it.
         """
         statuses: list[str] | None = None
         if group is not None:
@@ -237,6 +248,7 @@ class ShipmentStatusAnalyticsService:
             sku=sku,
             date_from=date_from,
             date_to=date_to,
+            exclude_cancelled=(fulfillment_status == "fulfilled"),
         )
         if q and q.strip():
             term = f"%{q.strip()}%"

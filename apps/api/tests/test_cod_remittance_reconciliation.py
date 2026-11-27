@@ -191,6 +191,54 @@ async def test_summary_amounts_counts_and_statuses(db_session):
     ) == Decimal("1277.00")
 
 
+async def test_payment_status_kpis_group_statuses_and_total_cod_orders_is_wider(db_session):
+    """The 5-KPI payment-status summary: `payment_success`/`initiated`/
+    `pending` must partition the SAME 6 delivered COD orders as
+    `status_breakdown`, and `total_cod_orders` must additionally include the
+    non-delivered (in-transit) COD order `_seed()` adds, which none of the
+    delivered-only figures ever count."""
+    user = await _user(db_session, "u2b@example.com")
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        await _setup_full(db_session, client)
+        s = await _summary(client)
+    k = s["kpis"]
+    # matched=[C1]; partially_reconciled=[C2,C6]; short=[C3]; excess=[C4]; pending=[C5].
+    assert k["payment_success"]["count"] == 1
+    assert Decimal(k["payment_success"]["amount"]) == Decimal("1000.00")
+    assert k["payment_initiated"]["count"] == 4  # 2 partially_reconciled + short + excess
+    assert Decimal(k["payment_initiated"]["amount"]) == Decimal("4000.00")
+    assert k["payment_pending"]["count"] == 1
+    assert Decimal(k["payment_pending"]["amount"]) == Decimal("1000.00")
+    success_initiated_pending = (
+        k["payment_success"]["count"]
+        + k["payment_initiated"]["count"]
+        + k["payment_pending"]["count"]
+    )
+    assert success_initiated_pending == k["delivered_orders"]["count"] == 6
+    # total_cod_orders = the 6 delivered COD orders + the 1 in-transit COD order
+    # ("TRN") -- wider than every delivered-only figure, including this module's
+    # own "COD Delivered Orders" card.
+    assert s["denominators"]["total_cod_orders"] == 7
+    assert Decimal(s["denominators"]["total_cod_amount"]) == Decimal("7000.00")
+    assert k["total_cod_orders"]["count"] == 7
+
+
+async def test_payment_status_drilldowns_match_their_counts_with_no_overlap(db_session):
+    user = await _user(db_session, "u2c@example.com")
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        await _setup_full(db_session, client)
+        s = await _summary(client)
+        k = s["kpis"]
+        seen: set[str] = set()
+        for kpi in ("payment_success", "payment_initiated", "payment_pending"):
+            rows, total = await _records(client, kpi=kpi)
+            assert total == k[kpi]["count"] == len(rows), kpi
+            ids = {r["order_id"] for r in rows}
+            assert not (ids & seen), f"{kpi} overlaps a previous bucket"
+            seen |= ids
+        assert len(seen) == k["delivered_orders"]["count"]
+
+
 async def test_partial_remittance_is_short_never_matched(db_session):
     user = await _user(db_session, "u3@example.com")
     async with bearer_client(app, get_db, db_session, user.id) as client:

@@ -14,6 +14,7 @@ import { QueryStates } from "@/components/shared/query-states"
 import { SelectableStatCard } from "@/components/shared/selectable-stat-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
 import {
   Select,
   SelectContent,
@@ -140,6 +141,9 @@ const KPI_OF_DRILL: Record<RemittanceModule, Record<string, string>> = {
     bank_remaining: "bank_remaining",
     partially_confirmed: "partially_confirmed",
     adjusted: "adjusted",
+    payment_success: "payment_success",
+    payment_initiated: "payment_initiated",
+    payment_pending: "payment_pending",
   },
   prepaid: {
     orders: "total_prepaid_orders",
@@ -299,6 +303,56 @@ function codCards(s: RemittanceSummary): KpiCard[] {
     },
     unmatchedCreditsCard(s),
     completionCard(s, "Fully reconciled ÷ delivered COD orders"),
+  ]
+}
+
+/** The 5-KPI "Payment status" summary. "Total COD Orders" is rendered
+ * separately (not via `SelectableStatCard`) since it spans every COD order
+ * in the period, not just delivered ones -- a different population from
+ * everything else this page drills into, so it has no accurate drilldown
+ * here and stays display-only, per `total_cod_orders`'s definition.
+ */
+function paymentStatusCards(s: RemittanceSummary): KpiCard[] {
+  const delivered = Number(s.denominators.delivered_orders)
+  const count = (k: string) => Number(num(s, k, "count"))
+  const amt = (k: string) => String(num(s, k, "amount"))
+  return [
+    {
+      key: "cod_delivered_orders",
+      label: "COD Delivered Orders",
+      value: delivered.toLocaleString("en-IN"),
+      detail: `${rupees(String(s.denominators.expected_amount))} to collect`,
+      description: "Delivered orders paid by cash on delivery",
+      drill: "delivered",
+      accent: "blue",
+    },
+    {
+      key: "payment_success",
+      label: "Payment Success",
+      value: count("payment_success").toLocaleString("en-IN"),
+      detail: `${rupees(amt("payment_success"))} · ${share(count("payment_success"), delivered)} of delivered`,
+      description: "Fully remitted by the courier and bank-confirmed",
+      drill: "payment_success",
+      accent: "green",
+    },
+    {
+      key: "payment_initiated",
+      label: "Payment Initiated",
+      value: count("payment_initiated").toLocaleString("en-IN"),
+      detail: `${rupees(amt("payment_initiated"))} · ${share(count("payment_initiated"), delivered)} of delivered`,
+      description: "Reported by the courier, not yet a clean bank-confirmed match",
+      drill: "payment_initiated",
+      accent: "amber",
+    },
+    {
+      key: "payment_pending",
+      label: "Payment Pending",
+      value: count("payment_pending").toLocaleString("en-IN"),
+      detail: `${rupees(amt("payment_pending"))} · ${share(count("payment_pending"), delivered)} of delivered`,
+      description: "No courier-reported remittance yet",
+      drill: "payment_pending",
+      accent: "red",
+    },
   ]
 }
 
@@ -898,6 +952,50 @@ export function RemittanceDashboard({ module }: Props) {
             (selection?.type === "unmatched" && selection.card === card.drill)
           return (
             <>
+              {isCod && (
+                <section className="space-y-2" aria-label="Payment status">
+                  <h3 className="text-base font-semibold">Payment status</h3>
+                  <div
+                    className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5"
+                    data-testid="payment-status-kpi-grid"
+                  >
+                    <Card className="h-full border-l-4 border-l-slate-400">
+                      <CardContent className="space-y-1">
+                        <p className="text-muted-foreground text-sm font-medium">
+                          Total COD Orders
+                        </p>
+                        <p className="text-3xl font-semibold tabular-nums">
+                          {Number(summary.denominators.total_cod_orders ?? 0).toLocaleString(
+                            "en-IN"
+                          )}
+                        </p>
+                        <p className="text-foreground/80 text-xs font-medium">
+                          {rupees(String(summary.denominators.total_cod_amount ?? "0"))} total
+                          COD value
+                        </p>
+                        <p className="text-muted-foreground text-xs">
+                          Every non-cancelled COD order in the period, delivered or not -- not
+                          clickable, since that is a wider population than this page&apos;s
+                          delivered-orders drilldowns.
+                        </p>
+                      </CardContent>
+                    </Card>
+                    {paymentStatusCards(summary).map((card) => (
+                      <SelectableStatCard
+                        key={card.key}
+                        label={card.label}
+                        value={card.value}
+                        detail={card.detail}
+                        description={card.description}
+                        accent={card.accent}
+                        tooltip={definitionOf(module, card.drill)}
+                        selected={isSelectedCard(card)}
+                        onClick={() => selectKpi(card.drill, card.label)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )}
               {[false, true].map((supporting) => (
                 <section
                   key={String(supporting)}

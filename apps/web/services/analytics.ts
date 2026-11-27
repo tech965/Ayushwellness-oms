@@ -288,8 +288,8 @@ export function useFulfillmentPaymentBreakdown(
 
 interface FulfillmentPaymentClassificationParams extends AnalyticsDateRangeParams {
   fulfillmentStatus: "fulfilled" | "unfulfilled"
-  paymentType: "cod" | "prepaid"
-  /** Only fetch once the user has actually expanded a COD/Prepaid KPI. */
+  paymentType: "cod" | "prepaid" | "other"
+  /** Only fetch once the user has actually expanded a COD/Prepaid/Other KPI. */
   enabled?: boolean
 }
 
@@ -317,7 +317,7 @@ export function useFulfillmentPaymentClassification(
 
 interface NdrReasonBreakdownParams extends AnalyticsDateRangeParams {
   fulfillmentStatus?: "fulfilled" | "unfulfilled"
-  paymentType?: "cod" | "prepaid"
+  paymentType?: "cod" | "prepaid" | "other"
   enabled?: boolean
 }
 
@@ -383,7 +383,7 @@ function keepPreviousForSameFulfillmentPaymentScope<T>(scope: unknown) {
 interface FulfillmentPaymentOrdersParams extends AnalyticsDateRangeParams {
   unifiedStatus?: string
   fulfillmentStatus?: "fulfilled" | "unfulfilled"
-  paymentType?: "cod" | "prepaid"
+  paymentType?: "cod" | "prepaid" | "other"
   q?: string
   page: number
   pageSize: number
