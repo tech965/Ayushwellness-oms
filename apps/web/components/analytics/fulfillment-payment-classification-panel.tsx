@@ -39,7 +39,7 @@ export function FulfillmentPaymentClassificationPanel({
   dateTo,
 }: FulfillmentPaymentClassificationPanelProps) {
   const [selectedPaymentType, setSelectedPaymentType] = React.useState<
-    "cod" | "prepaid" | null
+    "cod" | "prepaid" | "other" | null
   >(null)
   const [selectedStatus, setSelectedStatus] = React.useState<string | null>(null)
 
@@ -58,7 +58,7 @@ export function FulfillmentPaymentClassificationPanel({
     enabled: selectedStatus === "ndr" && selectedPaymentType !== null,
   })
 
-  function togglePaymentType(value: "cod" | "prepaid") {
+  function togglePaymentType(value: "cod" | "prepaid" | "other") {
     setSelectedStatus(null)
     setSelectedPaymentType((current) => (current === value ? null : value))
   }
@@ -92,6 +92,22 @@ export function FulfillmentPaymentClassificationPanel({
           accent="green"
         />
       </div>
+
+      {/* Only shown when real `PaymentType.OTHER` orders exist in this
+          bucket -- per spec, "show Other/Unclassified payment types when
+          present" rather than always rendering a usually-empty card. */}
+      {bucket.other.order_count > 0 && (
+        <div className="grid grid-cols-1 gap-3">
+          <SelectableStatCard
+            label="Other / Unclassified"
+            value={formatMoney(bucket.other.amount)}
+            detail={`${bucket.other.order_count.toLocaleString("en-IN")} orders · ${bucket.other.percent_of_bucket_amount.toFixed(1)}% of ${title}`}
+            selected={selectedPaymentType === "other"}
+            onClick={() => togglePaymentType("other")}
+            accent="slate"
+          />
+        </div>
+      )}
 
       {selectedPaymentType && (
         <QueryStates

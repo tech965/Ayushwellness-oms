@@ -624,3 +624,233 @@ async def test_cod_dashboard_total_cod_drilldown_matches_kpi_count(
     assert total_cod_count == 2
     assert payload["meta"]["total_items"] == 2
     assert all(row["payment_type"] == "cod" for row in payload["data"])
+
+
+# ---------------------------------------------------------------------------
+# 6. Other/Unclassified payment bucket + the cancelled+fulfilled off-by-one
+#    fix (production discrepancy: Fulfilled amount/count didn't equal
+#    cod+prepaid sub-figures; fulfilled+unfulfilled+cancelled exceeded
+#    total_orders by one).
+# ---------------------------------------------------------------------------
+
+
+async def test_fulfillment_payment_breakdown_other_payment_bucket(
+    db_session: AsyncSession,
+) -> None:
+    """`PaymentType.OTHER` orders must show up as their own `other`
+    sub-bucket -- not silently absent, the exact root cause of a
+    production gap between a bucket's headline amount/count and its
+    cod+prepaid sub-figures.
+    """
+    user = await _make_analytics_reader(db_session, email="other-bucket@example.com")
+
+    await make_order(
+        db_session,
+        order_number="OTHER-F-COD",
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("100"),
+    )
+    await make_order(
+        db_session,
+        order_number="OTHER-F-OTHER",
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+        payment_type=PaymentType.OTHER,
+        total_amount=Decimal("40"),
+    )
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.get("/api/v1/analytics/fulfillment-payment-breakdown")
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+    fulfilled = data["fulfilled"]
+    assert fulfilled["order_count"] == 2
+    assert Decimal(fulfilled["amount"]) == Decimal("140")
+    assert fulfilled["other"]["order_count"] == 1
+    assert Decimal(fulfilled["other"]["amount"]) == Decimal("40")
+    assert fulfilled["other"]["percent_of_bucket_amount"] == pytest.approx(40 / 140 * 100, abs=0.01)
+
+    # cod + prepaid + other must sum to the bucket's own amount exactly --
+    # this is the reconciliation the production report found broken.
+    reconciled = (
+        Decimal(fulfilled["cod"]["amount"])
+        + Decimal(fulfilled["prepaid"]["amount"])
+        + Decimal(fulfilled["other"]["amount"])
+    )
+    assert reconciled == Decimal(fulfilled["amount"])
+
+
+async def test_fulfillment_payment_breakdown_excludes_cancelled_even_if_fulfilled(
+    db_session: AsyncSession,
+) -> None:
+    """An order can be `status=CANCELLED` AND `fulfillment_status=
+    FULFILLED` simultaneously (Shopify can report a shipped-then-
+    cancelled order this way; nothing in the schema prevents it). Such an
+    order must count toward neither "Fulfilled" nor "Unfulfilled" --
+    without this, it was double-counted (once into Fulfilled, once into
+    a separate Cancelled total elsewhere) while `total_orders` counted it
+    once, producing a `fulfilled + unfulfilled + cancelled` sum one
+    higher than `total_orders` on production.
+    """
+    user = await _make_analytics_reader(db_session, email="cancel-fulfilled@example.com")
+
+    await make_order(
+        db_session,
+        order_number="CANCELLED-BUT-FULFILLED",
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("9999"),
+        status=OrderStatus.CANCELLED,
+    )
+    await make_order(
+        db_session,
+        order_number="REAL-FULFILLED",
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("50"),
+        status=OrderStatus.CONFIRMED,
+    )
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.get("/api/v1/analytics/fulfillment-payment-breakdown")
+        assert response.status_code == 200
+        data = response.json()["data"]
+
+    assert data["total_orders"] == 2
+    assert Decimal(data["total_amount"]) == Decimal("10049")
+
+    fulfilled = data["fulfilled"]
+    assert fulfilled["order_count"] == 1
+    assert Decimal(fulfilled["amount"]) == Decimal("50")
+
+    unfulfilled = data["unfulfilled"]
+    assert unfulfilled["order_count"] == 0
+    assert Decimal(unfulfilled["amount"]) == Decimal("0")
+
+
+async def test_fulfillment_payment_classification_and_drilldown_exclude_cancelled_with_shipment(
+    db_session: AsyncSession,
+) -> None:
+    """The narrower, real-world case of the fix above: a cancelled order
+    that was fulfilled and ALSO already has an active, non-cancelled
+    `Shipment` (shipped then cancelled/refunded, e.g. `current_status ==
+    DELIVERED`). `classify_unified_status` checks the shipment's own
+    status before the order-level CANCELLED fallback, so this order
+    lands in the `delivered` unified-status bucket, not `cancelled` --
+    meaning the breakdown's `Order.status`-level exclusion alone doesn't
+    stop it from still being counted into the classification endpoint's
+    "fulfilled" slice or still appearing in a "fulfilled" + "delivered"
+    drilldown. All three (breakdown, classification, drilldown) must
+    agree: this order is excluded from the "fulfilled" slice everywhere,
+    while a genuinely fulfilled, non-cancelled, delivered order is still
+    counted/shown normally.
+    """
+    user = await _make_analytics_reader(db_session, email="cancel-shipped@example.com")
+
+    cancelled_but_shipped = await make_order(
+        db_session,
+        order_number="CANCELLED-SHIPPED-DELIVERED",
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("9999"),
+        status=OrderStatus.CANCELLED,
+    )
+    await _add_shipment(
+        db_session, order=cancelled_but_shipped, current_status=ShipmentStatus.DELIVERED
+    )
+
+    real_delivered = await make_order(
+        db_session,
+        order_number="REAL-DELIVERED",
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+        payment_type=PaymentType.COD,
+        total_amount=Decimal("50"),
+        status=OrderStatus.CONFIRMED,
+    )
+    await _add_shipment(db_session, order=real_delivered, current_status=ShipmentStatus.DELIVERED)
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        breakdown_resp = await client.get("/api/v1/analytics/fulfillment-payment-breakdown")
+        assert breakdown_resp.status_code == 200
+        breakdown = breakdown_resp.json()["data"]["fulfilled"]
+
+        classification_resp = await client.get(
+            "/api/v1/analytics/fulfillment-payment-classification",
+            params={"fulfillment_status": "fulfilled", "payment_type": "cod"},
+        )
+        assert classification_resp.status_code == 200
+        classification = classification_resp.json()["data"]
+
+        drilldown_resp = await client.get(
+            "/api/v1/analytics/fulfillment-payment-orders",
+            params={
+                "fulfillment_status": "fulfilled",
+                "payment_type": "cod",
+                "unified_status": "delivered",
+            },
+        )
+        assert drilldown_resp.status_code == 200
+        drilldown = drilldown_resp.json()
+
+    # Breakdown: only the real delivered order counts toward "fulfilled".
+    assert breakdown["order_count"] == 1
+    assert Decimal(breakdown["amount"]) == Decimal("50")
+
+    # Classification: the slice total agrees exactly with the breakdown,
+    # and the cancelled-but-shipped order never lands in "delivered".
+    assert classification["slice_order_count"] == 1
+    assert Decimal(classification["slice_amount"]) == Decimal("50")
+    delivered_row = next(
+        c for c in classification["classifications"] if c["unified_status"] == "delivered"
+    )
+    assert delivered_row["order_count"] == 1
+    assert Decimal(delivered_row["amount"]) == Decimal("50")
+    cancelled_row = next(
+        c for c in classification["classifications"] if c["unified_status"] == "cancelled"
+    )
+    assert cancelled_row["order_count"] == 0
+
+    # Drilldown: "fulfilled" + "delivered" returns exactly the real
+    # order, never the cancelled-but-shipped one.
+    assert drilldown["meta"]["total_items"] == 1
+    assert [row["order_number"] for row in drilldown["data"]] == ["REAL-DELIVERED"]
+
+
+async def test_fulfillment_payment_breakdown_cancelled_excludes_other_payment_orders_too(
+    db_session: AsyncSession,
+) -> None:
+    """The cancelled-exclusion applies regardless of `payment_type` --
+    an order that is both `payment_type=OTHER` and `status=CANCELLED`
+    (with `fulfillment_status=FULFILLED`) must be excluded from
+    "fulfilled" (and therefore from its `other` sub-bucket too), not
+    just from the cod/prepaid sub-buckets.
+    """
+    user = await _make_analytics_reader(db_session, email="cancel-other@example.com")
+
+    await make_order(
+        db_session,
+        order_number="CANCELLED-OTHER",
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+        payment_type=PaymentType.OTHER,
+        total_amount=Decimal("500"),
+        status=OrderStatus.CANCELLED,
+    )
+    await make_order(
+        db_session,
+        order_number="REAL-OTHER",
+        fulfillment_status=FulfillmentStatus.FULFILLED,
+        payment_type=PaymentType.OTHER,
+        total_amount=Decimal("30"),
+        status=OrderStatus.CONFIRMED,
+    )
+
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        response = await client.get("/api/v1/analytics/fulfillment-payment-breakdown")
+        assert response.status_code == 200
+        fulfilled = response.json()["data"]["fulfilled"]
+
+    assert fulfilled["order_count"] == 1
+    assert Decimal(fulfilled["amount"]) == Decimal("30")
+    assert fulfilled["other"]["order_count"] == 1
+    assert Decimal(fulfilled["other"]["amount"]) == Decimal("30")

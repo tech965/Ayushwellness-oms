@@ -868,7 +868,7 @@ class AnalyticsService:
     async def get_fulfillment_payment_breakdown(
         self, date_from: datetime | None, date_to: datetime | None
     ) -> dict[str, object]:
-        """Total/COD/Prepaid amount + order count + % for Shopify-
+        """Total/COD/Prepaid/Other amount + order count + % for Shopify-
         fulfilled vs Shopify-unfulfilled orders (`Order.fulfillment_status`
         -- the SAME field `_summary_counts`' `fulfilled_orders`/
         `unfulfilled_orders` already uses; this does NOT introduce a
@@ -877,13 +877,19 @@ class AnalyticsService:
         true of `fulfilled_orders + unfulfilled_orders` not summing to
         `total_orders` in `_summary_counts`, not a new exclusion rule.
 
-        Within each bucket, `cod`/`prepaid` percentages are of that
-        BUCKET's own amount (not the grand total), so "what share of
+        Within each bucket, `cod`/`prepaid`/`other` percentages are of
+        that BUCKET's own amount (not the grand total), so "what share of
         Fulfilled revenue is COD" reads directly off the response.
-        `PaymentType.OTHER` orders count toward the bucket total but not
-        toward either cod/prepaid split -- same convention
-        `get_revenue_timeseries` already uses (COD + Prepaid need not
-        sum to the bucket total).
+        `cod.amount + prepaid.amount + other.amount` always equals the
+        bucket's own `amount` exactly -- `PaymentType.OTHER` orders (real
+        rows; the enum has three values, not two) used to be counted into
+        the bucket total while silently absent from every displayed
+        sub-figure, which was the actual cause of a production
+        reconciliation gap between a bucket's headline amount and its
+        COD+Prepaid sub-figures. Both buckets also exclude CANCELLED
+        orders entirely (see the `fulfilled`/`unfulfilled` predicates
+        below) so a cancelled order is never double-counted into either
+        one on top of its own separate Cancelled total.
         """
         r = resolve_range(date_from, date_to)
 
@@ -893,20 +899,31 @@ class AnalyticsService:
         def _sum_if(condition):  # noqa: ANN001, ANN202
             return func.coalesce(func.sum(case((condition, Order.total_amount))), 0)
 
-        fulfilled = Order.fulfillment_status == FulfillmentStatus.FULFILLED
-        # Excludes CANCELLED orders (user-approved fix: a cancelled
-        # order's full pre-cancellation `total_amount` was otherwise
-        # inflating "Unfulfilled" -- it was never actually pending
-        # fulfilment). A cancelled order can only ever have
-        # `fulfillment_status == UNFULFILLED` in this schema (an order
-        # is never marked FULFILLED after being cancelled -- see
-        # `app.services.shipment_status`'s own `OrderStatus.CANCELLED`
-        # check), so "Fulfilled" needs no matching change.
+        # Both buckets exclude CANCELLED orders -- cancelled is its own
+        # mutually-exclusive category (see `get_breakdowns`'s separate
+        # status-grouped count), never double-counted into Fulfilled or
+        # Unfulfilled too. This used to be asserted ("a cancelled order
+        # can only ever have fulfillment_status == UNFULFILLED") rather
+        # than enforced: `OrderService.sync_from_shopify` applies Shopify's
+        # `fulfillment_status` and the cancelled-derived `status` from
+        # independent payload fields in the same update, so a real Shopify
+        # order that shipped and was later cancelled/refunded can land
+        # with `status=CANCELLED, fulfillment_status=FULFILLED`
+        # simultaneously -- nothing in the schema or sync path prevents
+        # it. Without this exclusion such an order was counted in BOTH
+        # "Fulfilled" and the separate Cancelled total, while
+        # `total_orders` counted it once -- the exact mechanism behind a
+        # production `fulfilled + unfulfilled + cancelled` sum that was
+        # one higher than `total_orders`.
+        fulfilled = (Order.fulfillment_status == FulfillmentStatus.FULFILLED) & (
+            Order.status != OrderStatus.CANCELLED
+        )
         unfulfilled = (Order.fulfillment_status == FulfillmentStatus.UNFULFILLED) & (
             Order.status != OrderStatus.CANCELLED
         )
         is_cod = Order.payment_type == PaymentType.COD
         is_prepaid = Order.payment_type == PaymentType.PREPAID
+        is_other = Order.payment_type == PaymentType.OTHER
 
         row = (
             await self.session.execute(
@@ -919,12 +936,16 @@ class AnalyticsService:
                     _sum_if(fulfilled & is_cod),
                     _count_if(fulfilled & is_prepaid),
                     _sum_if(fulfilled & is_prepaid),
+                    _count_if(fulfilled & is_other),
+                    _sum_if(fulfilled & is_other),
                     _count_if(unfulfilled),
                     _sum_if(unfulfilled),
                     _count_if(unfulfilled & is_cod),
                     _sum_if(unfulfilled & is_cod),
                     _count_if(unfulfilled & is_prepaid),
                     _sum_if(unfulfilled & is_prepaid),
+                    _count_if(unfulfilled & is_other),
+                    _sum_if(unfulfilled & is_other),
                 ).where(Order.order_datetime >= r.date_from, Order.order_datetime <= r.date_to)
             )
         ).one()
@@ -937,12 +958,16 @@ class AnalyticsService:
             f_cod_amount_raw,
             f_prepaid_count,
             f_prepaid_amount_raw,
+            f_other_count,
+            f_other_amount_raw,
             u_count,
             u_amount_raw,
             u_cod_count,
             u_cod_amount_raw,
             u_prepaid_count,
             u_prepaid_amount_raw,
+            u_other_count,
+            u_other_amount_raw,
         ) = row
         total_amount = Decimal(total_amount_raw)
 
@@ -950,11 +975,19 @@ class AnalyticsService:
             return float(amount / denom * 100) if denom else 0.0
 
         def _bucket(  # noqa: ANN001, ANN202
-            count, amount_raw, cod_count, cod_amount_raw, prepaid_count, prepaid_amount_raw
+            count,
+            amount_raw,
+            cod_count,
+            cod_amount_raw,
+            prepaid_count,
+            prepaid_amount_raw,
+            other_count,
+            other_amount_raw,
         ):
             amount = Decimal(amount_raw)
             cod_amount = Decimal(cod_amount_raw)
             prepaid_amount = Decimal(prepaid_amount_raw)
+            other_amount = Decimal(other_amount_raw)
             return {
                 "order_count": int(count),
                 "amount": amount,
@@ -968,6 +1001,17 @@ class AnalyticsService:
                     "order_count": int(prepaid_count),
                     "amount": prepaid_amount,
                     "percent_of_bucket_amount": _pct(prepaid_amount, amount),
+                },
+                # `PaymentType.OTHER` orders -- previously counted toward
+                # this bucket's total but silently absent from both
+                # sub-figures, which is exactly why cod+prepaid didn't sum
+                # to the bucket total/count on the dashboard. Always
+                # present (zero when there are none), per spec: "show
+                # Other/Unclassified payment types when present."
+                "other": {
+                    "order_count": int(other_count),
+                    "amount": other_amount,
+                    "percent_of_bucket_amount": _pct(other_amount, amount),
                 },
             }
 
@@ -983,6 +1027,8 @@ class AnalyticsService:
                 f_cod_amount_raw,
                 f_prepaid_count,
                 f_prepaid_amount_raw,
+                f_other_count,
+                f_other_amount_raw,
             ),
             "unfulfilled": _bucket(
                 u_count,
@@ -991,6 +1037,8 @@ class AnalyticsService:
                 u_cod_amount_raw,
                 u_prepaid_count,
                 u_prepaid_amount_raw,
+                u_other_count,
+                u_other_amount_raw,
             ),
         }
 
@@ -1022,26 +1070,42 @@ class AnalyticsService:
         """
         r = resolve_range(date_from, date_to)
         repo = OrderRepository(self.session)
+        # `exclude_cancelled`: only the "fulfilled" slice needs this at
+        # the base-query level. A cancelled order that was fulfilled and
+        # already has an active, non-cancelled `Shipment` (shipped then
+        # cancelled/refunded) classifies into that shipment's real
+        # unified status (e.g. `delivered`), not `cancelled` --
+        # `unified_status_sql_case` checks shipment status first, see
+        # `unified_status_base_query`'s docstring. Excluding the
+        # "cancelled" LABEL alone (below) doesn't catch that case; only
+        # dropping the order from the population entirely does, matching
+        # `get_fulfillment_payment_breakdown`'s "fulfilled" predicate,
+        # which filters `Order.status` directly. The "unfulfilled" slice
+        # doesn't need this: a cancelled order with `fulfillment_status
+        # == UNFULFILLED` and an active non-cancelled "shipped further"
+        # Shipment is not a real-world case this schema produces, so the
+        # "cancelled"-label exclusion below is already sufficient there.
         amounts = await repo.unified_status_amounts(
             payment_type=payment_type,
             fulfillment_status=fulfillment_status,
             date_from=r.date_from,
             date_to=r.date_to,
+            exclude_cancelled=(fulfillment_status == "fulfilled"),
         )
         # The "cancelled" unified-status row is always shown below for
         # transparency (a cancelled order is still a real, visible
         # record), but is excluded from `slice_amount`/`slice_count` so
         # this denominator agrees with `get_fulfillment_payment_
-        # breakdown`'s own cancelled-order exclusion from its
-        # "unfulfilled" bucket (user-approved fix) -- without this,
-        # the classification rows' percentages would be "% of a larger
-        # slice than the parent KPI actually reports," and this
-        # endpoint's `slice_amount` would silently disagree with the
-        # breakdown endpoint's `unfulfilled.amount` for the identical
-        # (fulfillment_status, payment_type) pair. Rows for a
-        # "fulfilled" slice are unaffected (cancelled orders are never
-        # Shopify-FULFILLED, so `amounts["cancelled"]` is already 0
-        # there).
+        # breakdown`'s own cancelled-order exclusion -- now applied to
+        # BOTH its "fulfilled" and "unfulfilled" buckets (a cancelled
+        # order is NOT guaranteed to have `fulfillment_status ==
+        # UNFULFILLED`: Shopify can report a shipped-then-cancelled order
+        # as still FULFILLED). Without this exclusion here, the
+        # classification rows' percentages would be "% of a larger slice
+        # than the parent KPI actually reports," and this endpoint's
+        # `slice_amount` would silently disagree with the breakdown
+        # endpoint's `fulfilled.amount`/`unfulfilled.amount` for the
+        # identical (fulfillment_status, payment_type) pair.
         slice_amount = sum(
             (v["amount"] for status, v in amounts.items() if status != "cancelled"), Decimal("0")
         )
@@ -1189,10 +1253,19 @@ class AnalyticsService:
             return func.coalesce(func.sum(case((condition, Order.total_amount))), 0)
 
         is_cod = Order.payment_type == PaymentType.COD
-        fulfilled_cod = is_cod & (Order.fulfillment_status == FulfillmentStatus.FULFILLED)
         # Same cancelled-order exclusion as `get_fulfillment_payment_
-        # breakdown`'s "unfulfilled" bucket -- kept consistent so this
-        # dashboard's Unfulfilled COD agrees with that one.
+        # breakdown`'s "fulfilled"/"unfulfilled" buckets, applied to both
+        # here too -- kept consistent so this dashboard's Fulfilled/
+        # Unfulfilled COD agree with that endpoint. A cancelled order is
+        # not guaranteed to have `fulfillment_status == UNFULFILLED`
+        # (Shopify can report a shipped-then-cancelled order as still
+        # FULFILLED), so the exclusion applies to both, not just
+        # Unfulfilled.
+        fulfilled_cod = (
+            is_cod
+            & (Order.fulfillment_status == FulfillmentStatus.FULFILLED)
+            & (Order.status != OrderStatus.CANCELLED)
+        )
         unfulfilled_cod = (
             is_cod
             & (Order.fulfillment_status == FulfillmentStatus.UNFULFILLED)

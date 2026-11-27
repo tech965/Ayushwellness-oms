@@ -67,18 +67,6 @@ function OrderBreakdownContent() {
   const fulfilledPanelRef = React.useRef<HTMLDivElement>(null)
   const unfulfilledPanelRef = React.useRef<HTMLDivElement>(null)
 
-  // Scrolls to and highlights the matching panel when arriving via a
-  // "Fulfilled Orders"/"Unfulfilled Orders" KPI link (Main Dashboard or
-  // this page's own tiles below) instead of leaving the user stranded at
-  // the top of the page — persists across refresh since it's a real URL
-  // query param, not component state.
-  React.useEffect(() => {
-    if (!selectedFulfillment) return
-    const target =
-      selectedFulfillment === "fulfilled" ? fulfilledPanelRef.current : unfulfilledPanelRef.current
-    target?.scrollIntoView({ behavior: "smooth", block: "start" })
-  }, [selectedFulfillment])
-
   // Same resolution/default window as the Dashboard (last 30 days) so a
   // direct visit to this page (not via the drill-down link) still shows a
   // sensible, self-consistent range — and matches exactly when arriving
@@ -98,6 +86,23 @@ function OrderBreakdownContent() {
   const timeseriesQuery = useRevenueTimeseries({ ...dateParams, interval: "day" })
   const fulfillmentPaymentQuery = useFulfillmentPaymentBreakdown(dateParams)
   const summary = summaryQuery.data
+
+  // Scrolls to and highlights the matching panel when arriving via a
+  // "Fulfilled Orders"/"Unfulfilled Orders" KPI link (Main Dashboard or
+  // this page's own tiles below) instead of leaving the user stranded at
+  // the top of the page — persists across refresh since it's a real URL
+  // query param, not component state. `fulfillmentPaymentQuery.data` is a
+  // dependency on purpose: on first mount the panels haven't rendered yet
+  // (the query is still loading), so the refs below are null and this is
+  // a no-op; re-running once the data arrives (and the panels actually
+  // exist in the DOM) is what makes the scroll/highlight actually happen
+  // instead of silently failing.
+  React.useEffect(() => {
+    if (!selectedFulfillment) return
+    const target =
+      selectedFulfillment === "fulfilled" ? fulfilledPanelRef.current : unfulfilledPanelRef.current
+    target?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [selectedFulfillment, fulfillmentPaymentQuery.data])
 
   const ordersTimelineData = (timeseriesQuery.data?.points ?? []).map((p) => ({
     bucket: p.bucket,

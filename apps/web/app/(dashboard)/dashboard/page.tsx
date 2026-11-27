@@ -3,6 +3,7 @@
 import * as React from "react"
 import {
   AlertTriangle,
+  Ban,
   Boxes,
   Clock,
   Clock3,
@@ -70,6 +71,10 @@ function money(value: string): string {
 }
 function count(value: string): string {
   return Number(value).toLocaleString("en-IN")
+}
+function pct(part: number, total: number): string {
+  if (total <= 0) return "0%"
+  return `${((part / total) * 100).toFixed(1)}% of total`
 }
 
 function DashboardSkeleton() {
@@ -255,6 +260,13 @@ function DashboardContent() {
   const repeatCustomerPct =
     totalCustomerCount > 0 ? (repeatCustomerCount / totalCustomerCount) * 100 : 0
 
+  // Reuses the same `/analytics/breakdowns` call already fetched above for
+  // the "Order Status" BreakdownList — no new request needed. Mirrors how
+  // the Order Breakdown page derives its own Cancelled Orders tile.
+  const cancelledCount =
+    breakdownsQuery.data?.order_status.find((row) => row.status === "cancelled")?.count ?? 0
+  const totalOrderCount = summary?.total_orders ? Number(summary.total_orders.current) : 0
+
   const shipmentOverviewItems: ShipmentOverviewItem[] = [
     {
       key: "delivered",
@@ -371,7 +383,7 @@ function DashboardContent() {
           />
         </section>
 
-        <section className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-7">
+        <section className="grid grid-cols-2 gap-4 lg:grid-cols-4 xl:grid-cols-8">
           <KpiCard
             label="Pending Orders"
             icon={Clock}
@@ -416,7 +428,11 @@ function DashboardContent() {
             icon={Wallet}
             kpi={summary?.cod_orders}
             format={count}
-            href={ordersHref({ payment_type: "cod" })}
+            // Opens the dedicated COD Dashboard (Total/Fulfilled/
+            // Unfulfilled/Delivered COD KPIs), not the generic Orders list
+            // — fixes a production bug where this fell through to
+            // `ordersHref` and landed on plain `/orders`.
+            href={`/orders/breakdown/cod-dashboard?${orderQueryString}`}
             accent="amber"
           />
           <KpiCard
@@ -424,8 +440,20 @@ function DashboardContent() {
             icon={Wallet}
             kpi={summary?.prepaid_orders}
             format={count}
-            href={ordersHref({ payment_type: "prepaid" })}
+            // Opens the dedicated Prepaid breakdown page, same reasoning as
+            // "COD Orders" above.
+            href={`/orders/breakdown/prepaid?${orderQueryString}`}
             accent="blue"
+          />
+          <KpiCard
+            label="Cancelled Orders"
+            icon={Ban}
+            kpi={summary ? { current: String(cancelledCount), previous: "0", change_pct: null } : undefined}
+            format={count}
+            href={ordersHref({ status: "cancelled" })}
+            accent="slate"
+            invert
+            subtitle={summary ? pct(cancelledCount, totalOrderCount) : undefined}
           />
           <KpiCard
             label="Returns"

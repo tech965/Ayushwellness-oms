@@ -209,6 +209,7 @@ export interface FulfillmentPaymentBucket {
   percent_of_total_amount: number
   cod: PaymentSplitAmount
   prepaid: PaymentSplitAmount
+  other: PaymentSplitAmount
 }
 
 export interface FulfillmentPaymentBreakdown {

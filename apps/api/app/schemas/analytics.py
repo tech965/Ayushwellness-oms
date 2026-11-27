@@ -70,6 +70,11 @@ class FulfillmentPaymentBucket(BaseModel):
     percent_of_total_amount: float
     cod: PaymentSplitAmount
     prepaid: PaymentSplitAmount
+    # `PaymentType.OTHER` orders -- real rows the enum allows alongside
+    # cod/prepaid. Always present (zero fields when there are none) so
+    # cod.amount + prepaid.amount + other.amount always equals this
+    # bucket's own `amount` exactly.
+    other: PaymentSplitAmount
 
 
 class FulfillmentPaymentBreakdownResponse(BaseModel):

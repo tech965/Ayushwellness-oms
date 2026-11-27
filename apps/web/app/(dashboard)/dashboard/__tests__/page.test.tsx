@@ -367,4 +367,75 @@ describe("Dashboard Fulfilled/Unfulfilled KPI navigation", () => {
     const link = screen.getByRole("link", { name: /Unfulfilled Orders/ })
     expect(link.getAttribute("href")).toBe("/team/orders/unfulfilled")
   })
+
+  // Root-cause regression: production testing found "COD Orders"/"Prepaid
+  // Orders" fell through to the generic `/orders` list instead of their
+  // dedicated dashboards.
+  it("COD Orders links into the dedicated COD Dashboard, never /orders", () => {
+    renderWithProviders(<DashboardPage />)
+    const link = screen.getByRole("link", { name: /COD Orders/ })
+    const href = link.getAttribute("href") ?? ""
+    expect(href.startsWith("/orders/breakdown/cod-dashboard?")).toBe(true)
+  })
+
+  it("Prepaid Orders links into the dedicated Prepaid breakdown, never /orders", () => {
+    renderWithProviders(<DashboardPage />)
+    const link = screen.getByRole("link", { name: /Prepaid Orders/ })
+    const href = link.getAttribute("href") ?? ""
+    expect(href.startsWith("/orders/breakdown/prepaid?")).toBe(true)
+  })
+
+  it("renders a Cancelled Orders KPI linking to the generic Orders list filtered to cancelled", () => {
+    mockedBreakdowns.mockReturnValue({
+      data: {
+        order_status: [{ status: "cancelled", count: 7 }],
+        fulfillment_status: [],
+        payment_type: [],
+        payment_status: [],
+        shipment_status: [],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useBreakdowns>)
+
+    renderWithProviders(<DashboardPage />)
+    const link = screen.getByRole("link", { name: /Cancelled Orders/ })
+    const href = link.getAttribute("href") ?? ""
+    expect(href.startsWith("/orders?")).toBe(true)
+    expect(href).toContain("status=cancelled")
+    expect(screen.getByText("7")).toBeInTheDocument()
+  })
+
+  it("Cancelled Orders count/amount follow the active date-range filter, not a fixed one", () => {
+    const from = new Date("2026-02-01T00:00:00.000Z")
+    const to = new Date("2026-02-07T23:59:59.999Z")
+    setUrlDateRange(from, to)
+
+    mockedBreakdowns.mockReturnValue({
+      data: {
+        order_status: [{ status: "cancelled", count: 12 }],
+        fulfillment_status: [],
+        payment_type: [],
+        payment_status: [],
+        shipment_status: [],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useBreakdowns>)
+
+    renderWithProviders(<DashboardPage />)
+
+    // The Cancelled tile reads from the SAME `breakdownsQuery` call every
+    // other date-scoped tile uses -- assert that call itself carries the
+    // active URL date range (not a hardcoded one), and that the rendered
+    // count matches this range's mocked data, not the prior test's "7".
+    expect(mockedBreakdowns).toHaveBeenCalledWith(
+      expect.objectContaining({
+        date_from: from.toISOString(),
+        date_to: to.toISOString(),
+      }),
+      expect.anything()
+    )
+    const link = screen.getByRole("link", { name: /Cancelled Orders/ })
+    expect(screen.getByText("12")).toBeInTheDocument()
+    expect(link.getAttribute("href") ?? "").toContain("status=cancelled")
+  })
 })
