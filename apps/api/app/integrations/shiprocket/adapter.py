@@ -444,20 +444,47 @@ class ShiprocketAdapter(IntegrationAdapter):
         """
         from app.core.config import settings
 
-        if not settings.SHIPROCKET_REMITTANCE_PATH:
+        raw_path = settings.SHIPROCKET_REMITTANCE_PATH
+        if not raw_path or not raw_path.strip():
             raise IntegrationError(
                 "COD remittance sync is not enabled: SHIPROCKET_REMITTANCE_PATH is not set.",
                 details={"error_type": "not_configured"},
+            )
+        # Defensive normalization: a Render env var typed with a trailing
+        # slash, missing leading slash, or stray whitespace would silently
+        # diverge from the hardcoded literal `/shiprocket-probe` uses for
+        # the same candidate path, causing this sync to hit a different
+        # (and possibly erroring) URL than the one already proven to work
+        # via that probe -- normalize so both resolve identically.
+        path = raw_path.strip()
+        if not path.startswith("/"):
+            path = f"/{path}"
+        if len(path) > 1:
+            path = path.rstrip("/")
+        if path != raw_path:
+            # Safe to log verbatim: a configured API path, never a
+            # credential or token.
+            logger.warning(
+                "shiprocket_remittance_path_normalized",
+                configured_path=raw_path,
+                normalized_path=path,
             )
         client = self._get_client()
         try:
             data = await client.request(
                 "GET",
-                settings.SHIPROCKET_REMITTANCE_PATH,
+                path,
                 params={"page": page, "per_page": per_page},
             )
         except ShiprocketApiError as exc:
-            raise IntegrationError(exc.message, details={"error_type": exc.error_type}) from exc
+            raise IntegrationError(
+                exc.message,
+                details={
+                    "error_type": exc.error_type,
+                    "status_code": exc.status_code,
+                    **exc.details,
+                },
+            ) from exc
         body = data.get("data", data) if isinstance(data, dict) else data
         if isinstance(body, dict):
             body = next((v for v in body.values() if isinstance(v, list)), [])
