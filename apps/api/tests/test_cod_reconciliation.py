@@ -268,6 +268,54 @@ async def test_crf_success_record_creates_a_summed_remittance_line(
     assert sum(ln.remittance_amount for ln in lines_after) == Decimal("1500")
 
 
+async def test_crf_partial_payouts_aggregate_across_separate_pages(
+    db_session: AsyncSession,
+) -> None:
+    """Pinned regression for the per_page=100 -> per_page=1 fix
+    (`ShiprocketAdapter.fetch_cod_remittances`): production's real
+    Shiprocket calls now return at most one CRF record per page. Partial
+    + final payouts for the same AWB arriving on SEPARATE pages must
+    still sum to the full remitted amount, exactly as they already do
+    when returned together on one page.
+    """
+    from app.models.remittance_reconciliation import CodRemittanceLine
+
+    await _order(
+        db_session, "C2", PaymentType.COD, "1500", fulfillment=FulfillmentStatus.FULFILLED, awb="A2"
+    )
+    svc = CodReconciliationService(db_session)
+    partial = {
+        "crf_id": "CRF-P1",
+        "awb": "A2",
+        "order_id": "SR-ORDER-2",
+        "amount": 600,
+        "date": "2026-11-10",
+        "status": "success",
+        "utr": "UTR-P1",
+    }
+    final = {
+        "crf_id": "CRF-P2",
+        "awb": "A2",
+        "order_id": "SR-ORDER-2",
+        "amount": 900,
+        "date": "2026-11-16",
+        "status": "success",
+        "utr": "UTR-P2",
+    }
+    # One record per page -- exactly what per_page=1 pagination produces.
+    result = await svc.sync_remittances(_FakeAdapter([[partial], [final]]))
+    assert result["lines_created"] == 2
+    assert result["lines_matched"] == 2
+
+    lines = (
+        (await db_session.execute(select(CodRemittanceLine).where(CodRemittanceLine.awb == "A2")))
+        .scalars()
+        .all()
+    )
+    assert {ln.dedupe_key for ln in lines} == {"shiprocket_crf:CRF-P1", "shiprocket_crf:CRF-P2"}
+    assert sum(ln.remittance_amount for ln in lines) == Decimal("1500")
+
+
 async def test_crf_initiated_counts_as_payment_initiated_not_success(
     db_session: AsyncSession,
 ) -> None:
@@ -392,3 +440,34 @@ async def test_export_and_http_endpoints_are_permission_gated(
             json={"amount": "1", "reference": "x", "credited_on": "2026-11-01T00:00:00Z"},
         )
         assert v.status_code == 403
+
+
+async def test_sync_rejects_a_refresh_token_presented_as_bearer(
+    db_session: AsyncSession, make_authenticated_client
+) -> None:
+    """Pinned regression: `get_current_user` requires `type == "access"`
+    (`app/dependencies/auth.py:39-40`). Presenting the REFRESH token
+    (returned alongside the access token by `/auth/login`) as the
+    Authorization bearer must be rejected with 401 "Access token
+    required.", not treated as a valid credential -- this is the correct,
+    intended behaviour, not a bug: it stops a leaked/longer-lived refresh
+    token from being used to call authenticated endpoints directly. (The
+    type check runs before the token's subject is even looked up, so the
+    refresh token below doesn't need to belong to a real user.)
+    """
+    import uuid
+
+    from app.core.security import create_refresh_token
+
+    async with await make_authenticated_client(
+        db_session, is_superuser=True, email="super@example.com"
+    ) as c:
+        # Sanity-check: the fixture's real access token is accepted.
+        ok = await c.post("/api/v1/revenue-reconciliation/sync")
+        assert ok.status_code != 401
+
+        refresh_token, _jti = create_refresh_token(subject=str(uuid.uuid4()))
+        c.headers["Authorization"] = f"Bearer {refresh_token}"
+        resp = await c.post("/api/v1/revenue-reconciliation/sync")
+        assert resp.status_code == 401
+        assert "Access token required" in resp.json()["error"]["message"]
