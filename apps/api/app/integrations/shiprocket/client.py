@@ -138,7 +138,20 @@ class ShiprocketClient:
         token refresh + retry on a 401 (a cached token can go stale before
         our tracked expiry, e.g. if revoked). Raises `ShiprocketApiError`
         — never a raw `httpx` exception.
+
+        `path` may be either a relative path (joined onto
+        `self._config.api_base_url`, e.g. `/v1/external/...` -- the shape
+        every other Shiprocket call in this codebase uses) or an already-
+        absolute `http(s)://` URL, used as-is. COD remittance needs this:
+        Shiprocket Support confirmed its real endpoint lives directly
+        under `/v1/cod/remittance`, NOT under the shared `/v1/external`
+        base every other call (orders, shipments, NDR, wallet,
+        serviceability) correctly uses -- so it must bypass
+        `api_base_url` entirely rather than that base changing for
+        everyone.
         """
+        is_absolute = path.startswith(("http://", "https://"))
+        url = path if is_absolute else f"{self._config.api_base_url}{path}"
         attempt = 0
         reauthenticated = False
         while True:
@@ -146,7 +159,7 @@ class ShiprocketClient:
                 token = await self._ensure_token()
                 response = await self._client.request(
                     method,
-                    f"{self._config.api_base_url}{path}",
+                    url,
                     json=json,
                     params=params,
                     headers={"Authorization": f"Bearer {token}"},

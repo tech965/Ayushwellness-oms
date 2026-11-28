@@ -48,6 +48,49 @@ async def test_client_logs_in_and_sends_bearer_token() -> None:
     assert seen["auth_header"] == "Bearer tok_abc123"
 
 
+async def test_relative_path_still_joins_onto_api_base_url() -> None:
+    """Every existing Shiprocket integration (orders, shipments, NDR,
+    wallet, serviceability) passes a relative path and must keep using
+    the shared `/v1/external` base unchanged by the COD remittance fix.
+    """
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/login"):
+            return httpx.Response(200, json={"token": "tok"})
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, json={"ok": True})
+
+    client = _client_with(handler)
+    await client.request("GET", "/orders")
+
+    assert seen_urls == ["https://apiv2.shiprocket.in/v1/external/orders"]
+
+
+async def test_absolute_url_is_used_as_is_not_joined_onto_api_base_url() -> None:
+    """Root-cause fix: COD remittance lives directly under `/v1/`, not
+    under the shared `/v1/external` base -- passing an absolute
+    `http(s)://` URL must bypass `api_base_url` entirely rather than
+    being joined onto it (which previously produced the wrong, 404'ing
+    `.../v1/external/cod/remittance`).
+    """
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/login"):
+            return httpx.Response(200, json={"token": "tok"})
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, json={"data": []})
+
+    client = _client_with(handler)
+    data = await client.request(
+        "GET", "https://apiv2.shiprocket.in/v1/cod/remittance", params={"page": 1, "limit": 1}
+    )
+
+    assert data == {"data": []}
+    assert seen_urls == ["https://apiv2.shiprocket.in/v1/cod/remittance?page=1&limit=1"]
+
+
 async def test_client_reuses_cached_token_across_requests() -> None:
     seen = {"login_calls": 0}
 
