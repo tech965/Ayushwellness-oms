@@ -177,10 +177,10 @@ class Settings(BaseSettings):
     SHIPROCKET_PASSWORD: str | None = None
     SHIPROCKET_API_URL: str = "https://apiv2.shiprocket.in/v1/external"
     SHIPROCKET_WEBHOOK_SECRET: str | None = None
-    # Path (under SHIPROCKET_API_URL) the COD remittance sync reads.
-    # EMPTY = remittance sync disabled (COD figures show "Not reported").
-    # Deliberately has no guessed default: set it only after
-    # /revenue-reconciliation/shiprocket-probe confirms the real endpoint.
+    # DEPRECATED / UNUSED by the COD remittance sync. The endpoint is now the
+    # confirmed constant `POST https://api.shiprocket.in/v1/cod/remittance`
+    # and the sync is no longer gated on this value. Kept only so existing
+    # env files / the shiprocket-probe report keep loading.
     SHIPROCKET_REMITTANCE_PATH: str = ""
     # --- Shiprocket wallet ---
     # Wallet balance endpoint (given by the product owner; response shape not

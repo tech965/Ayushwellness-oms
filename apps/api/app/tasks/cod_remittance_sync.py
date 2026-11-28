@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 
-from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import AsyncSessionLocal, run_with_cleanup
 from app.integrations.registry import get_adapter
@@ -17,9 +16,6 @@ logger = get_logger(__name__)
 
 
 async def _run() -> None:
-    if not settings.SHIPROCKET_REMITTANCE_PATH:
-        logger.info("cod_remittance_sync_disabled_no_path")
-        return
     adapter = get_adapter(IntegrationCode.SHIPROCKET)
     if not isinstance(adapter, ShiprocketAdapter):
         logger.info("cod_remittance_sync_skipped_no_adapter")
