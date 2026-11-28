@@ -427,44 +427,48 @@ class ShiprocketAdapter(IntegrationAdapter):
         )
         return records, has_more
 
-    # Confirmed directly by Shiprocket Support. This is an ABSOLUTE URL,
-    # not a path relative to `api_base_url` -- Support confirmed COD
-    # remittance lives directly under `/v1/cod/remittance`, NOT under the
-    # shared `/v1/external` base every other Shiprocket call (orders,
-    # shipments, NDR, wallet, serviceability) correctly uses. An earlier
-    # attempt wrongly joined this onto that shared base
-    # (`.../v1/external/cod/remittance`), which 404'd; before that, an
-    # even earlier attempt used a different, wrong path entirely
-    # (`/account/details/remittance`, which 500'd). `ShiprocketClient.
-    # request()` uses an `http(s)://`-prefixed path as-is instead of
-    # joining it onto `api_base_url`, specifically so this one call can
-    # bypass that shared base without changing it for anyone else.
-    _COD_REMITTANCE_PATH = "https://apiv2.shiprocket.in/v1/cod/remittance"
+    # CONFIRMED DIRECTLY BY SHIPROCKET SUPPORT (current, correct, in
+    # effect). This is an ABSOLUTE URL, not a path relative to
+    # `api_base_url`: the host is `api.shiprocket.in` (NOT `apiv2.
+    # shiprocket.in`, which every other Shiprocket call in this codebase
+    # correctly uses), and the method is POST with a JSON body, not a GET
+    # with query params. `ShiprocketClient.request()` uses an
+    # `http(s)://`-prefixed path as-is instead of joining it onto
+    # `api_base_url`, specifically so this one call can use a different
+    # host/base without changing anything for any other integration.
+    #
+    # Two earlier attempts, in order, both turned out to be wrong:
+    #   1. `GET https://apiv2.shiprocket.in/v1/account/details/remittance`
+    #      -- wrong endpoint entirely, 500'd on every real sync call.
+    #   2. `GET https://apiv2.shiprocket.in/v1/cod/remittance` -- right
+    #      path, wrong base (joined onto the shared `/v1/external` base,
+    #      producing `.../v1/external/cod/remittance`), which 404'd.
+    _COD_REMITTANCE_PATH = "https://api.shiprocket.in/v1/cod/remittance"
+    _COD_REMITTANCE_MAX_LIMIT = 100
 
     async def fetch_cod_remittances(
-        self, *, page: int = 1, limit: int = 1
+        self, *, page: int = 1, limit: int = 100
     ) -> tuple[list[dict[str, Any]], bool]:
         """One page of COD remittance records via the shared client/token
         (same credentials as every other Shiprocket call). Returns
         `(records, has_more)`.
 
-        Endpoint: `GET https://apiv2.shiprocket.in/v1/cod/remittance`
-        (`_COD_REMITTANCE_PATH` -- an absolute URL, see its comment), with
-        `page`/`limit` query params -- confirmed by Shiprocket Support.
-        `SHIPROCKET_REMITTANCE_PATH` is kept only as the existing
-        enable/disable flag for this sync (its value is no longer read as
-        the request path, since the path is now fixed and confirmed, not
-        configurable/speculative).
+        Endpoint: `POST https://api.shiprocket.in/v1/cod/remittance`
+        (`_COD_REMITTANCE_PATH` -- an absolute URL, different host from
+        every other Shiprocket call, see its comment), with a JSON body
+        `{"page": page, "limit": limit}` -- confirmed by Shiprocket
+        Support, who also confirmed the maximum `limit` is 100 (clamped
+        here defensively via `_COD_REMITTANCE_MAX_LIMIT`, never sent
+        larger even if a caller passes one). `SHIPROCKET_REMITTANCE_PATH`
+        is kept only as the existing enable/disable flag for this sync
+        (its value is no longer read as the request path -- the path is
+        fixed and confirmed, not configurable/speculative).
 
-        IMPORTANT -- response-field mapping below (`normalize_cod_remittance`
-        in `remittance.py`) is STILL BASED ON AN EARLIER, WRONG ENDPOINT'S
-        ASSUMED SHAPE and has NOT been updated: Shiprocket's real sample
-        response for THIS endpoint has not yet been supplied. Do not treat
-        `crf_id`/`utr`/`amount`/`date`/`status`/`awb`/`order_id` as
-        confirmed for `/cod/remittance` -- they were only ever confirmed
-        (then disproven) for a prior, different endpoint. This sync is
-        request-level correct but NOT yet verified end-to-end against a
-        real response from `/cod/remittance`.
+        Response entries are confirmed to carry exactly `awb`, `amount`,
+        `status` (one of `pending` / `processed` / `failed`) -- no CRF id,
+        UTR, transaction date, or order id. `normalize_cod_remittance()`
+        in `remittance.py` correctly returns `None` for those absent
+        fields rather than inventing them; see that module's docstring.
         """
         from app.core.config import settings
 
@@ -474,12 +478,13 @@ class ShiprocketAdapter(IntegrationAdapter):
                 "COD remittance sync is not enabled: SHIPROCKET_REMITTANCE_PATH is not set.",
                 details={"error_type": "not_configured"},
             )
+        effective_limit = min(limit, self._COD_REMITTANCE_MAX_LIMIT)
         client = self._get_client()
         try:
             data = await client.request(
-                "GET",
+                "POST",
                 self._COD_REMITTANCE_PATH,
-                params={"page": page, "limit": limit},
+                json={"page": page, "limit": effective_limit},
             )
         except ShiprocketApiError as exc:
             raise IntegrationError(
@@ -497,7 +502,7 @@ class ShiprocketAdapter(IntegrationAdapter):
         meta = data.get("meta", {}).get("pagination", {}) if isinstance(data, dict) else {}
         total_pages = meta.get("total_pages") if isinstance(meta, dict) else None
         has_more = bool(records) and (
-            page < total_pages if total_pages else len(records) >= limit
+            page < total_pages if total_pages else len(records) >= effective_limit
         )
         return records, has_more
 

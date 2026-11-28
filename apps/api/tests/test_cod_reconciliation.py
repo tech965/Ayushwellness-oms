@@ -55,7 +55,7 @@ class _FakeAdapter:
     def __init__(self, pages: list[list[dict]]) -> None:
         self.pages = pages
 
-    async def fetch_cod_remittances(self, *, page: int = 1, per_page: int = 100):
+    async def fetch_cod_remittances(self, *, page: int = 1, limit: int = 100):
         records = self.pages[page - 1]
         return records, page < len(self.pages)
 
@@ -78,6 +78,25 @@ def test_normalizer_reads_known_keys_and_never_invents_values() -> None:
     assert row["remittance_reference"] == "UTR9"
     assert row["settlement_date"].year == 2026
     assert normalize_cod_remittance({"cod_amount": 5}) is None  # no AWB
+
+
+def test_normalizer_never_invents_fields_the_confirmed_endpoint_does_not_return() -> None:
+    """The CONFIRMED real `/cod/remittance` response carries exactly
+    `awb`/`amount`/`status` -- `crf_id`, `utr` (reference), transaction
+    date, and order id must all come back `None`, never guessed or
+    derived from the fields that ARE present."""
+    row = normalize_cod_remittance({"awb": "AWB-REAL", "amount": "750.00", "status": "processed"})
+    assert row["awb"] == "AWB-REAL"
+    assert row["remitted_amount"] == Decimal("750.00")
+    assert row["remittance_status"] == "processed"
+    assert row["crf_id"] is None
+    assert row["remittance_reference"] is None
+    assert row["settlement_date"] is None
+    assert row["shiprocket_order_id"] is None
+    assert row["channel_order_id"] is None
+    assert row["cod_amount"] is None
+    assert row["collected_amount"] is None
+    assert row["collected_at"] is None
 
 
 async def test_sync_is_disabled_until_remittance_path_is_configured(
@@ -202,13 +221,16 @@ async def test_reported_remittance_alone_is_not_bank_verified(db_session: AsyncS
 async def test_crf_success_record_creates_a_summed_remittance_line(
     db_session: AsyncSession,
 ) -> None:
-    """A CRF record (from the `GET /cod/remittance` feed, confirmed by
-    Shiprocket Support) with `status: "success"` must be stored as a
-    `CodRemittanceLine`, not
-    overwrite the single-row `CodRemittance` summary -- that is what lets
-    two distinct, successful CRFs for the same AWB (a partial payout then
-    the final one) both count, instead of the second silently replacing
-    the first."""
+    """A CRF record (from the `POST /cod/remittance` feed, CONFIRMED
+    DIRECTLY BY SHIPROCKET SUPPORT) with `status: "processed"` must be
+    stored as a `CodRemittanceLine`, not overwrite the single-row
+    `CodRemittance` summary -- that is what lets two distinct, processed
+    entries for the same AWB (a partial payout then the final one) both
+    count, instead of the second silently replacing the first. (This
+    fixture includes a `crf_id` to exercise the future-proofing path --
+    see `test_processed_entries_without_crf_id_use_fingerprint_dedupe`
+    for the actual confirmed response shape, which never includes one.)
+    """
     from app.models.remittance_reconciliation import CodRemittanceLine
 
     await _order(
@@ -222,7 +244,7 @@ async def test_crf_success_record_creates_a_summed_remittance_line(
         "order_id": "SR-ORDER-1",
         "amount": 500,
         "date": "2026-11-10",
-        "status": "success",
+        "status": "processed",
         "utr": "UTR-PARTIAL",
     }
     final = {
@@ -231,7 +253,7 @@ async def test_crf_success_record_creates_a_summed_remittance_line(
         "order_id": "SR-ORDER-1",
         "amount": 1000,
         "date": "2026-11-15",
-        "status": "success",
+        "status": "processed",
         "utr": "UTR-FINAL",
     }
     result = await svc.sync_remittances(_FakeAdapter([[partial, final]]))
@@ -269,6 +291,45 @@ async def test_crf_success_record_creates_a_summed_remittance_line(
     assert sum(ln.remittance_amount for ln in lines_after) == Decimal("1500")
 
 
+async def test_processed_fully_remitted_does_not_count_as_bank_confirmed_success(
+    db_session: AsyncSession,
+) -> None:
+    """CRITICAL distinction: Shiprocket `"processed"` means the COURIER
+    remitted the money to the business -- it is NOT the same as a human
+    verifying that money actually landed in the bank (`BankCredit`).
+    Even a `"processed"` CRF amount that exactly equals the order's full
+    expected COD value must NOT by itself increase `payment_success` --
+    it lands on `payment_initiated` (reported, not yet bank-confirmed)
+    until a real `BankCredit` is matched. See `remittance_common.
+    cod_status()` (`app/services/remittance_common.py:357-381`): `matched`
+    requires `bank_confirmed > 0`, a value that only ever comes from
+    `line_bank` (`CodRemittanceReconciliationService._records()`,
+    `app/services/cod_remittance_recon_service.py:743,747`) -- never from
+    the CRF-reported `remitted` amount itself.
+    """
+    from app.services.cod_remittance_recon_service import (
+        CodRemittanceReconciliationService,
+        Filters,
+    )
+
+    await _order(
+        db_session, "C9", PaymentType.COD, "500", fulfillment=FulfillmentStatus.FULFILLED, awb="A9"
+    )
+    svc = CodReconciliationService(db_session)
+    await svc.sync_remittances(
+        _FakeAdapter(
+            [[{"awb": "A9", "amount": 500, "status": "processed"}]]  # exactly the full amount
+        )
+    )
+
+    dash = CodRemittanceReconciliationService(db_session)
+    s = await dash.summary(Filters())
+    assert s["kpis"]["payment_success"]["count"] == 0
+    assert s["kpis"]["payment_initiated"]["count"] == 1
+    assert s["kpis"]["payment_failed"]["count"] == 0
+    assert s["kpis"]["payment_pending"]["count"] == 0
+
+
 async def test_crf_partial_payouts_aggregate_across_separate_pages(
     db_session: AsyncSession,
 ) -> None:
@@ -291,7 +352,7 @@ async def test_crf_partial_payouts_aggregate_across_separate_pages(
         "order_id": "SR-ORDER-2",
         "amount": 600,
         "date": "2026-11-10",
-        "status": "success",
+        "status": "processed",
         "utr": "UTR-P1",
     }
     final = {
@@ -300,7 +361,7 @@ async def test_crf_partial_payouts_aggregate_across_separate_pages(
         "order_id": "SR-ORDER-2",
         "amount": 900,
         "date": "2026-11-16",
-        "status": "success",
+        "status": "processed",
         "utr": "UTR-P2",
     }
     # One record per page -- exactly what per_page=1 pagination produces.
@@ -317,13 +378,64 @@ async def test_crf_partial_payouts_aggregate_across_separate_pages(
     assert sum(ln.remittance_amount for ln in lines) == Decimal("1500")
 
 
+async def test_processed_entries_without_crf_id_use_fingerprint_dedupe(
+    db_session: AsyncSession,
+) -> None:
+    """The CONFIRMED real `/cod/remittance` response never includes a
+    `crf_id` -- only `awb`/`amount`/`status`. Two genuinely distinct
+    `"processed"` entries for the same AWB with DIFFERENT amounts (a
+    partial payout then the final one) must still both be stored and
+    summed, deduped by the (awb, amount, status) fingerprint instead of
+    an invented identifier -- never overwriting the earlier payout.
+    """
+    from app.models.remittance_reconciliation import CodRemittanceLine
+
+    await _order(
+        db_session, "C3", PaymentType.COD, "1500", fulfillment=FulfillmentStatus.FULFILLED, awb="A3"
+    )
+    svc = CodReconciliationService(db_session)
+    partial = {"awb": "A3", "amount": 600, "status": "processed"}
+    final = {"awb": "A3", "amount": 900, "status": "processed"}
+
+    result = await svc.sync_remittances(_FakeAdapter([[partial, final]]))
+    assert result["lines_created"] == 2
+    assert result["created"] == 0  # nothing went onto the CodRemittance summary row
+
+    lines = (
+        (await db_session.execute(select(CodRemittanceLine).where(CodRemittanceLine.awb == "A3")))
+        .scalars()
+        .all()
+    )
+    assert len(lines) == 2
+    assert all(ln.dedupe_key.startswith("shiprocket_cod:") for ln in lines)
+    assert sum(ln.remittance_amount for ln in lines) == Decimal("1500")
+
+    # Re-syncing the identical two entries must update the same two rows
+    # in place (idempotent), never insert duplicates or double the total.
+    again = await svc.sync_remittances(_FakeAdapter([[partial, final]]))
+    assert again["lines_created"] == 0
+    assert again["lines_updated"] == 2
+    lines_after = (
+        (await db_session.execute(select(CodRemittanceLine).where(CodRemittanceLine.awb == "A3")))
+        .scalars()
+        .all()
+    )
+    assert len(lines_after) == 2
+    assert sum(ln.remittance_amount for ln in lines_after) == Decimal("1500")
+
+
 async def test_crf_initiated_counts_as_payment_initiated_not_success(
     db_session: AsyncSession,
 ) -> None:
-    """A CRF `status: "initiated"` has no settled amount: it must drive
-    Payment Initiated through the existing `payout_reported` signal, and
-    must never be read as a `remitted_amount` (Shiprocket's own word that a
-    transfer is in progress is not proof it completed)."""
+    """Backward-compatibility regression: `"initiated"` is a status from
+    the EARLIER, now-superseded CRF vocabulary (`pending`/`initiated`/
+    `success`) -- no current sync ever writes it again (the CONFIRMED
+    real vocabulary is `pending`/`processed`/`failed`), but a row already
+    synced under the old vocabulary must keep classifying the same way:
+    it has no settled amount, so it must drive Payment Initiated through
+    the existing `payout_reported` signal, and must never be read as a
+    `remitted_amount` (Shiprocket's own word that a transfer is in
+    progress is not proof it completed)."""
     from app.services.cod_remittance_recon_service import (
         CodRemittanceReconciliationService,
         Filters,
@@ -387,6 +499,141 @@ async def test_crf_pending_is_real_data_not_no_data(db_session: AsyncSession) ->
     assert s["data_coverage"]["pending_is_data_limited"] is False
 
 
+async def test_crf_failed_counts_as_payment_failed_never_pending_or_success(
+    db_session: AsyncSession,
+) -> None:
+    """CONFIRMED DIRECTLY BY SHIPROCKET SUPPORT: a `status: "failed"` CRF
+    entry means the payout attempt FAILED -- it must drive a dedicated
+    `payment_failed` KPI, and must NEVER be counted as Payment Pending
+    ("no data yet" is not the same as "we tried and it failed") or
+    Payment Success. The confirmed real response has no `crf_id` at all
+    (only `awb`/`amount`/`status`), so this fixture deliberately omits
+    one -- the sync must still work via the (awb, amount, status)
+    fallback dedupe key.
+    """
+    from app.services.cod_remittance_recon_service import (
+        CodRemittanceReconciliationService,
+        Filters,
+    )
+
+    await _order(
+        db_session, "C1", PaymentType.COD, "500", fulfillment=FulfillmentStatus.FULFILLED, awb="A1"
+    )
+    sync = CodReconciliationService(db_session)
+    result = await sync.sync_remittances(
+        _FakeAdapter([[{"awb": "A1", "amount": 500, "status": "failed"}]])
+    )
+    assert result["created"] == 1
+    assert result["lines_created"] == 0  # a failed attempt is never a settled line
+
+    existing = (
+        await db_session.execute(select(CodRemittance).where(CodRemittance.awb == "A1"))
+    ).scalar_one()
+    assert existing.remitted_amount is None  # never stored as settled money
+    assert existing.remittance_status == "failed"
+
+    dash = CodRemittanceReconciliationService(db_session)
+    s = await dash.summary(Filters())
+    assert s["kpis"]["payment_failed"]["count"] == 1
+    assert s["kpis"]["payment_pending"]["count"] == 0
+    assert s["kpis"]["payment_success"]["count"] == 0
+    assert s["kpis"]["payment_initiated"]["count"] == 0
+
+
+async def test_crf_failed_is_never_downgraded_back_to_pending(db_session: AsyncSession) -> None:
+    """A later sync page reporting the SAME AWB as `"pending"` (e.g. a
+    stale/duplicate page, or Shiprocket's own eventual-consistency
+    ordering) must never overwrite an already-recorded `"failed"` status
+    -- `failed` is the more protective, harder-to-miss state."""
+    sync = CodReconciliationService(db_session)
+    await _order(
+        db_session, "C1", PaymentType.COD, "500", fulfillment=FulfillmentStatus.FULFILLED, awb="A1"
+    )
+    await sync.sync_remittances(
+        _FakeAdapter([[{"awb": "A1", "amount": 500, "status": "failed"}]])
+    )
+    await sync.sync_remittances(
+        _FakeAdapter([[{"awb": "A1", "amount": 500, "status": "pending"}]])
+    )
+
+    existing = (
+        await db_session.execute(select(CodRemittance).where(CodRemittance.awb == "A1"))
+    ).scalar_one()
+    assert existing.remittance_status == "failed"
+
+
+async def test_mixed_pending_and_failed_entries_same_awb_different_amounts(
+    db_session: AsyncSession,
+) -> None:
+    """Multiple non-`processed` entries for the SAME AWB with DIFFERENT
+    amounts, across several pages: `CodRemittance` is one row per AWB,
+    so only the latest raw payload's `amount`/status combination is kept
+    on that row -- this is a real, documented property (not a bug): no
+    money is ever "lost" by it, because `remitted_amount` is deliberately
+    NEVER set for `pending`/`failed` statuses in the first place (see
+    `sync_remittances`'s `if status in ("pending", "failed"):` guard) --
+    there is no settled amount to lose. What IS preserved precisely:
+    (1) a `"failed"` status, once recorded, always wins over a later
+    `"pending"` for the same AWB (tested separately above), and (2) the
+    raw JSON of the most recent entry is retained verbatim in
+    `raw_external_payload` for audit/transparency, not silently dropped.
+    """
+    sync = CodReconciliationService(db_session)
+    await _order(
+        db_session, "C1", PaymentType.COD, "500", fulfillment=FulfillmentStatus.FULFILLED, awb="A1"
+    )
+    r1 = await sync.sync_remittances(
+        _FakeAdapter([[{"awb": "A1", "amount": 300, "status": "pending"}]])
+    )
+    r2 = await sync.sync_remittances(
+        _FakeAdapter([[{"awb": "A1", "amount": 500, "status": "failed"}]])
+    )
+    r3 = await sync.sync_remittances(
+        _FakeAdapter([[{"awb": "A1", "amount": 700, "status": "pending"}]])
+    )
+    assert r1["created"] == 1
+    assert r2["updated"] == 1
+    assert r3["updated"] == 1
+
+    existing = (
+        await db_session.execute(select(CodRemittance).where(CodRemittance.awb == "A1"))
+    ).scalar_one()
+    # Exactly one row ever exists for this AWB -- never duplicated.
+    assert existing.remittance_status == "failed"  # still wins over the later "pending"
+    assert existing.remitted_amount is None  # no amount was ever counted as settled
+    assert existing.raw_external_payload["amount"] == 500  # the failed entry's own payload kept
+    all_rows = (
+        (await db_session.execute(select(CodRemittance).where(CodRemittance.awb == "A1")))
+        .scalars()
+        .all()
+    )
+    assert len(all_rows) == 1
+
+
+async def test_duplicate_failed_entries_do_not_double_count(db_session: AsyncSession) -> None:
+    """Re-syncing the exact same `"failed"` entry (same awb/amount/status,
+    e.g. a repeated page) must remain idempotent -- it is still a single
+    `CodRemittance` row, never duplicated."""
+    sync = CodReconciliationService(db_session)
+    await _order(
+        db_session, "C1", PaymentType.COD, "500", fulfillment=FulfillmentStatus.FULFILLED, awb="A1"
+    )
+    entry = {"awb": "A1", "amount": 500, "status": "failed"}
+    first = await sync.sync_remittances(_FakeAdapter([[entry]]))
+    second = await sync.sync_remittances(_FakeAdapter([[entry]]))
+
+    assert first["created"] == 1
+    assert second["created"] == 0
+    assert second["updated"] == 1
+
+    rows = (
+        (await db_session.execute(select(CodRemittance).where(CodRemittance.awb == "A1")))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+
+
 async def test_crf_record_with_no_matching_order_is_reported_unmatched(
     db_session: AsyncSession,
 ) -> None:
@@ -395,12 +642,67 @@ async def test_crf_record_with_no_matching_order_is_reported_unmatched(
     svc = CodReconciliationService(db_session)
     result = await svc.sync_remittances(
         _FakeAdapter(
-            [[{"crf_id": "CRF-5", "awb": "NO-SUCH-AWB", "amount": 250, "status": "success"}]]
+            [[{"crf_id": "CRF-5", "awb": "NO-SUCH-AWB", "amount": 250, "status": "processed"}]]
         )
     )
     assert result["lines_created"] == 1
     assert result["lines_unmatched"] == 1
     assert result["lines_matched"] == 0
+
+
+async def test_sync_handles_an_empty_response_safely(db_session: AsyncSession) -> None:
+    """A single empty page (no records at all, e.g. nothing to sync yet)
+    must complete cleanly with all-zero counters, never raise."""
+    svc = CodReconciliationService(db_session)
+    result = await svc.sync_remittances(_FakeAdapter([[]]))
+    assert result == {
+        "created": 0,
+        "updated": 0,
+        "skipped": 0,
+        "lines_created": 0,
+        "lines_updated": 0,
+        "lines_matched": 0,
+        "lines_unmatched": 0,
+    }
+
+
+async def test_sync_skips_a_malformed_record_with_no_awb(db_session: AsyncSession) -> None:
+    """A record missing `awb` entirely (malformed/unexpected shape) has
+    nothing to attach it to -- it must be counted as `skipped`, never
+    crash the rest of the page or be silently dropped without a trace."""
+    svc = CodReconciliationService(db_session)
+    result = await svc.sync_remittances(
+        _FakeAdapter(
+            [
+                [
+                    {"amount": 500, "status": "processed"},  # no awb
+                    {"awb": "A9", "amount": 100, "status": "pending"},
+                ]
+            ]
+        )
+    )
+    assert result["skipped"] == 1
+    assert result["created"] == 1  # the second, well-formed record still syncs
+
+
+async def test_sync_propagates_an_integration_error_without_silently_swallowing_it(
+    db_session: AsyncSession,
+) -> None:
+    """An API-level failure from the adapter (e.g. a real Shiprocket
+    error) must surface as a real exception, never be swallowed into a
+    fake "0 synced" success."""
+    from app.core.exceptions import IntegrationError
+
+    class _FailingAdapter:
+        async def fetch_cod_remittances(self, *, page: int = 1, limit: int = 100):
+            raise IntegrationError(
+                "Shiprocket API returned a server error (500).",
+                details={"error_type": "http_500", "status_code": 500},
+            )
+
+    svc = CodReconciliationService(db_session)
+    with pytest.raises(IntegrationError):
+        await svc.sync_remittances(_FailingAdapter())
 
 
 async def test_prepaid_rows_have_no_cod_fields_and_filters_apply(

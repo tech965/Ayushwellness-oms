@@ -221,6 +221,36 @@ async def test_payment_status_kpis_group_statuses_and_total_cod_orders_is_wider(
     assert s["denominators"]["total_cod_orders"] == 7
     assert Decimal(s["denominators"]["total_cod_amount"]) == Decimal("7000.00")
     assert k["total_cod_orders"]["count"] == 7
+    # The new `payment_failed` bucket must partition alongside the other
+    # three WITHOUT breaking the pre-existing 3-way sum above -- this
+    # fixture has no failed CRF, so it is present and exactly zero, never
+    # missing from the response.
+    assert k["payment_failed"] == {"count": 0, "amount": "0.00"}
+
+
+async def test_payment_failed_and_crf_failed_amount_are_backward_compatible_additions(
+    db_session,
+):
+    """The new `payment_failed` KPI and `crf_failed_amount` key must
+    survive the REAL HTTP round trip through `SummaryResponse` (`kpis:
+    dict[str, dict[str, Any]]` in `app/schemas/remittance_reconciliation.
+    py:214` -- an open-ended dict, so a new key is never dropped or
+    rejected), proving this is additive and does not require any existing
+    API consumer (or the frontend's `kpis: Record<string, KpiAmount>` in
+    `apps/web/types/remittance.ts:63`) to change."""
+    user = await _user(db_session, "u2c@example.com")
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        await _setup_full(db_session, client)
+        s = await _summary(client)
+    k = s["kpis"]
+    # Every pre-existing key from before this change is still present...
+    for key in ("payment_success", "payment_initiated", "payment_pending"):
+        assert key in k and set(k[key]) == {"count", "amount"}
+    # ...and the new ones are additive, not a replacement.
+    assert "payment_failed" in k and set(k["payment_failed"]) == {"count", "amount"}
+    for key in ("crf_success_amount", "crf_initiated_amount", "crf_pending_amount"):
+        assert key in k
+    assert "crf_failed_amount" in k and set(k["crf_failed_amount"]) == {"count", "amount"}
 
 
 async def test_payment_status_drilldowns_match_their_counts_with_no_overlap(db_session):

@@ -102,13 +102,19 @@ from app.services.remittance_common import (
 MODULE = "cod"
 COD_STATUSES = ("pending", "partially_reconciled", "matched", "short", "excess")
 
-# The 5-KPI payment-status view groups the same `cod_status()` outcomes into
-# 3 buckets instead of showing all 5 individually:
+# The payment-status view groups the same `cod_status()` outcomes into 4
+# buckets instead of showing all 5 individually:
 #   - payment_success:   "matched"   -- fully remitted AND bank-confirmed.
 #   - payment_initiated: "partially_reconciled" / "short" / "excess" -- the
 #     courier has reported *something* (a remittance exists), but it is not
 #     yet a clean, bank-confirmed match.
-#   - payment_pending:   "pending"   -- no courier-reported remittance at all.
+#   - payment_failed:    a confirmed `"failed"` CRF entry for the order's
+#     AWB -- Shiprocket explicitly reported the payout attempt FAILED.
+#     Checked and excluded BEFORE Payment Pending, per Shiprocket Support's
+#     own instruction: a failure must never be counted as pending (“no
+#     data yet”) or as successful.
+#   - payment_pending:   "pending"   -- no courier-reported remittance at
+#     all, AND not a confirmed failure.
 # This is a derived grouping of the OMS's own computed reconciliation status
 # (`cod_status()`), not a parse of Shiprocket's raw remittance-status text --
 # that field's real vocabulary has never been confirmed against a live
@@ -119,41 +125,41 @@ COD_STATUSES = ("pending", "partially_reconciled", "matched", "short", "excess")
 # (`GET /orders/show/{id}`: `remittance_utr`, `remittance_date`, and the
 # free-text `cod_recieved_hover_text`): an order whose status is still
 # "pending" because no remittance AMOUNT is known, but for which Shiprocket
-# reports a payout reference, a date, or a non-empty hover-text label, is
-# `payout_reported` and counts as Payment Initiated, never Success. All three
-# are treated identically -- a presence check only, never a parse of the
-# hover text's wording (that vocabulary is not documented). Shiprocket
-# documents no remitted amount, CRF id, or bank settlement anywhere on this
-# endpoint, so none of these three can ever establish "success" by
-# themselves; the order keeps status "pending" and every amount stays as it
-# was -- only `payout_reported` flips to `True`.
+# reports a payout reference or a date, is `payout_reported` and counts as
+# Payment Initiated, never Success. Both are treated identically -- a
+# presence check only, never a parse of the hover text's wording (that
+# vocabulary is not documented). Shiprocket documents no remitted amount,
+# CRF id, or bank settlement anywhere on this endpoint, so neither can ever
+# establish "success" by themselves; the order keeps status "pending" and
+# every amount stays as it was -- only `payout_reported` flips to `True`.
 #
 # A second source supersedes the above when it applies: the CRF feed,
 # consumed by `CodReconciliationService.sync_remittances` via
-# `ShiprocketAdapter.fetch_cod_remittances` (`GET /cod/remittance`,
-# confirmed by Shiprocket Support -- an earlier round wrongly called
-# `GET /v1/account/details/remittance`, which 500'd on every real sync).
-# PENDING VERIFICATION: the field names below (status/amount/etc.) were
-# defined against that OLD, wrong endpoint's assumed shape and have not
-# yet been re-verified against `/cod/remittance`'s real response. Its
-# `status` is a real, three-value enum (`pending` / `initiated` / `success`),
-# not a presence check:
-#   - `success` CRFs are stored as `CodRemittanceLine` rows (summed per
-#     order, deduped by `crf_id`) and flow through the SAME `lines` branch
-#     above as an uploaded settlement report -- i.e. they become `remitted`
-#     evidence, so they still need a matched bank credit to reach
-#     Payment Success (`matched`); without one they land on
+# `ShiprocketAdapter.fetch_cod_remittances` -- CONFIRMED DIRECTLY BY
+# SHIPROCKET SUPPORT as `POST https://api.shiprocket.in/v1/cod/remittance`
+# (two earlier attempts were wrong: `GET .../account/details/remittance`
+# 500'd; `GET .../v1/cod/remittance` joined onto the wrong base and 404'd).
+# Its `status` is a real, three-value enum (`pending` / `processed` /
+# `failed`), not a presence check:
+#   - `processed` entries are stored as `CodRemittanceLine` rows (summed
+#     per order, deduped by a `crf_id` if one is ever present, else a
+#     deterministic (awb, amount, status) fingerprint -- see
+#     `_cod_entry_dedupe_key`) and flow through the SAME `lines` branch
+#     above as an uploaded settlement report -- i.e. they become
+#     `remitted` evidence, so they still need a matched bank credit to
+#     reach Payment Success (`matched`); without one they land on
 #     `partially_reconciled`, i.e. Payment Initiated. This keeps the one
 #     hard rule in this module intact: Shiprocket's own word that money
 #     moved is never, by itself, "bank confirmed".
-#   - `initiated` CRFs are stored on the `CodRemittance` summary row and
-#     drive `payout_reported`/Payment Initiated directly (see the `elif`
-#     branch below) -- the status itself is the evidence, it does not need
-#     a reference to also be present.
-#   - `pending` CRFs are stored the same way but deliberately do NOT set
-#     `payout_reported`: a real courier-reported "not yet" is still
-#     Payment Pending, just a *known* pending rather than *no data at all*
-#     (see `_data_coverage`'s `order_payout_references`, which does count it).
+#   - `pending` entries are stored on the `CodRemittance` summary row but
+#     deliberately do NOT set `payout_reported`: a real courier-reported
+#     "not yet" is still Payment Pending, just a *known* pending rather
+#     than *no data at all* (see `_data_coverage`'s
+#     `order_payout_references`, which does count it).
+#   - `failed` entries are stored the same way, with `remittance_status`
+#     preserved verbatim as `"failed"` -- drives the dedicated
+#     `payment_failed` bucket below, and is never downgraded back to
+#     `pending` by a later sync (see `sync_remittances`).
 PAYMENT_INITIATED_STATUSES = ("partially_reconciled", "short", "excess")
 
 
@@ -168,11 +174,23 @@ def _is_payment_initiated(r: dict) -> bool:
     return r["status"] in PAYMENT_INITIATED_STATUSES or bool(r.get("payout_reported"))
 
 
+def _is_payment_failed(r: dict) -> bool:
+    """A confirmed Shiprocket `"failed"` CRF entry for this order's AWB.
+    Checked before Payment Pending so a failure is never silently counted
+    as "no data yet" -- see `payout_failed` in `_records()`."""
+    return bool(r.get("payout_failed"))
+
+
 def _is_payment_pending(r: dict) -> bool:
-    """Everything that is neither Success nor Initiated, so the three always
-    partition the delivered orders: no courier remittance or payout reported
-    (including an adjustment-only `matched` order with no bank-confirmed money)."""
-    return not _is_payment_success(r) and not _is_payment_initiated(r)
+    """Everything that is neither Success, Initiated, nor Failed, so the
+    four always partition the delivered orders: no courier remittance or
+    payout reported (including an adjustment-only `matched` order with no
+    bank-confirmed money), and no confirmed failure either."""
+    return (
+        not _is_payment_success(r)
+        and not _is_payment_initiated(r)
+        and not _is_payment_failed(r)
+    )
 
 
 # KPI / percentage drill selector -> predicate over a record.
@@ -188,6 +206,7 @@ SELECTORS = {
     "partial": lambda r: r["status"] == "partially_reconciled",
     "payment_success": _is_payment_success,
     "payment_initiated": _is_payment_initiated,
+    "payment_failed": _is_payment_failed,
     "payment_pending": _is_payment_pending,
     **BANK_SELECTORS,
 }
@@ -204,6 +223,10 @@ MEASURES = {
     "payment_success": ("Payment success (bank-confirmed COD)", lambda r: r["expected_amount"]),
     "payment_initiated": (
         "Payment initiated (reported, not yet bank-confirmed)",
+        lambda r: r["expected_amount"],
+    ),
+    "payment_failed": (
+        "Payment failed (Shiprocket reported the payout attempt failed)",
         lambda r: r["expected_amount"],
     ),
     "payment_pending": (
@@ -696,6 +719,7 @@ class CodRemittanceReconciliationService:
             expected = dec(order.total_amount)
             adj = adjustments.get(order.id, ZERO)
             payout_indicator = False
+            payout_failed = False
             source = None
             remitted = ZERO
             confirmed = ZERO
@@ -729,15 +753,22 @@ class CodRemittanceReconciliationService:
                 rem = api[shipment.awb]
                 payload = rem.raw_external_payload or {}
                 hover_text = payload.get("cod_recieved_hover_text")
-                # A confirmed-real CRF status of "initiated" (Shiprocket has
-                # started the payout but it has not settled yet) is payout
-                # evidence on its own -- unlike a UTR/date/hover-text, it does
-                # not depend on a reference also being present. "pending" is
-                # NOT evidence of a payout in progress; it only tells
-                # `_data_coverage()` that this AWB is genuinely tracked (see
-                # there), so it is deliberately excluded here.
+                # `"initiated"` is a status from an EARLIER, now-superseded
+                # CRF vocabulary (`pending`/`initiated`/`success`) -- kept
+                # here only so historical rows synced before the
+                # `/cod/remittance` fix (CONFIRMED status vocabulary:
+                # `pending`/`processed`/`failed`) still classify the same
+                # way; no current sync will ever write "initiated" again.
                 crf_initiated = payload.get("status") == "initiated"
-                if rem.remitted_amount is not None and dec(rem.remitted_amount) > 0:
+                # A confirmed-real CRF status of "failed" means Shiprocket
+                # explicitly reported the payout attempt FAILED -- this
+                # must never be read as payout evidence (it is not "in
+                # progress" or "reported", it is a stop) and must win over
+                # every other indicator for this AWB.
+                crf_failed = payload.get("status") == "failed"
+                if crf_failed:
+                    payout_failed = True
+                elif rem.remitted_amount is not None and dec(rem.remitted_amount) > 0:
                     source = "shiprocket_api"
                     remitted = dec(rem.remitted_amount)
                     remitted_on = rem.settlement_date
@@ -798,6 +829,7 @@ class CodRemittanceReconciliationService:
                     "status_label": STATUS_LABELS[status],
                     "source": source,
                     "payout_reported": status == "pending" and payout_indicator,
+                    "payout_failed": payout_failed,
                     "age_days": age_days,
                     "line_count": len(lines),
                     "_settlement_days": sorted(
@@ -945,24 +977,24 @@ class CodRemittanceReconciliationService:
 
     async def _crf_records(self) -> list[dict[str, Any]]:
         """Every individual CRF transaction straight from Shiprocket's
-        `GET /cod/remittance` feed (confirmed by Shiprocket Support --
-        see `ShiprocketAdapter.fetch_cod_remittances`) -- `crf_id`, `utr`,
-        `awb`, `order_id`, `amount`, `date`, `status`, as Shiprocket
-        itself reported them (never mocked/placeholder: this is a real,
-        synced row, or the list is simply empty if `sync_remittances` has
-        never pulled any CRF data in this environment). PENDING
-        VERIFICATION: these field names are from the OLD, disproven
-        `/account/details/remittance` endpoint and have not yet been
-        re-verified against `/cod/remittance`'s real response. A
-        `success` row comes
-        from `CodRemittanceLine` (`CodReconciliationService.sync_remittances`
-        only ever creates one there with that partner name, from a CRF
-        record). An `initiated`/`pending` row comes from `CodRemittance`'s
-        `raw_external_payload`, where the ORIGINAL `amount` Shiprocket
-        reported is preserved even though it is deliberately never written
-        to `remitted_amount` (see `sync_remittances`): this view can show
-        it precisely because it is read-only and does not feed
-        `cod_status()`/Payment Success-Initiated-Pending in any way.
+        `POST /cod/remittance` feed (CONFIRMED DIRECTLY BY SHIPROCKET
+        SUPPORT -- see `ShiprocketAdapter.fetch_cod_remittances`). The
+        confirmed response carries only `awb`, `amount`, `status`; `utr`,
+        `order_id` (and `crf_id`, below) stay `None` for any row sourced
+        from this endpoint -- never invented. A `"processed"` row comes
+        from `CodRemittanceLine` (`CodReconciliationService.
+        sync_remittances` only ever creates one there with that partner
+        name, from a CRF record). A `"pending"`/`"failed"` row comes from
+        `CodRemittance`'s `raw_external_payload`, where the ORIGINAL
+        `amount` Shiprocket reported is preserved even though it is
+        deliberately never written to `remitted_amount` (see
+        `sync_remittances`): this view can show it precisely because it
+        is read-only and does not feed `cod_status()`/Payment
+        Success-Initiated-Failed-Pending in any way. (`"initiated"` rows
+        can still appear here too, purely for backward compatibility with
+        rows synced before this fix, under the now-superseded
+        `pending`/`initiated`/`success` vocabulary -- no current sync
+        ever writes that status again.)
         """
         rows: list[dict[str, Any]] = []
         lines = (
@@ -978,15 +1010,23 @@ class CodRemittanceReconciliationService:
         )
         for ln in lines:
             raw = ln.raw_row or {}
+            # Only a REAL crf_id Shiprocket actually returned -- never the
+            # internal (awb, amount, status) fingerprint used as a
+            # fallback dedupe key when no real identifier is present (see
+            # `_cod_entry_dedupe_key`); that fingerprint is not a CRF id
+            # and must not be displayed as one.
+            real_crf_id = raw.get("crf_id")
+            if real_crf_id is None and ln.dedupe_key.startswith("shiprocket_crf:"):
+                real_crf_id = ln.dedupe_key.removeprefix("shiprocket_crf:")
             rows.append(
                 {
-                    "crf_id": raw.get("crf_id") or ln.dedupe_key.removeprefix("shiprocket_crf:"),
+                    "crf_id": real_crf_id,
                     "utr": ln.remittance_reference,
                     "awb": ln.awb,
                     "order_id": ln.order_ref,
                     "amount": dec(ln.remittance_amount),
                     "date": ln.remittance_date,
-                    "status": "success",
+                    "status": "processed",
                     "matched_order_id": ln.matched_order_id,
                 }
             )
@@ -1002,7 +1042,7 @@ class CodRemittanceReconciliationService:
         for rem in api_rows:
             payload = rem.raw_external_payload or {}
             status = payload.get("status")
-            if status not in ("initiated", "pending"):
+            if status not in ("pending", "failed", "initiated"):
                 continue
             rows.append(
                 {
@@ -1022,27 +1062,48 @@ class CodRemittanceReconciliationService:
     async def _crf_amounts(self) -> dict[str, dict[str, Any]]:
         """Real Rupee totals straight from the CRF feed (see `_crf_records`),
         for display/transparency only. These are NOT fed into `cod_status()`
-        or the Payment Success/Initiated/Pending KPIs above, which stay
-        order-level and (for Success) bank-evidence-gated -- unchanged by
-        this method."""
-        totals = {"success": ZERO, "initiated": ZERO, "pending": ZERO}
-        counts = {"success": 0, "initiated": 0, "pending": 0}
+        or the Payment Success/Initiated/Failed/Pending KPIs above, which
+        stay order-level and (for Success) bank-evidence-gated -- unchanged
+        by this method.
+
+        Response keys are kept as `crf_success_amount`/`crf_initiated_
+        amount`/`crf_pending_amount` for backward API/frontend
+        compatibility with the dashboard cards built under the earlier,
+        now-superseded `pending`/`initiated`/`success` vocabulary --
+        `crf_success_amount` is populated from CONFIRMED `"processed"`
+        rows (the new name for that same bucket); `crf_initiated_amount`
+        will be 0 for any environment where every row was synced under
+        the current, confirmed vocabulary (since no current sync ever
+        writes `"initiated"` again), but still correctly reports any
+        pre-fix historical rows. `crf_failed_amount` is a NEW, additive
+        key -- a confirmed `"failed"` CRF must be visible here, never
+        silently folded into `crf_pending_amount`; the dashboard UI does
+        not yet render this key (out of this change's scope), so adding a
+        "Payment Failed" card is tracked as separate, required follow-up
+        work, not implemented here.
+        """
+        totals: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        counts: dict[str, int] = defaultdict(int)
         for row in await self._crf_records():
             totals[row["status"]] += row["amount"]
             counts[row["status"]] += 1
         return {
-            "crf_success_amount": {"count": counts["success"], "amount": money(totals["success"])},
+            "crf_success_amount": {
+                "count": counts["processed"],
+                "amount": money(totals["processed"]),
+            },
             "crf_initiated_amount": {
                 "count": counts["initiated"],
                 "amount": money(totals["initiated"]),
             },
+            "crf_failed_amount": {"count": counts["failed"], "amount": money(totals["failed"])},
             "crf_pending_amount": {"count": counts["pending"], "amount": money(totals["pending"])},
         }
 
     async def crf_transactions(
         self, *, status: str | None, page_params: PageParams
     ) -> tuple[list[dict[str, Any]], int]:
-        """Paginated transaction-detail view behind the 3 CRF amount KPIs."""
+        """Paginated transaction-detail view behind the CRF amount KPIs."""
         rows = await self._crf_records()
         if status:
             rows = [r for r in rows if r["status"] == status]
@@ -1071,6 +1132,8 @@ class CodRemittanceReconciliationService:
         matched = by_status["matched"]
         initiated = [r for r in records if _is_payment_initiated(r)]
         initiated_amount = money(sum((r["expected_amount"] for r in initiated), ZERO))
+        payment_failed = [r for r in records if _is_payment_failed(r)]
+        payment_failed_amount = money(sum((r["expected_amount"] for r in payment_failed), ZERO))
         payment_pending = [r for r in records if _is_payment_pending(r)]
         payment_pending_amount = money(sum((r["expected_amount"] for r in payment_pending), ZERO))
         payment_success = [r for r in records if _is_payment_success(r)]
@@ -1111,6 +1174,7 @@ class CodRemittanceReconciliationService:
             "total_cod_orders": {"count": total_cod_orders, "amount": money(total_cod_amount)},
             "payment_success": {"count": len(payment_success), "amount": payment_success_amount},
             "payment_initiated": {"count": len(initiated), "amount": initiated_amount},
+            "payment_failed": {"count": len(payment_failed), "amount": payment_failed_amount},
             "payment_pending": {"count": len(payment_pending), "amount": payment_pending_amount},
             **await self._crf_amounts(),
         }
