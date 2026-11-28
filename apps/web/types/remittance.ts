@@ -37,6 +37,28 @@ export interface StatusCount {
   percent_of_orders: number | null
 }
 
+/** Which remittance / bank evidence OMS holds at all (COD summary only). */
+export interface RemittanceDataCoverage {
+  has_remittance_data: boolean
+  has_bank_data: boolean
+  /** True when nothing is loaded, so "Payment Pending" means "no data", not "unpaid". */
+  pending_is_data_limited: boolean
+  api_sync_configured: boolean
+  remittance_lines: number
+  api_reported_remittances: number
+  /** Shiprocket order-detail payout reference/date with no amount (counts as Initiated). */
+  order_payout_references?: number
+  bank_credits: number
+  manual_bank_verifications: number
+  last_upload_at: string | null
+  last_api_sync_at: string | null
+  /** Payment Pending orders in the period, and how many were never read from Shiprocket. */
+  pending_orders?: number
+  pending_unchecked_orders?: number | null
+  /** false: the never-checked count cannot be determined (database update pending). */
+  pending_check_available?: boolean
+}
+
 export interface RemittanceSummary {
   kpis: Record<string, KpiAmount>
   percentages: PercentageItem[]
@@ -44,6 +66,20 @@ export interface RemittanceSummary {
   partners?: PartnerRow[] | null
   gateways?: GatewayRow[] | null
   denominators: Record<string, number | string>
+  data_coverage?: RemittanceDataCoverage | null
+}
+
+/** One raw Shiprocket CRF record (`GET /v1/account/details/remittance`),
+ * behind the CRF success/initiated/pending amount KPIs. */
+export interface CrfTransactionRow {
+  crf_id: string | null
+  utr: string | null
+  awb: string | null
+  order_id: string | null
+  amount: string
+  date: string | null
+  status: "success" | "initiated" | "pending"
+  matched_order_id: string | null
 }
 
 export interface PartnerRow {

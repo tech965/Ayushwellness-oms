@@ -12,6 +12,7 @@ import { useDebouncedValue } from "@/components/shared/order-drilldown"
 import { PageHeader } from "@/components/shared/page-header"
 import { QueryStates } from "@/components/shared/query-states"
 import { SelectableStatCard } from "@/components/shared/selectable-stat-card"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -40,6 +41,7 @@ import { usePaginationState } from "@/lib/use-pagination"
 import {
   downloadDrilldownExport,
   downloadRemittanceExport,
+  useCrfTransactions,
   useRematch,
   useRemittanceRecords,
   useRemittanceReport,
@@ -48,6 +50,7 @@ import {
 } from "@/services/remittance"
 import type {
   CodRecord,
+  CrfTransactionRow,
   GatewayRow,
   PartnerRow,
   PrepaidRecord,
@@ -331,7 +334,7 @@ function paymentStatusCards(s: RemittanceSummary): KpiCard[] {
       label: "Payment Success",
       value: count("payment_success").toLocaleString("en-IN"),
       detail: `${rupees(amt("payment_success"))} · ${share(count("payment_success"), delivered)} of delivered`,
-      description: "Fully remitted by the courier and bank-confirmed",
+      description: "Fully remitted by the courier and bank-confirmed (a courier payout alone is not)",
       drill: "payment_success",
       accent: "green",
     },
@@ -340,7 +343,7 @@ function paymentStatusCards(s: RemittanceSummary): KpiCard[] {
       label: "Payment Initiated",
       value: count("payment_initiated").toLocaleString("en-IN"),
       detail: `${rupees(amt("payment_initiated"))} · ${share(count("payment_initiated"), delivered)} of delivered`,
-      description: "Reported by the courier, not yet a clean bank-confirmed match",
+      description: "Courier remittance or payout reported, not yet bank-confirmed",
       drill: "payment_initiated",
       accent: "amber",
     },
@@ -349,11 +352,167 @@ function paymentStatusCards(s: RemittanceSummary): KpiCard[] {
       label: "Payment Pending",
       value: count("payment_pending").toLocaleString("en-IN"),
       detail: `${rupees(amt("payment_pending"))} · ${share(count("payment_pending"), delivered)} of delivered`,
-      description: "No courier-reported remittance yet",
+      description: "No courier remittance or payout reported",
       drill: "payment_pending",
       accent: "red",
     },
   ]
+}
+
+/** Says so when the Payment Success / Initiated / Pending figures rest on missing
+ * data: with no remittance loaded every delivered order is "pending" only
+ * because nothing reports otherwise, and without bank data nothing can be
+ * "success". Renders nothing once both kinds of evidence are present. */
+function PaymentDataNotice({
+  coverage,
+}: {
+  coverage: RemittanceSummary["data_coverage"]
+}) {
+  if (!coverage) return null
+  const unchecked = coverage.pending_unchecked_orders ?? 0
+  const notices: { title: string; body: string }[] = []
+  if (!coverage.has_remittance_data) {
+    notices.push({
+      title: "No Shiprocket remittance data loaded",
+      body: "OMS holds no COD remittance, CRF or payout records yet, so delivered orders show as Payment Pending only because nothing reports otherwise. That is not confirmed non-payment. Upload the Shiprocket COD remittance (CRF) report under Files & sources, or run the Shiprocket order sync.",
+    })
+  } else if (coverage.pending_check_available === false) {
+    notices.push({
+      title: "Cannot tell which Payment Pending orders were never checked",
+      body: "The Shiprocket order-read record is not available yet (a database update is pending), so Payment Pending cannot be separated into unpaid and never-checked orders. Treat Pending as unknown, not unpaid.",
+    })
+  } else if (unchecked > 0) {
+    notices.push({
+      title: `${unchecked.toLocaleString("en-IN")} of ${Number(coverage.pending_orders ?? 0).toLocaleString("en-IN")} Payment Pending orders were never checked`,
+      body: "They are in no uploaded remittance report and their Shiprocket order record has not been read, so a payout may already exist. For these orders Pending means unknown, not unpaid. Upload the CRF report or run the Shiprocket order sync.",
+    })
+  }
+  if (!coverage.has_bank_data) {
+    notices.push({
+      title: "No bank statement imported",
+      body: "Payment Success needs bank confirmation. Until a bank statement is imported or a credit is verified, fully remitted orders stay under Payment Initiated.",
+    })
+  }
+  if (notices.length === 0) return null
+  return (
+    <Alert data-testid="payment-data-notice">
+      {notices.map((notice) => (
+        <React.Fragment key={notice.title}>
+          <AlertTitle>{notice.title}</AlertTitle>
+          <AlertDescription>{notice.body}</AlertDescription>
+        </React.Fragment>
+      ))}
+    </Alert>
+  )
+}
+
+const CRF_STATUS_META: Record<
+  "success" | "initiated" | "pending",
+  { label: string; kpiKey: string; description: string; accent: "green" | "amber" | "red" }
+> = {
+  success: {
+    label: "Successful COD Amount",
+    kpiKey: "crf_success_amount",
+    description: "Sum of Shiprocket CRF records reported \"success\" -- the courier's own completed-payout amount, summed across every distinct CRF (a partial payout and its final one both count).",
+    accent: "green",
+  },
+  initiated: {
+    label: "Initiated COD Amount",
+    kpiKey: "crf_initiated_amount",
+    description: "Sum of Shiprocket CRF records reported \"initiated\" -- a transfer the courier says is in progress, not yet completed.",
+    accent: "amber",
+  },
+  pending: {
+    label: "Pending COD Amount",
+    kpiKey: "crf_pending_amount",
+    description: "Sum of Shiprocket CRF records reported \"pending\" -- a real, courier-reported \"not yet\", distinct from no CRF data having been synced at all.",
+    accent: "red",
+  },
+}
+
+function crfColumns(): DataTableColumn<CrfTransactionRow>[] {
+  return [
+    { id: "crf_id", header: "CRF ID", cell: (r) => r.crf_id ?? "—" },
+    {
+      id: "status",
+      header: "Status",
+      cell: (r) => <Badge variant="outline" className="capitalize">{r.status}</Badge>,
+    },
+    { id: "utr", header: "UTR", cell: (r) => r.utr ?? "—" },
+    { id: "awb", header: "AWB", cell: (r) => r.awb ?? "—" },
+    { id: "order_id", header: "Shiprocket order ID", cell: (r) => r.order_id ?? "—" },
+    { id: "amount", header: "Amount", cell: (r) => rupees(r.amount) },
+    { id: "date", header: "Date", cell: (r) => (r.date ? formatDate(r.date) : "—") },
+  ]
+}
+
+/** The 3 real CRF (`GET /v1/account/details/remittance`) amount totals and
+ * their transaction-detail list. Purely a transparency view -- these
+ * amounts never feed `cod_status()`/Payment Success-Initiated-Pending
+ * above, which stay order-level and (for Success) bank-evidence-gated. Each
+ * figure is 0 and the list is empty whenever no CRF data has been synced in
+ * this environment: never a placeholder value.
+ */
+function CrfAmountSection({
+  summary,
+  status,
+  onSelectStatus,
+  query,
+  onPageChange,
+}: {
+  summary: RemittanceSummary
+  status: "success" | "initiated" | "pending" | undefined
+  onSelectStatus: (status: "success" | "initiated" | "pending") => void
+  query: ReturnType<typeof useCrfTransactions>
+  onPageChange: (page: number) => void
+}) {
+  const [search, setSearch] = React.useState("")
+  return (
+    <section className="space-y-2" aria-label="CRF transaction amounts">
+      <div>
+        <h3 className="text-base font-semibold">CRF transaction amounts</h3>
+        <p className="text-muted-foreground text-xs">
+          Real Rupee amounts from Shiprocket&apos;s own CRF feed, by its status. Click one to
+          see the individual transactions behind it.
+        </p>
+      </div>
+      <div
+        className="grid grid-cols-1 gap-3 sm:grid-cols-3"
+        data-testid="crf-amount-kpi-grid"
+      >
+        {(Object.keys(CRF_STATUS_META) as Array<keyof typeof CRF_STATUS_META>).map((key) => {
+          const meta = CRF_STATUS_META[key]
+          const amount = String(num(summary, meta.kpiKey, "amount"))
+          const count = Number(num(summary, meta.kpiKey, "count"))
+          return (
+            <SelectableStatCard
+              key={key}
+              label={meta.label}
+              value={rupees(amount)}
+              detail={`${count.toLocaleString("en-IN")} CRF ${count === 1 ? "record" : "records"}`}
+              description={meta.description}
+              accent={meta.accent}
+              selected={status === key}
+              onClick={() => onSelectStatus(key)}
+            />
+          )
+        })}
+      </div>
+      {status && (
+        <DataDrilldown
+          title={`${CRF_STATUS_META[status].label} -- transactions`}
+          query={query}
+          columns={crfColumns()}
+          rowKey={(r) => r.crf_id ?? `${r.awb}-${r.date}`}
+          search={search}
+          onSearchChange={setSearch}
+          onPageChange={onPageChange}
+          onClear={() => onSelectStatus(status)}
+          emptyTitle="No CRF transactions have been synced for this status yet"
+        />
+      )}
+    </section>
+  )
 }
 
 function prepaidCards(s: RemittanceSummary): KpiCard[] {
@@ -528,6 +687,10 @@ export function RemittanceDashboard({ module }: Props) {
   const [exporting, setExporting] = React.useState(false)
   const drilldownRef = React.useRef<HTMLDivElement>(null)
   const { page, pageSize, setPage, resetPage } = usePaginationState()
+  const [crfStatus, setCrfStatus] = React.useState<"success" | "initiated" | "pending" | undefined>(
+    undefined
+  )
+  const [crfPage, setCrfPage] = React.useState(1)
 
   const filters: RemittanceFilters = {
     date_from: dateFrom,
@@ -537,6 +700,12 @@ export function RemittanceDashboard({ module }: Props) {
   }
 
   const summaryQuery = useRemittanceSummary(module, filters)
+  const crfQuery = useCrfTransactions({
+    status: crfStatus,
+    page: crfPage,
+    pageSize: 20,
+    enabled: isCod,
+  })
   const optionsQuery = useRemittanceReport<PartnerRow & GatewayRow>(
     module,
     isCod ? "partners" : "gateways",
@@ -955,6 +1124,7 @@ export function RemittanceDashboard({ module }: Props) {
               {isCod && (
                 <section className="space-y-2" aria-label="Payment status">
                   <h3 className="text-base font-semibold">Payment status</h3>
+                  <PaymentDataNotice coverage={summary.data_coverage} />
                   <div
                     className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5"
                     data-testid="payment-status-kpi-grid"
@@ -995,6 +1165,18 @@ export function RemittanceDashboard({ module }: Props) {
                     ))}
                   </div>
                 </section>
+              )}
+              {isCod && (
+                <CrfAmountSection
+                  summary={summary}
+                  status={crfStatus}
+                  onSelectStatus={(next) => {
+                    setCrfStatus((current) => (current === next ? undefined : next))
+                    setCrfPage(1)
+                  }}
+                  query={crfQuery}
+                  onPageChange={setCrfPage}
+                />
               )}
               {[false, true].map((supporting) => (
                 <section

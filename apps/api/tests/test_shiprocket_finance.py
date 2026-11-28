@@ -345,6 +345,18 @@ async def test_order_finance_is_parsed_without_inventing_amounts():
     assert parse_order_finance({"message": "x"}) is None
 
 
+async def test_hover_text_is_read_as_presence_only_never_an_amount():
+    """`cod_recieved_hover_text` is a free-text label: it is kept verbatim
+    when present, left `None` when blank, and never turned into a number."""
+    present = parse_order_finance(order_body(cod_recieved_hover_text="COD received"))
+    assert present["cod_received_hover_text"] == "COD received"
+    assert present["raw"]["cod_recieved_hover_text"] == "COD received"
+    blank = parse_order_finance(order_body(cod_recieved_hover_text=""))
+    assert blank["cod_received_hover_text"] is None
+    missing = parse_order_finance(order_body())  # key absent entirely in the fixture base
+    assert missing["cod_received_hover_text"] is None
+
+
 class FakeShiprocket:
     def __init__(self, bodies=None, error=None):
         self.bodies, self.error, self.calls = bodies or {}, error, []
@@ -391,6 +403,26 @@ async def test_sync_reads_only_orders_with_a_known_id_and_stores_no_amount(db_se
         # Shipment charges are informational and never enter the wallet KPIs.
         cards = (await client.get(f"{BASE}/expenses/summary")).json()["data"]["cards"]
         assert all(D(c["amount"]) == 0 for c in cards)
+
+
+async def test_sync_stores_hover_text_in_the_existing_json_column_no_amount(db_session):
+    """No dedicated column is added for `cod_recieved_hover_text`: it must
+    land inside the already-existing `raw_external_payload` JSON field, under
+    its own key, and must never populate `remitted_amount`."""
+    await _shipped(db_session, "S-3", "AWB-S3", "9003")
+    fake = FakeShiprocket(
+        {
+            "9003": order_body(
+                remittance_utr="", remittance_status="", remittance_date="",
+                cod_recieved_hover_text="COD received",
+            )  # fmt: skip
+        }
+    )
+    await ShiprocketFinanceService(db_session).sync_order_finance(fake, limit=5, user=None)
+    rem = (await db_session.execute(select(CodRemittance))).scalar_one()
+    assert rem.raw_external_payload["cod_recieved_hover_text"] == "COD received"
+    assert rem.remitted_amount is None
+    assert rem.remittance_reference is None
 
 
 async def test_module_6_is_unchanged_by_a_utr_only_remittance_row(db_session):

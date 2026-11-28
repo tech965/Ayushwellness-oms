@@ -451,11 +451,19 @@ class ShiprocketFinanceService:
     async def _store_order_remittance(
         self, shipment: Shipment, order: Order, order_id: str, parsed: dict
     ) -> bool:
-        """Records only the UTR / status / date. No amount is documented, so
-        no amount is written and Module 6 calculates exactly as before."""
+        """Records the UTR / status / date, plus the hover-text payout
+        indicator, verbatim. No amount is documented by this endpoint, so no
+        amount is written and Module 6 calculates exactly as before.
+
+        `cod_received_hover_text` has no dedicated column (no migration in
+        this change) -- it is kept inside the existing `raw_external_payload`
+        JSON field, the same column already reserved for "extra reported
+        fields" on this row, under its own key so it is never confused with
+        Shiprocket's separate `remittance_status` enum-like field."""
         utr, status = parsed["remittance_utr"], parsed["remittance_status"]
         paid_on = parsed["remittance_date"]
-        if order.payment_type != PaymentType.COD or not (utr or status or paid_on):
+        hover_text = parsed.get("cod_received_hover_text")
+        if order.payment_type != PaymentType.COD or not (utr or status or paid_on or hover_text):
             return False
         row = await self.session.scalar(
             select(CodRemittance).where(CodRemittance.awb == shipment.awb)
@@ -466,6 +474,11 @@ class ShiprocketFinanceService:
         row.remittance_reference = row.remittance_reference or utr
         row.settlement_date = row.settlement_date or paid_on
         row.remittance_status = status or row.remittance_status
+        if hover_text:
+            row.raw_external_payload = {
+                **(row.raw_external_payload or {}),
+                "cod_recieved_hover_text": hover_text,
+            }
         row.synced_at = datetime.now(UTC)
         await self.session.flush()
         return bool(utr)

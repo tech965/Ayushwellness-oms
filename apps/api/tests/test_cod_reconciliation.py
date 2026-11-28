@@ -147,7 +147,15 @@ async def test_sync_is_idempotent_and_keeps_bank_verification(db_session: AsyncS
     }
 
     first = await svc.sync_remittances(_FakeAdapter([[record]]))
-    assert first == {"created": 1, "updated": 0, "skipped": 0}
+    assert first == {
+        "created": 1,
+        "updated": 0,
+        "skipped": 0,
+        "lines_created": 0,
+        "lines_updated": 0,
+        "lines_matched": 0,
+        "lines_unmatched": 0,
+    }
 
     await svc.verify_bank_credit(
         "A1",
@@ -189,6 +197,161 @@ async def test_reported_remittance_alone_is_not_bank_verified(db_session: AsyncS
     s = await svc.summary(date_from=None, date_to=None)
     assert s.cod_financials.remitted_amount == Decimal("500")
     assert s.cod_financials.bank_verified_amount == 0
+
+
+async def test_crf_success_record_creates_a_summed_remittance_line(
+    db_session: AsyncSession,
+) -> None:
+    """A confirmed-real CRF (`GET /v1/account/details/remittance`) record
+    with `status: "success"` must be stored as a `CodRemittanceLine`, not
+    overwrite the single-row `CodRemittance` summary -- that is what lets
+    two distinct, successful CRFs for the same AWB (a partial payout then
+    the final one) both count, instead of the second silently replacing
+    the first."""
+    from app.models.remittance_reconciliation import CodRemittanceLine
+
+    await _order(
+        db_session, "C1", PaymentType.COD, "1500", fulfillment=FulfillmentStatus.FULFILLED, awb="A1"
+    )
+    svc = CodReconciliationService(db_session)
+
+    partial = {
+        "crf_id": "CRF-1",
+        "awb": "A1",
+        "order_id": "SR-ORDER-1",
+        "amount": 500,
+        "date": "2026-11-10",
+        "status": "success",
+        "utr": "UTR-PARTIAL",
+    }
+    final = {
+        "crf_id": "CRF-2",
+        "awb": "A1",
+        "order_id": "SR-ORDER-1",
+        "amount": 1000,
+        "date": "2026-11-15",
+        "status": "success",
+        "utr": "UTR-FINAL",
+    }
+    result = await svc.sync_remittances(_FakeAdapter([[partial, final]]))
+    assert result["lines_created"] == 2
+    assert result["lines_matched"] == 2
+    assert result["created"] == 0  # nothing went onto the CodRemittance summary row
+
+    lines = (
+        (await db_session.execute(select(CodRemittanceLine).where(CodRemittanceLine.awb == "A1")))
+        .scalars()
+        .all()
+    )
+    assert {ln.dedupe_key for ln in lines} == {"shiprocket_crf:CRF-1", "shiprocket_crf:CRF-2"}
+    assert sum(ln.remittance_amount for ln in lines) == Decimal("1500")
+    assert all(ln.matched_order_id is not None for ln in lines)
+
+    # Re-syncing the exact same two CRFs must update the same two rows in
+    # place, never insert duplicates or add their amounts again.
+    again = await svc.sync_remittances(_FakeAdapter([[partial, final]]))
+    assert again == {
+        "created": 0,
+        "updated": 0,
+        "skipped": 0,
+        "lines_created": 0,
+        "lines_updated": 2,
+        "lines_matched": 0,
+        "lines_unmatched": 0,
+    }
+    lines_after = (
+        (await db_session.execute(select(CodRemittanceLine).where(CodRemittanceLine.awb == "A1")))
+        .scalars()
+        .all()
+    )
+    assert len(lines_after) == 2
+    assert sum(ln.remittance_amount for ln in lines_after) == Decimal("1500")
+
+
+async def test_crf_initiated_counts_as_payment_initiated_not_success(
+    db_session: AsyncSession,
+) -> None:
+    """A CRF `status: "initiated"` has no settled amount: it must drive
+    Payment Initiated through the existing `payout_reported` signal, and
+    must never be read as a `remitted_amount` (Shiprocket's own word that a
+    transfer is in progress is not proof it completed)."""
+    from app.services.cod_remittance_recon_service import (
+        CodRemittanceReconciliationService,
+        Filters,
+    )
+
+    await _order(
+        db_session, "C1", PaymentType.COD, "500", fulfillment=FulfillmentStatus.FULFILLED, awb="A1"
+    )
+    sync = CodReconciliationService(db_session)
+    result = await sync.sync_remittances(
+        _FakeAdapter(
+            [
+                [
+                    {
+                        "crf_id": "CRF-3",
+                        "awb": "A1",
+                        "status": "initiated",
+                        "utr": "UTR-INPROGRESS",
+                        "date": "2026-11-10",
+                    }
+                ]
+            ]
+        )
+    )
+    assert result["created"] == 1
+    assert result["lines_created"] == 0  # no settled line -- nothing to sum yet
+
+    existing = (
+        await db_session.execute(select(CodRemittance).where(CodRemittance.awb == "A1"))
+    ).scalar_one()
+    assert existing.remitted_amount is None  # never stored as settled money
+
+    dash = CodRemittanceReconciliationService(db_session)
+    s = await dash.summary(Filters())
+    assert s["kpis"]["payment_initiated"]["count"] == 1
+    assert s["kpis"]["payment_success"]["count"] == 0
+    assert s["kpis"]["payment_pending"]["count"] == 0
+
+
+async def test_crf_pending_is_real_data_not_no_data(db_session: AsyncSession) -> None:
+    """A CRF `status: "pending"` must still count as Payment Pending (no
+    payout evidence yet), but is a *known* pending -- `data_coverage` must
+    tell it apart from having no remittance data loaded at all."""
+    from app.services.cod_remittance_recon_service import (
+        CodRemittanceReconciliationService,
+        Filters,
+    )
+
+    await _order(
+        db_session, "C1", PaymentType.COD, "500", fulfillment=FulfillmentStatus.FULFILLED, awb="A1"
+    )
+    sync = CodReconciliationService(db_session)
+    await sync.sync_remittances(
+        _FakeAdapter([[{"crf_id": "CRF-4", "awb": "A1", "status": "pending"}]])
+    )
+
+    dash = CodRemittanceReconciliationService(db_session)
+    s = await dash.summary(Filters())
+    assert s["kpis"]["payment_pending"]["count"] == 1
+    assert s["kpis"]["payment_initiated"]["count"] == 0
+    assert s["data_coverage"]["pending_is_data_limited"] is False
+
+
+async def test_crf_record_with_no_matching_order_is_reported_unmatched(
+    db_session: AsyncSession,
+) -> None:
+    """A CRF for an AWB/order this OMS has no record of must be stored and
+    counted as unmatched, never dropped and never crash the sync."""
+    svc = CodReconciliationService(db_session)
+    result = await svc.sync_remittances(
+        _FakeAdapter(
+            [[{"crf_id": "CRF-5", "awb": "NO-SUCH-AWB", "amount": 250, "status": "success"}]]
+        )
+    )
+    assert result["lines_created"] == 1
+    assert result["lines_unmatched"] == 1
+    assert result["lines_matched"] == 0
 
 
 async def test_prepaid_rows_have_no_cod_fields_and_filters_apply(

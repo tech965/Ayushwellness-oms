@@ -10,6 +10,7 @@ import {
   useRemittanceReport,
   useRemittanceSources,
   useCashfreeSyncStatus,
+  useCrfTransactions,
   useRemittanceSummary,
   useRemittanceUnmatched,
   useRemittanceUploads,
@@ -41,6 +42,7 @@ vi.mock("@/services/remittance", () => ({
   useRemittanceUploads: vi.fn(),
   useRemittanceSources: vi.fn(),
   useCashfreeSyncStatus: vi.fn(),
+  useCrfTransactions: vi.fn(),
   useCashfreeSyncNow: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useRematch: vi.fn(),
   useUploadRemittanceReport: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -135,6 +137,9 @@ const COD_SUMMARY: RemittanceSummary = {
     payment_success: { count: 1, amount: "1000.00" },
     payment_initiated: { count: 4, amount: "4000.00" },
     payment_pending: { count: 1, amount: "1000.00" },
+    crf_success_amount: { count: 2, amount: "1500.00" },
+    crf_initiated_amount: { count: 1, amount: "300.00" },
+    crf_pending_amount: { count: 0, amount: "0.00" },
   },
   percentages: [
     pctItem("completion", "Reconciliation completion", 1, 6, "count", "reconciled"),
@@ -230,6 +235,7 @@ function setup(summary: RemittanceSummary = COD_SUMMARY, records: unknown = unde
   vi.mocked(useRemittanceUploads).mockReturnValue(ok([]) as never)
   vi.mocked(useRemittanceSources).mockReturnValue(ok({ cod: [], prepaid: [] }) as never)
   vi.mocked(useCashfreeSyncStatus).mockReturnValue(ok(undefined) as never)
+  vi.mocked(useCrfTransactions).mockReturnValue(ok(undefined) as never)
   vi.mocked(useRematch).mockReturnValue({
     mutateAsync: vi.fn(),
     isPending: false,
@@ -319,6 +325,145 @@ describe("COD remittance dashboard", () => {
     const pending = within(grid).getByRole("button", { name: /^Payment Pending/ })
     expect(pending).toHaveTextContent("1")
     expect(pending).toHaveTextContent("₹1,000.00")
+  })
+
+  it("shows the 3 real CRF amount KPIs, from synced data -- zero when none is loaded", () => {
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const grid = screen.getByTestId("crf-amount-kpi-grid")
+    const success = within(grid).getByRole("button", { name: /^Successful COD Amount/ })
+    expect(success).toHaveTextContent("₹1,500.00")
+    expect(success).toHaveTextContent("2 CRF records")
+    const initiated = within(grid).getByRole("button", { name: /^Initiated COD Amount/ })
+    expect(initiated).toHaveTextContent("₹300.00")
+    expect(initiated).toHaveTextContent("1 CRF record")
+    const pending = within(grid).getByRole("button", { name: /^Pending COD Amount/ })
+    expect(pending).toHaveTextContent("₹0.00")
+    expect(pending).toHaveTextContent("0 CRF records")
+  })
+
+  it("clicking a CRF amount card opens its real transaction list, never a placeholder", async () => {
+    vi.mocked(useCrfTransactions).mockReturnValue(
+      ok({
+        data: [
+          {
+            crf_id: "CRF-S1",
+            utr: "UTR-S1",
+            awb: "A1",
+            order_id: "SR-1",
+            amount: "500.00",
+            date: "2026-11-01T00:00:00Z",
+            status: "success",
+            matched_order_id: "o-1",
+          },
+        ],
+        meta: { total_items: 2, page: 1, page_size: 20, total_pages: 1 },
+      }) as never
+    )
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    expect(screen.queryByTestId("record-drilldown")).not.toBeInTheDocument()
+    const grid = screen.getByTestId("crf-amount-kpi-grid")
+    await userEvent.click(within(grid).getByRole("button", { name: /^Successful COD Amount/ }))
+    const drilldown = screen.getByTestId("record-drilldown")
+    expect(drilldown).toHaveTextContent("Successful COD Amount")
+    expect(drilldown).toHaveTextContent("CRF-S1")
+    expect(drilldown).toHaveTextContent("UTR-S1")
+    expect(drilldown).toHaveTextContent("A1")
+    expect(drilldown).toHaveTextContent("₹500.00")
+  })
+
+  it("shows an empty state for a CRF status with no synced transactions", async () => {
+    vi.mocked(useCrfTransactions).mockReturnValue(
+      ok({ data: [], meta: { total_items: 0, page: 1, page_size: 20, total_pages: 0 } }) as never
+    )
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const grid = screen.getByTestId("crf-amount-kpi-grid")
+    await userEvent.click(within(grid).getByRole("button", { name: /^Pending COD Amount/ }))
+    expect(
+      screen.getByText("No CRF transactions have been synced for this status yet")
+    ).toBeInTheDocument()
+  })
+
+  const COVERAGE = {
+    has_remittance_data: true,
+    has_bank_data: true,
+    pending_is_data_limited: false,
+    api_sync_configured: false,
+    remittance_lines: 6,
+    api_reported_remittances: 0,
+    bank_credits: 2,
+    manual_bank_verifications: 0,
+    last_upload_at: null,
+    last_api_sync_at: null,
+  }
+
+  it("says no remittance data is loaded, so Pending is not confirmed non-payment", () => {
+    setup({
+      ...COD_SUMMARY,
+      data_coverage: {
+        ...COVERAGE,
+        has_remittance_data: false,
+        has_bank_data: false,
+        pending_is_data_limited: true,
+        remittance_lines: 0,
+        bank_credits: 0,
+      },
+    })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const notice = screen.getByTestId("payment-data-notice")
+    expect(notice).toHaveTextContent("No Shiprocket remittance data loaded")
+    expect(notice).toHaveTextContent("not confirmed non-payment")
+    expect(notice).toHaveTextContent("run the Shiprocket order sync")
+    // The five cards are still the same five.
+    expect(
+      within(screen.getByTestId("payment-status-kpi-grid")).getAllByRole("button")
+    ).toHaveLength(4)
+  })
+
+  it("says bank data is missing when remittances are loaded but no bank evidence is", () => {
+    setup({
+      ...COD_SUMMARY,
+      data_coverage: { ...COVERAGE, has_bank_data: false, bank_credits: 0 },
+    })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    expect(screen.getByTestId("payment-data-notice")).toHaveTextContent(
+      "No bank statement imported"
+    )
+  })
+
+  it("warns that some Payment Pending orders were never checked, even when data is loaded", () => {
+    setup({
+      ...COD_SUMMARY,
+      data_coverage: { ...COVERAGE, pending_orders: 40, pending_unchecked_orders: 37 },
+    })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const notice = screen.getByTestId("payment-data-notice")
+    expect(notice).toHaveTextContent("37 of 40 Payment Pending orders were never checked")
+    expect(notice).toHaveTextContent("Pending means unknown, not unpaid")
+    expect(notice).not.toHaveTextContent("No bank statement imported")
+  })
+
+  it("says the never-checked split is unavailable instead of hiding it", () => {
+    setup({
+      ...COD_SUMMARY,
+      data_coverage: {
+        ...COVERAGE,
+        pending_orders: 40,
+        pending_unchecked_orders: null,
+        pending_check_available: false,
+      },
+    })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const notice = screen.getByTestId("payment-data-notice")
+    expect(notice).toHaveTextContent(
+      "Cannot tell which Payment Pending orders were never checked"
+    )
+    expect(notice).toHaveTextContent("Treat Pending as unknown, not unpaid")
+  })
+
+  it("shows no data notice when remittance and bank data are both loaded", () => {
+    setup({ ...COD_SUMMARY, data_coverage: COVERAGE })
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    expect(screen.queryByTestId("payment-data-notice")).not.toBeInTheDocument()
   })
 
   it("clicking Payment Success opens exactly that KPI's drilldown", async () => {
