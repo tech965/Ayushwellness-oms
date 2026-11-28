@@ -1415,7 +1415,7 @@ class CodRemittanceReconciliationService:
             "manual_bank_verifications": manual_verifications,
             "last_upload_at": last_upload,
             "last_api_sync_at": last_api_sync,
-            "api_sync_configured": bool(settings.SHIPROCKET_REMITTANCE_PATH),
+            "api_sync_configured": bool(settings.SHIPROCKET_EMAIL and settings.SHIPROCKET_PASSWORD),
             "has_remittance_data": has_remittance_data,
             "has_bank_data": bank_credits > 0 or manual_verifications > 0,
             # True: "Payment Pending" means "nothing loaded to say otherwise".

@@ -459,10 +459,12 @@ class ShiprocketAdapter(IntegrationAdapter):
         `{"page": page, "limit": limit}` -- confirmed by Shiprocket
         Support, who also confirmed the maximum `limit` is 100 (clamped
         here defensively via `_COD_REMITTANCE_MAX_LIMIT`, never sent
-        larger even if a caller passes one). `SHIPROCKET_REMITTANCE_PATH`
-        is kept only as the existing enable/disable flag for this sync
-        (its value is no longer read as the request path -- the path is
-        fixed and confirmed, not configurable/speculative).
+        larger even if a caller passes one). The sync is NOT gated on any
+        env var: the legacy `SHIPROCKET_REMITTANCE_PATH` setting defaulted
+        to empty and, since the URL became a confirmed constant, silently
+        disabled the sync in every deployment that never set it. Whether
+        Shiprocket is usable at all is decided by the credentials check in
+        `get_adapter()` / `_get_client()`.
 
         Response entries are confirmed to carry exactly `awb`, `amount`,
         `status` (one of `pending` / `processed` / `failed`) -- no CRF id,
@@ -470,14 +472,6 @@ class ShiprocketAdapter(IntegrationAdapter):
         in `remittance.py` correctly returns `None` for those absent
         fields rather than inventing them; see that module's docstring.
         """
-        from app.core.config import settings
-
-        remittance_enabled = settings.SHIPROCKET_REMITTANCE_PATH
-        if not remittance_enabled or not remittance_enabled.strip():
-            raise IntegrationError(
-                "COD remittance sync is not enabled: SHIPROCKET_REMITTANCE_PATH is not set.",
-                details={"error_type": "not_configured"},
-            )
         effective_limit = min(limit, self._COD_REMITTANCE_MAX_LIMIT)
         client = self._get_client()
         try:

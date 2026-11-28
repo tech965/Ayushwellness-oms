@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from app.integrations.shiprocket.adapter import ShiprocketAdapter
 from app.integrations.shiprocket.remittance import normalize_cod_remittance
 from app.models.cod_remittance import CodRemittance
 from app.models.enums import FulfillmentStatus, PaymentType, ShipmentStatus
@@ -99,19 +100,88 @@ def test_normalizer_never_invents_fields_the_confirmed_endpoint_does_not_return(
     assert row["collected_at"] is None
 
 
-async def test_sync_is_disabled_until_remittance_path_is_configured(
+async def test_scheduled_task_syncs_without_legacy_remittance_path(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """ROOT CAUSE REGRESSION: the Celery task used to return early when the
+    legacy `SHIPROCKET_REMITTANCE_PATH` was empty (its default, unset in
+    render.yaml), so no remittance was ever fetched or written. It must now
+    reach the adapter with the setting empty."""
     from app.core.config import settings
-    from app.core.exceptions import IntegrationError
-    from app.integrations.shiprocket.adapter import ShiprocketAdapter
-    from app.tasks.cod_remittance_sync import _run
+    from app.tasks import cod_remittance_sync
 
     monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "")
-    with pytest.raises(IntegrationError):
-        await ShiprocketAdapter().fetch_cod_remittances()
-    await _run()  # scheduled job is a silent no-op, makes no Shiprocket call
-    assert (await db_session.execute(select(CodRemittance))).scalars().all() == []
+    calls: list[int] = []
+
+    class _Adapter(ShiprocketAdapter):
+        def __init__(self) -> None:  # no client/credentials needed
+            pass
+
+        async def fetch_cod_remittances(self, *, page: int = 1, limit: int = 100):
+            calls.append(page)
+            return [{"awb": "AWB-T", "amount": 10, "status": "pending"}], False
+
+    monkeypatch.setattr(cod_remittance_sync, "get_adapter", lambda code: _Adapter())
+
+    class _Ctx:
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(cod_remittance_sync, "AsyncSessionLocal", lambda: _Ctx())
+    await cod_remittance_sync._run()
+
+    assert calls == [1]
+    rows = (await db_session.execute(select(CodRemittance))).scalars().all()
+    assert [r.awb for r in rows] == ["AWB-T"]
+
+
+async def test_end_to_end_sync_paginates_and_keeps_multiple_entries_per_awb(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real adapter (stub HTTP client) -> service -> DB with the legacy flag
+    empty: two full 100-record pages then a short page are walked via
+    POST {"page", "limit": 100}; one AWB with two distinct `processed`
+    entries yields two lines; pending/failed land on the summary row."""
+    from app.core.config import settings
+    from app.models.remittance_reconciliation import CodRemittanceLine
+
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "")
+    page1 = [{"awb": f"A{i}", "amount": 1, "status": "pending"} for i in range(99)]
+    page1.append({"awb": "MULTI", "amount": 100, "status": "processed"})
+    page2 = [{"awb": f"B{i}", "amount": 1, "status": "pending"} for i in range(99)]
+    page2.append({"awb": "MULTI", "amount": 250, "status": "processed"})
+    page3 = [{"awb": "FAIL1", "amount": 75, "status": "failed"}]
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+            self._pages = [{"data": page1}, {"data": page2}, {"data": page3}]
+
+        async def request(self, method, path, *, json=None, params=None):
+            self.calls.append((method, path, json))
+            return self._pages[json["page"] - 1]
+
+    client = _Client()
+    result = await CodReconciliationService(db_session).sync_remittances(
+        ShiprocketAdapter(client=client)
+    )
+
+    assert client.calls == [
+        ("POST", "https://api.shiprocket.in/v1/cod/remittance", {"page": n, "limit": 100})
+        for n in (1, 2, 3)
+    ]
+    assert result["lines_created"] == 2
+    stmt = select(CodRemittanceLine).where(CodRemittanceLine.awb == "MULTI")
+    lines = (await db_session.execute(stmt)).scalars().all()
+    assert sorted(line.remittance_amount for line in lines) == [Decimal("100"), Decimal("250")]
+    failed = (
+        await db_session.execute(select(CodRemittance).where(CodRemittance.awb == "FAIL1"))
+    ).scalar_one()
+    assert failed.remittance_status == "failed" and failed.remitted_amount is None
+    assert (await db_session.execute(select(CodRemittance))).scalars().all().__len__() == 199
 
 
 async def test_summary_splits_cod_prepaid_and_fulfilment(db_session: AsyncSession) -> None:

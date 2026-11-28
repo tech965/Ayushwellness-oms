@@ -211,21 +211,27 @@ async def test_fetch_cod_remittances_clamps_limit_to_100(monkeypatch: pytest.Mon
     assert client.calls[0][2] == {"page": 1, "limit": 100}
 
 
-async def test_fetch_cod_remittances_disabled_when_flag_is_empty(
+async def test_fetch_cod_remittances_does_not_depend_on_legacy_path_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`SHIPROCKET_REMITTANCE_PATH` is preserved as the sync's existing
-    enable/disable flag even though its value is no longer used as the
-    request path."""
+    """ROOT CAUSE REGRESSION: `SHIPROCKET_REMITTANCE_PATH` defaults to ""
+    and is set nowhere in render.yaml, so gating the (now hardcoded-URL)
+    sync on it silently disabled COD remittance sync in production. With
+    the legacy setting EMPTY the request must still be made."""
     from app.core.config import settings
-    from app.core.exceptions import IntegrationError
 
     monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "")
-    adapter = ShiprocketAdapter(client=_StubClient([]))
+    client = _StubClient([{"data": [{"awb": "AWB1", "amount": 500, "status": "pending"}]}])
+    adapter = ShiprocketAdapter(client=client)
 
-    with pytest.raises(IntegrationError) as exc_info:
-        await adapter.fetch_cod_remittances(page=1)
-    assert exc_info.value.details["error_type"] == "not_configured"
+    records, _ = await adapter.fetch_cod_remittances(page=1)
+
+    assert client.calls[0] == (
+        "POST",
+        "https://api.shiprocket.in/v1/cod/remittance",
+        {"page": 1, "limit": 100},
+    )
+    assert records == [{"awb": "AWB1", "amount": 500, "status": "pending"}]
 
 
 async def test_fetch_cod_remittances_propagates_safe_error_details(

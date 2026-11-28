@@ -164,7 +164,7 @@ async def test_empty_database_reports_that_pending_is_data_limited(db_session):
     assert cov["has_bank_data"] is False
     assert cov["pending_is_data_limited"] is True
     assert cov["remittance_lines"] == 0 and cov["api_reported_remittances"] == 0
-    assert cov["api_sync_configured"] is False  # SHIPROCKET_REMITTANCE_PATH is unset in tests
+    assert cov["api_sync_configured"] is False  # Shiprocket credentials unset in tests
     assert cov["last_upload_at"] is None and cov["last_api_sync_at"] is None
 
 
