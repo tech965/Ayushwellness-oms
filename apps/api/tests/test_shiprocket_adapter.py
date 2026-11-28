@@ -163,20 +163,22 @@ async def test_fetch_cod_remittances_hits_the_confirmed_endpoint_and_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Root-cause fix (Shiprocket Support confirmed): the real COD
-    remittance endpoint is `GET /cod/remittance` with `page`/`limit`
-    query params -- NOT `/account/details/remittance` with `per_page`,
-    which Support identified as the wrong endpoint entirely (it returned
-    a structured HTTP 500 for every real sync call, independent of page
-    size). The path is now a fixed, hardcoded constant
-    (`ShiprocketAdapter._COD_REMITTANCE_PATH`), not read from
-    `SHIPROCKET_REMITTANCE_PATH` -- that setting is only an enable/disable
-    flag now (its value no longer matters, only its truthiness).
+    remittance endpoint is `GET https://apiv2.shiprocket.in/v1/cod/remittance`
+    (an ABSOLUTE URL -- it lives directly under `/v1/`, not under the
+    shared `/v1/external` base every other call uses) with `page`/`limit`
+    query params -- NOT `/account/details/remittance` with `per_page`
+    (500'd), and NOT that same relative path joined onto the shared base
+    either (`.../v1/external/cod/remittance`, which 404'd). The path is a
+    fixed, hardcoded constant (`ShiprocketAdapter._COD_REMITTANCE_PATH`),
+    not read from `SHIPROCKET_REMITTANCE_PATH` -- that setting is only an
+    enable/disable flag now (its value no longer matters, only its
+    truthiness).
 
     NOTE: response-field mapping (`normalize_cod_remittance`) is
-    deliberately NOT exercised/asserted here -- it is still based on the
-    OLD, disproven endpoint's assumed shape and is pending Shiprocket's
-    real sample response for `/cod/remittance`. This test only proves the
-    *request* is now correct.
+    deliberately NOT exercised/asserted here -- it is still based on an
+    earlier, disproven endpoint's assumed shape and is pending
+    Shiprocket's real sample response for `/cod/remittance`. This test
+    only proves the *request* is now correct.
     """
     from app.core.config import settings
 
@@ -186,7 +188,11 @@ async def test_fetch_cod_remittances_hits_the_confirmed_endpoint_and_params(
 
     records, has_more = await adapter.fetch_cod_remittances(page=1)
 
-    assert client.calls[0] == ("GET", "/cod/remittance", {"page": 1, "limit": 1})
+    assert client.calls[0] == (
+        "GET",
+        "https://apiv2.shiprocket.in/v1/cod/remittance",
+        {"page": 1, "limit": 1},
+    )
     assert len(records) == 1
     assert has_more is True
 

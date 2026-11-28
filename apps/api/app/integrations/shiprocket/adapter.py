@@ -427,13 +427,19 @@ class ShiprocketAdapter(IntegrationAdapter):
         )
         return records, has_more
 
-    # Confirmed directly by Shiprocket Support (not a guessed/probed
-    # candidate like the earlier `/account/details/remittance`, which
-    # Support identified as the wrong endpoint -- it returned a
-    # structured HTTP 500 for every real sync call). This is now a fixed,
-    # correct path, not something that needs to come from a configurable
-    # setting.
-    _COD_REMITTANCE_PATH = "/cod/remittance"
+    # Confirmed directly by Shiprocket Support. This is an ABSOLUTE URL,
+    # not a path relative to `api_base_url` -- Support confirmed COD
+    # remittance lives directly under `/v1/cod/remittance`, NOT under the
+    # shared `/v1/external` base every other Shiprocket call (orders,
+    # shipments, NDR, wallet, serviceability) correctly uses. An earlier
+    # attempt wrongly joined this onto that shared base
+    # (`.../v1/external/cod/remittance`), which 404'd; before that, an
+    # even earlier attempt used a different, wrong path entirely
+    # (`/account/details/remittance`, which 500'd). `ShiprocketClient.
+    # request()` uses an `http(s)://`-prefixed path as-is instead of
+    # joining it onto `api_base_url`, specifically so this one call can
+    # bypass that shared base without changing it for anyone else.
+    _COD_REMITTANCE_PATH = "https://apiv2.shiprocket.in/v1/cod/remittance"
 
     async def fetch_cod_remittances(
         self, *, page: int = 1, limit: int = 1
@@ -442,7 +448,8 @@ class ShiprocketAdapter(IntegrationAdapter):
         (same credentials as every other Shiprocket call). Returns
         `(records, has_more)`.
 
-        Endpoint: `GET /cod/remittance` (`_COD_REMITTANCE_PATH`), with
+        Endpoint: `GET https://apiv2.shiprocket.in/v1/cod/remittance`
+        (`_COD_REMITTANCE_PATH` -- an absolute URL, see its comment), with
         `page`/`limit` query params -- confirmed by Shiprocket Support.
         `SHIPROCKET_REMITTANCE_PATH` is kept only as the existing
         enable/disable flag for this sync (its value is no longer read as
@@ -450,14 +457,14 @@ class ShiprocketAdapter(IntegrationAdapter):
         configurable/speculative).
 
         IMPORTANT -- response-field mapping below (`normalize_cod_remittance`
-        in `remittance.py`) is STILL BASED ON THE OLD, WRONG ENDPOINT'S
+        in `remittance.py`) is STILL BASED ON AN EARLIER, WRONG ENDPOINT'S
         ASSUMED SHAPE and has NOT been updated: Shiprocket's real sample
         response for THIS endpoint has not yet been supplied. Do not treat
         `crf_id`/`utr`/`amount`/`date`/`status`/`awb`/`order_id` as
         confirmed for `/cod/remittance` -- they were only ever confirmed
-        (then disproven) for the old endpoint. This sync is request-level
-        correct but NOT yet verified end-to-end against a real response
-        from `/cod/remittance`.
+        (then disproven) for a prior, different endpoint. This sync is
+        request-level correct but NOT yet verified end-to-end against a
+        real response from `/cod/remittance`.
         """
         from app.core.config import settings
 
