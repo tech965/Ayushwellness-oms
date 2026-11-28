@@ -158,6 +158,75 @@ async def test_fetch_shipments_paginates() -> None:
     assert client.calls[0] == ("GET", "/shipments", {"page": 1, "per_page": 50})
 
 
+# 18. COD remittance fetch -- per_page default
+async def test_fetch_cod_remittances_defaults_to_per_page_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned regression: production confirmed `per_page=1` returns real
+    remittance data while `per_page=100` produced a persistent HTTP 500
+    after exhausting all retries (~31 min, see
+    `app/integrations/shiprocket/adapter.py::fetch_cod_remittances`
+    docstring). The real page-size ceiling is undocumented by Shiprocket,
+    so 1 is the only value proven safe -- this call must never silently
+    drift back to a larger default.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "/account/details/remittance")
+    client = _StubClient([{"data": [{"awb_code": "AWB1", "status": "success"}]}])
+    adapter = ShiprocketAdapter(client=client)
+
+    records, has_more = await adapter.fetch_cod_remittances(page=1)
+
+    assert client.calls[0] == (
+        "GET",
+        "/account/details/remittance",
+        {"page": 1, "per_page": 1},
+    )
+    assert len(records) == 1
+    # No `meta.pagination.total_pages` in the stub response, so `has_more`
+    # falls back to "returned a full page" (`len(records) >= per_page`) --
+    # with per_page=1 this is true for any single record, matching the
+    # real multi-page-per-record pagination this fix introduces.
+    assert has_more is True
+
+
+async def test_fetch_cod_remittances_paginates_one_record_per_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With `per_page=1`, a 2-record remittance feed must be walked as two
+    single-record pages, not fetched in one call -- confirms pagination
+    itself (not just the default) survives the per_page=1 change.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "/account/details/remittance")
+    client = _StubClient(
+        [
+            {"data": [{"awb_code": "AWB1", "status": "success"}]},
+            {"data": [{"awb_code": "AWB2", "status": "success"}]},
+            {"data": []},
+        ]
+    )
+    adapter = ShiprocketAdapter(client=client)
+
+    page1_records, page1_has_more = await adapter.fetch_cod_remittances(page=1)
+    page2_records, page2_has_more = await adapter.fetch_cod_remittances(page=2)
+    page3_records, page3_has_more = await adapter.fetch_cod_remittances(page=3)
+
+    assert [r["awb_code"] for r in page1_records] == ["AWB1"]
+    assert page1_has_more is True
+    assert [r["awb_code"] for r in page2_records] == ["AWB2"]
+    assert page2_has_more is True
+    assert page3_records == []
+    assert page3_has_more is False  # empty page stops pagination
+    assert [c[2] for c in client.calls] == [
+        {"page": 1, "per_page": 1},
+        {"page": 2, "per_page": 1},
+        {"page": 3, "per_page": 1},
+    ]
+
+
 async def test_fetch_shipments_last_page_has_no_next_cursor() -> None:
     client = _StubClient([_shipments_page(ids=["3"], total_pages=1)])
     adapter = ShiprocketAdapter(client=client)

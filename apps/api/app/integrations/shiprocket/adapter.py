@@ -428,12 +428,19 @@ class ShiprocketAdapter(IntegrationAdapter):
         return records, has_more
 
     async def fetch_cod_remittances(
-        self, *, page: int = 1, per_page: int = 100
+        self, *, page: int = 1, per_page: int = 1
     ) -> tuple[list[dict[str, Any]], bool]:
         """One page of COD remittance records via the shared client/token
         (same credentials as every other Shiprocket call). Returns
         `(records, has_more)`. The path comes from
         `settings.SHIPROCKET_REMITTANCE_PATH`.
+
+        `per_page` defaults to 1, not a larger page size: production
+        confirmed `per_page=1` returns real data (crf_id/utr/amount/date/
+        status/awb/order_id) while `per_page=100` produced a persistent
+        HTTP 500 after exhausting all retries (~31 min). The endpoint's
+        real page-size ceiling is undocumented by Shiprocket, so 1 is the
+        only value proven safe so far.
         """
         from app.core.config import settings
 
