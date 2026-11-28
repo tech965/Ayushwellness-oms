@@ -158,67 +158,54 @@ async def test_fetch_shipments_paginates() -> None:
     assert client.calls[0] == ("GET", "/shipments", {"page": 1, "per_page": 50})
 
 
-# 18. COD remittance fetch -- per_page default
-async def test_fetch_cod_remittances_defaults_to_per_page_1(
+# 18. COD remittance fetch -- confirmed endpoint/params
+async def test_fetch_cod_remittances_hits_the_confirmed_endpoint_and_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pinned regression: production confirmed `per_page=1` returns real
-    remittance data while `per_page=100` produced a persistent HTTP 500
-    after exhausting all retries (~31 min, see
-    `app/integrations/shiprocket/adapter.py::fetch_cod_remittances`
-    docstring). The real page-size ceiling is undocumented by Shiprocket,
-    so 1 is the only value proven safe -- this call must never silently
-    drift back to a larger default.
+    """Root-cause fix (Shiprocket Support confirmed): the real COD
+    remittance endpoint is `GET /cod/remittance` with `page`/`limit`
+    query params -- NOT `/account/details/remittance` with `per_page`,
+    which Support identified as the wrong endpoint entirely (it returned
+    a structured HTTP 500 for every real sync call, independent of page
+    size). The path is now a fixed, hardcoded constant
+    (`ShiprocketAdapter._COD_REMITTANCE_PATH`), not read from
+    `SHIPROCKET_REMITTANCE_PATH` -- that setting is only an enable/disable
+    flag now (its value no longer matters, only its truthiness).
+
+    NOTE: response-field mapping (`normalize_cod_remittance`) is
+    deliberately NOT exercised/asserted here -- it is still based on the
+    OLD, disproven endpoint's assumed shape and is pending Shiprocket's
+    real sample response for `/cod/remittance`. This test only proves the
+    *request* is now correct.
     """
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "/account/details/remittance")
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "enabled")
     client = _StubClient([{"data": [{"awb_code": "AWB1", "status": "success"}]}])
     adapter = ShiprocketAdapter(client=client)
 
     records, has_more = await adapter.fetch_cod_remittances(page=1)
 
-    assert client.calls[0] == (
-        "GET",
-        "/account/details/remittance",
-        {"page": 1, "per_page": 1},
-    )
+    assert client.calls[0] == ("GET", "/cod/remittance", {"page": 1, "limit": 1})
     assert len(records) == 1
-    # No `meta.pagination.total_pages` in the stub response, so `has_more`
-    # falls back to "returned a full page" (`len(records) >= per_page`) --
-    # with per_page=1 this is true for any single record, matching the
-    # real multi-page-per-record pagination this fix introduces.
     assert has_more is True
 
 
-@pytest.mark.parametrize(
-    ("configured", "expected"),
-    [
-        ("/account/details/remittance/", "/account/details/remittance"),  # trailing slash
-        ("account/details/remittance", "/account/details/remittance"),  # missing leading slash
-        ("  /account/details/remittance  ", "/account/details/remittance"),  # stray whitespace
-    ],
-)
-async def test_fetch_cod_remittances_normalizes_a_misconfigured_path(
-    monkeypatch: pytest.MonkeyPatch, configured: str, expected: str
+async def test_fetch_cod_remittances_disabled_when_flag_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Production evidence: `/shiprocket-probe` succeeds against the
-    hardcoded literal `/account/details/remittance`, while the real sync
-    (reading `SHIPROCKET_REMITTANCE_PATH` from Render's env var) has
-    returned a 500 for the same logical endpoint. A trailing slash,
-    missing leading slash, or stray whitespace in that env var would
-    silently send a DIFFERENT URL than the one already proven to work --
-    normalize so a config typo can't cause this divergence.
-    """
+    """`SHIPROCKET_REMITTANCE_PATH` is preserved as the sync's existing
+    enable/disable flag even though its value is no longer used as the
+    request path."""
     from app.core.config import settings
+    from app.core.exceptions import IntegrationError
 
-    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", configured)
-    client = _StubClient([{"data": [{"awb_code": "AWB1", "status": "success"}]}])
-    adapter = ShiprocketAdapter(client=client)
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "")
+    adapter = ShiprocketAdapter(client=_StubClient([]))
 
-    await adapter.fetch_cod_remittances(page=1)
-
-    assert client.calls[0] == ("GET", expected, {"page": 1, "per_page": 1})
+    with pytest.raises(IntegrationError) as exc_info:
+        await adapter.fetch_cod_remittances(page=1)
+    assert exc_info.value.details["error_type"] == "not_configured"
 
 
 async def test_fetch_cod_remittances_propagates_safe_error_details(
@@ -233,7 +220,7 @@ async def test_fetch_cod_remittances_propagates_safe_error_details(
     from app.core.exceptions import IntegrationError
     from app.integrations.shiprocket.errors import ShiprocketApiError
 
-    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "/account/details/remittance")
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "enabled")
 
     class _FailingClient:
         async def request(self, method: str, path: str, *, params: dict | None = None) -> dict:
@@ -255,13 +242,13 @@ async def test_fetch_cod_remittances_propagates_safe_error_details(
 async def test_fetch_cod_remittances_paginates_one_record_per_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With `per_page=1`, a 2-record remittance feed must be walked as two
+    """With `limit=1`, a 2-record remittance feed must be walked as two
     single-record pages, not fetched in one call -- confirms pagination
-    itself (not just the default) survives the per_page=1 change.
+    itself (not just the default) survives the endpoint/param rename.
     """
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "/account/details/remittance")
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "enabled")
     client = _StubClient(
         [
             {"data": [{"awb_code": "AWB1", "status": "success"}]},
@@ -282,9 +269,9 @@ async def test_fetch_cod_remittances_paginates_one_record_per_page(
     assert page3_records == []
     assert page3_has_more is False  # empty page stops pagination
     assert [c[2] for c in client.calls] == [
-        {"page": 1, "per_page": 1},
-        {"page": 2, "per_page": 1},
-        {"page": 3, "per_page": 1},
+        {"page": 1, "limit": 1},
+        {"page": 2, "limit": 1},
+        {"page": 3, "limit": 1},
     ]
 
 

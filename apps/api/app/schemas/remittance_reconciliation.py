@@ -192,8 +192,13 @@ class SettlementFileRow(BaseModel):
 
 
 class CrfTransactionRow(BaseModel):
-    """One raw Shiprocket CRF record (`GET /v1/account/details/remittance`),
-    behind the CRF success/initiated/pending amount KPIs."""
+    """One raw Shiprocket CRF record, behind the CRF success/initiated/
+    pending amount KPIs. PENDING VERIFICATION: these fields were defined
+    against `GET /v1/account/details/remittance`, which Shiprocket
+    Support has since identified as the wrong endpoint -- the real one is
+    `GET /cod/remittance` (see `ShiprocketAdapter.fetch_cod_remittances`).
+    Field names below are not yet re-verified against that endpoint's
+    real response."""
 
     crf_id: str | None
     utr: str | None
