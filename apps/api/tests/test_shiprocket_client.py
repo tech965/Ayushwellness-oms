@@ -148,7 +148,7 @@ async def test_a_500_response_body_is_captured_as_a_safe_shape_never_raw_values(
 
     client = _client_with(handler)
     with pytest.raises(ShiprocketApiError) as exc_info:
-        await client.request("GET", "/account/details/remittance", params={"per_page": 1})
+        await client.request("GET", "/cod/remittance", params={"limit": 1})
 
     error = exc_info.value
     assert error.error_type == "http_500"
@@ -168,7 +168,7 @@ async def test_non_json_error_body_reports_length_only_not_raw_text() -> None:
 
     client = _client_with(handler)
     with pytest.raises(ShiprocketApiError) as exc_info:
-        await client.request("GET", "/account/details/remittance")
+        await client.request("GET", "/cod/remittance")
 
     details = exc_info.value.details
     assert details["response_body_type"] == "non_json"

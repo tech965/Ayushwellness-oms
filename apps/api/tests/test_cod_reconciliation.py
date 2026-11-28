@@ -202,8 +202,9 @@ async def test_reported_remittance_alone_is_not_bank_verified(db_session: AsyncS
 async def test_crf_success_record_creates_a_summed_remittance_line(
     db_session: AsyncSession,
 ) -> None:
-    """A confirmed-real CRF (`GET /v1/account/details/remittance`) record
-    with `status: "success"` must be stored as a `CodRemittanceLine`, not
+    """A CRF record (from the `GET /cod/remittance` feed, confirmed by
+    Shiprocket Support) with `status: "success"` must be stored as a
+    `CodRemittanceLine`, not
     overwrite the single-row `CodRemittance` summary -- that is what lets
     two distinct, successful CRFs for the same AWB (a partial payout then
     the final one) both count, instead of the second silently replacing

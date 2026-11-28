@@ -427,54 +427,52 @@ class ShiprocketAdapter(IntegrationAdapter):
         )
         return records, has_more
 
+    # Confirmed directly by Shiprocket Support (not a guessed/probed
+    # candidate like the earlier `/account/details/remittance`, which
+    # Support identified as the wrong endpoint -- it returned a
+    # structured HTTP 500 for every real sync call). This is now a fixed,
+    # correct path, not something that needs to come from a configurable
+    # setting.
+    _COD_REMITTANCE_PATH = "/cod/remittance"
+
     async def fetch_cod_remittances(
-        self, *, page: int = 1, per_page: int = 1
+        self, *, page: int = 1, limit: int = 1
     ) -> tuple[list[dict[str, Any]], bool]:
         """One page of COD remittance records via the shared client/token
         (same credentials as every other Shiprocket call). Returns
-        `(records, has_more)`. The path comes from
-        `settings.SHIPROCKET_REMITTANCE_PATH`.
+        `(records, has_more)`.
 
-        `per_page` defaults to 1, not a larger page size: production
-        confirmed `per_page=1` returns real data (crf_id/utr/amount/date/
-        status/awb/order_id) while `per_page=100` produced a persistent
-        HTTP 500 after exhausting all retries (~31 min). The endpoint's
-        real page-size ceiling is undocumented by Shiprocket, so 1 is the
-        only value proven safe so far.
+        Endpoint: `GET /cod/remittance` (`_COD_REMITTANCE_PATH`), with
+        `page`/`limit` query params -- confirmed by Shiprocket Support.
+        `SHIPROCKET_REMITTANCE_PATH` is kept only as the existing
+        enable/disable flag for this sync (its value is no longer read as
+        the request path, since the path is now fixed and confirmed, not
+        configurable/speculative).
+
+        IMPORTANT -- response-field mapping below (`normalize_cod_remittance`
+        in `remittance.py`) is STILL BASED ON THE OLD, WRONG ENDPOINT'S
+        ASSUMED SHAPE and has NOT been updated: Shiprocket's real sample
+        response for THIS endpoint has not yet been supplied. Do not treat
+        `crf_id`/`utr`/`amount`/`date`/`status`/`awb`/`order_id` as
+        confirmed for `/cod/remittance` -- they were only ever confirmed
+        (then disproven) for the old endpoint. This sync is request-level
+        correct but NOT yet verified end-to-end against a real response
+        from `/cod/remittance`.
         """
         from app.core.config import settings
 
-        raw_path = settings.SHIPROCKET_REMITTANCE_PATH
-        if not raw_path or not raw_path.strip():
+        remittance_enabled = settings.SHIPROCKET_REMITTANCE_PATH
+        if not remittance_enabled or not remittance_enabled.strip():
             raise IntegrationError(
                 "COD remittance sync is not enabled: SHIPROCKET_REMITTANCE_PATH is not set.",
                 details={"error_type": "not_configured"},
-            )
-        # Defensive normalization: a Render env var typed with a trailing
-        # slash, missing leading slash, or stray whitespace would silently
-        # diverge from the hardcoded literal `/shiprocket-probe` uses for
-        # the same candidate path, causing this sync to hit a different
-        # (and possibly erroring) URL than the one already proven to work
-        # via that probe -- normalize so both resolve identically.
-        path = raw_path.strip()
-        if not path.startswith("/"):
-            path = f"/{path}"
-        if len(path) > 1:
-            path = path.rstrip("/")
-        if path != raw_path:
-            # Safe to log verbatim: a configured API path, never a
-            # credential or token.
-            logger.warning(
-                "shiprocket_remittance_path_normalized",
-                configured_path=raw_path,
-                normalized_path=path,
             )
         client = self._get_client()
         try:
             data = await client.request(
                 "GET",
-                path,
-                params={"page": page, "per_page": per_page},
+                self._COD_REMITTANCE_PATH,
+                params={"page": page, "limit": limit},
             )
         except ShiprocketApiError as exc:
             raise IntegrationError(
@@ -492,7 +490,7 @@ class ShiprocketAdapter(IntegrationAdapter):
         meta = data.get("meta", {}).get("pagination", {}) if isinstance(data, dict) else {}
         total_pages = meta.get("total_pages") if isinstance(meta, dict) else None
         has_more = bool(records) and (
-            page < total_pages if total_pages else len(records) >= per_page
+            page < total_pages if total_pages else len(records) >= limit
         )
         return records, has_more
 

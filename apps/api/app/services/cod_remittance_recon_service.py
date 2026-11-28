@@ -128,11 +128,16 @@ COD_STATUSES = ("pending", "partially_reconciled", "matched", "short", "excess")
 # themselves; the order keeps status "pending" and every amount stays as it
 # was -- only `payout_reported` flips to `True`.
 #
-# A second, now-CONFIRMED-live source supersedes the above when it applies:
-# `GET /v1/account/details/remittance` (the CRF feed), consumed by
-# `CodReconciliationService.sync_remittances`. Its `status` is a real,
-# three-value enum (`pending` / `initiated` / `success`), not a presence
-# check:
+# A second source supersedes the above when it applies: the CRF feed,
+# consumed by `CodReconciliationService.sync_remittances` via
+# `ShiprocketAdapter.fetch_cod_remittances` (`GET /cod/remittance`,
+# confirmed by Shiprocket Support -- an earlier round wrongly called
+# `GET /v1/account/details/remittance`, which 500'd on every real sync).
+# PENDING VERIFICATION: the field names below (status/amount/etc.) were
+# defined against that OLD, wrong endpoint's assumed shape and have not
+# yet been re-verified against `/cod/remittance`'s real response. Its
+# `status` is a real, three-value enum (`pending` / `initiated` / `success`),
+# not a presence check:
 #   - `success` CRFs are stored as `CodRemittanceLine` rows (summed per
 #     order, deduped by `crf_id`) and flow through the SAME `lines` branch
 #     above as an uploaded settlement report -- i.e. they become `remitted`
@@ -940,11 +945,16 @@ class CodRemittanceReconciliationService:
 
     async def _crf_records(self) -> list[dict[str, Any]]:
         """Every individual CRF transaction straight from Shiprocket's
-        `GET /v1/account/details/remittance` feed -- `crf_id`, `utr`, `awb`,
-        `order_id`, `amount`, `date`, `status`, as Shiprocket itself
-        reported them (never mocked/placeholder: this is a real, synced
-        row, or the list is simply empty if `sync_remittances` has never
-        pulled any CRF data in this environment). A `success` row comes
+        `GET /cod/remittance` feed (confirmed by Shiprocket Support --
+        see `ShiprocketAdapter.fetch_cod_remittances`) -- `crf_id`, `utr`,
+        `awb`, `order_id`, `amount`, `date`, `status`, as Shiprocket
+        itself reported them (never mocked/placeholder: this is a real,
+        synced row, or the list is simply empty if `sync_remittances` has
+        never pulled any CRF data in this environment). PENDING
+        VERIFICATION: these field names are from the OLD, disproven
+        `/account/details/remittance` endpoint and have not yet been
+        re-verified against `/cod/remittance`'s real response. A
+        `success` row comes
         from `CodRemittanceLine` (`CodReconciliationService.sync_remittances`
         only ever creates one there with that partner name, from a CRF
         record). An `initiated`/`pending` row comes from `CodRemittance`'s

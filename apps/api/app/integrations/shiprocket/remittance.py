@@ -1,13 +1,25 @@
 """Normalizes Shiprocket COD remittance records.
 
-The confirmed, live-verified shape of Shiprocket's CRF remittance feed
-(`GET /v1/account/details/remittance`) is: `crf_id`, `utr`, `amount`, `date`,
-`status` (one of `pending` / `initiated` / `success`), `awb`, `order_id`.
-These confirmed names are listed first in every alias tuple below, so they
-win over the older, speculative aliases this module shipped with before any
-live account was reachable. Those speculative aliases are kept, after the
-confirmed names, only where they do not conflict -- this never invents or
-derives a value (e.g. it never turns "delivered" into "remitted").
+PENDING VERIFICATION (as of the `/cod/remittance` endpoint fix): the field
+names below were "confirmed, live-verified" against `GET
+/v1/account/details/remittance` -- which Shiprocket Support has since
+identified as the WRONG endpoint (it returned a structured HTTP 500 for
+every real sync call, independent of page size). The real endpoint,
+confirmed by Support, is `GET /cod/remittance` with `page`/`limit` query
+params (see `ShiprocketAdapter.fetch_cod_remittances`). Shiprocket's real
+sample response for `/cod/remittance` has NOT yet been supplied, so the
+alias tuples below are deliberately left UNCHANGED rather than guessed --
+do not treat `crf_id`/`utr`/`amount`/`date`/`status`/`awb`/`order_id` as
+confirmed for the real endpoint until that sample response is reviewed.
+
+The (now-superseded) shape this module was built against was: `crf_id`,
+`utr`, `amount`, `date`, `status` (one of `pending` / `initiated` /
+`success`), `awb`, `order_id`. These names are listed first in every alias
+tuple below, so they win over the older, speculative aliases this module
+shipped with before any live account was reachable. Those speculative
+aliases are kept, after the confirmed names, only where they do not
+conflict -- this never invents or derives a value (e.g. it never turns
+"delivered" into "remitted").
 
 `crf_id` (the CRF record's own identifier) and `utr` (the bank transaction
 reference) are DIFFERENT fields and must not share one alias list: a record
