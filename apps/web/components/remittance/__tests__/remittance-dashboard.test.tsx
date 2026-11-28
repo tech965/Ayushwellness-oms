@@ -10,6 +10,7 @@ import {
   useRemittanceReport,
   useRemittanceSources,
   useCashfreeSyncStatus,
+  useCrfTransactions,
   useRemittanceSummary,
   useRemittanceUnmatched,
   useRemittanceUploads,
@@ -41,6 +42,7 @@ vi.mock("@/services/remittance", () => ({
   useRemittanceUploads: vi.fn(),
   useRemittanceSources: vi.fn(),
   useCashfreeSyncStatus: vi.fn(),
+  useCrfTransactions: vi.fn(),
   useCashfreeSyncNow: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useRematch: vi.fn(),
   useUploadRemittanceReport: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -135,6 +137,9 @@ const COD_SUMMARY: RemittanceSummary = {
     payment_success: { count: 1, amount: "1000.00" },
     payment_initiated: { count: 4, amount: "4000.00" },
     payment_pending: { count: 1, amount: "1000.00" },
+    crf_success_amount: { count: 2, amount: "1500.00" },
+    crf_initiated_amount: { count: 1, amount: "300.00" },
+    crf_pending_amount: { count: 0, amount: "0.00" },
   },
   percentages: [
     pctItem("completion", "Reconciliation completion", 1, 6, "count", "reconciled"),
@@ -230,6 +235,7 @@ function setup(summary: RemittanceSummary = COD_SUMMARY, records: unknown = unde
   vi.mocked(useRemittanceUploads).mockReturnValue(ok([]) as never)
   vi.mocked(useRemittanceSources).mockReturnValue(ok({ cod: [], prepaid: [] }) as never)
   vi.mocked(useCashfreeSyncStatus).mockReturnValue(ok(undefined) as never)
+  vi.mocked(useCrfTransactions).mockReturnValue(ok(undefined) as never)
   vi.mocked(useRematch).mockReturnValue({
     mutateAsync: vi.fn(),
     isPending: false,
@@ -319,6 +325,62 @@ describe("COD remittance dashboard", () => {
     const pending = within(grid).getByRole("button", { name: /^Payment Pending/ })
     expect(pending).toHaveTextContent("1")
     expect(pending).toHaveTextContent("₹1,000.00")
+  })
+
+  it("shows the 3 real CRF amount KPIs, from synced data -- zero when none is loaded", () => {
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const grid = screen.getByTestId("crf-amount-kpi-grid")
+    const success = within(grid).getByRole("button", { name: /^Successful COD Amount/ })
+    expect(success).toHaveTextContent("₹1,500.00")
+    expect(success).toHaveTextContent("2 CRF records")
+    const initiated = within(grid).getByRole("button", { name: /^Initiated COD Amount/ })
+    expect(initiated).toHaveTextContent("₹300.00")
+    expect(initiated).toHaveTextContent("1 CRF record")
+    const pending = within(grid).getByRole("button", { name: /^Pending COD Amount/ })
+    expect(pending).toHaveTextContent("₹0.00")
+    expect(pending).toHaveTextContent("0 CRF records")
+  })
+
+  it("clicking a CRF amount card opens its real transaction list, never a placeholder", async () => {
+    vi.mocked(useCrfTransactions).mockReturnValue(
+      ok({
+        data: [
+          {
+            crf_id: "CRF-S1",
+            utr: "UTR-S1",
+            awb: "A1",
+            order_id: "SR-1",
+            amount: "500.00",
+            date: "2026-11-01T00:00:00Z",
+            status: "success",
+            matched_order_id: "o-1",
+          },
+        ],
+        meta: { total_items: 2, page: 1, page_size: 20, total_pages: 1 },
+      }) as never
+    )
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    expect(screen.queryByTestId("record-drilldown")).not.toBeInTheDocument()
+    const grid = screen.getByTestId("crf-amount-kpi-grid")
+    await userEvent.click(within(grid).getByRole("button", { name: /^Successful COD Amount/ }))
+    const drilldown = screen.getByTestId("record-drilldown")
+    expect(drilldown).toHaveTextContent("Successful COD Amount")
+    expect(drilldown).toHaveTextContent("CRF-S1")
+    expect(drilldown).toHaveTextContent("UTR-S1")
+    expect(drilldown).toHaveTextContent("A1")
+    expect(drilldown).toHaveTextContent("₹500.00")
+  })
+
+  it("shows an empty state for a CRF status with no synced transactions", async () => {
+    vi.mocked(useCrfTransactions).mockReturnValue(
+      ok({ data: [], meta: { total_items: 0, page: 1, page_size: 20, total_pages: 0 } }) as never
+    )
+    renderWithProviders(<RemittanceDashboard module="cod" />)
+    const grid = screen.getByTestId("crf-amount-kpi-grid")
+    await userEvent.click(within(grid).getByRole("button", { name: /^Pending COD Amount/ }))
+    expect(
+      screen.getByText("No CRF transactions have been synced for this status yet")
+    ).toBeInTheDocument()
   })
 
   const COVERAGE = {

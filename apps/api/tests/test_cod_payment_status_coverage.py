@@ -67,6 +67,89 @@ def _line(order_id, awb, reference, amount) -> CodRemittanceLine:
     )
 
 
+async def test_crf_amount_kpis_and_transaction_list_are_real_synced_data(db_session):
+    """The 3 CRF amount KPIs (success/initiated/pending) and the
+    transaction-detail list must come from real, synced `CodRemittanceLine`
+    / `CodRemittance` rows -- never a placeholder -- and must be exactly 0 /
+    empty when nothing has been synced yet."""
+    dash = CodRemittanceReconciliationService(db_session)
+
+    # Nothing synced yet: all 3 are genuinely zero, not a fabricated figure.
+    empty = await dash.summary(Filters())
+    assert empty["kpis"]["crf_success_amount"] == {"count": 0, "amount": Decimal("0.00")}
+    assert empty["kpis"]["crf_initiated_amount"] == {"count": 0, "amount": Decimal("0.00")}
+    assert empty["kpis"]["crf_pending_amount"] == {"count": 0, "amount": Decimal("0.00")}
+    rows, total = await dash.crf_transactions(status=None, page_params=_page_params())
+    assert rows == [] and total == 0
+
+    await _cod_order(db_session, "C1", "1500", awb="A1")
+    # "initiated" and "pending" are each the CRF feed's ONLY claim about a
+    # given AWB at any one time (CodRemittance is one row per AWB), so a
+    # realistic fixture puts them on separate orders/AWBs, not the same one.
+    await _cod_order(db_session, "C2", "300", awb="A2")
+    await _cod_order(db_session, "C3", "1500", awb="A3")
+    sync = CodReconciliationService(db_session)
+    await sync.sync_remittances(
+        _FakeAdapter(
+            [
+                [
+                    {
+                        "crf_id": "CRF-S1",
+                        "awb": "A1",
+                        "amount": 500,
+                        "status": "success",
+                        "utr": "UTR-S1",
+                        "date": "2026-11-01",
+                    },
+                    {
+                        "crf_id": "CRF-S2",
+                        "awb": "A1",
+                        "amount": 1000,
+                        "status": "success",
+                        "utr": "UTR-S2",
+                        "date": "2026-11-05",
+                    },
+                    {"crf_id": "CRF-I1", "awb": "A2", "amount": 300, "status": "initiated"},
+                    {"crf_id": "CRF-P1", "awb": "A3", "amount": 1500, "status": "pending"},
+                ]
+            ]
+        )
+    )
+
+    s = await dash.summary(Filters())
+    # Two real success CRFs for the same AWB (a partial then a final payout)
+    # sum to their real total -- not the latest one overwriting the other.
+    assert s["kpis"]["crf_success_amount"] == {"count": 2, "amount": Decimal("1500.00")}
+    assert s["kpis"]["crf_initiated_amount"] == {"count": 1, "amount": Decimal("300.00")}
+    assert s["kpis"]["crf_pending_amount"] == {"count": 1, "amount": Decimal("1500.00")}
+
+    rows, total = await dash.crf_transactions(status="success", page_params=_page_params())
+    assert total == 2
+    by_crf = {r["crf_id"]: r for r in rows}
+    assert by_crf["CRF-S1"]["utr"] == "UTR-S1"
+    assert by_crf["CRF-S1"]["amount"] == Decimal("500.00")
+    assert by_crf["CRF-S1"]["awb"] == "A1"
+    assert all(r["matched_order_id"] is not None for r in rows)
+
+    rows_initiated, total_i = await dash.crf_transactions(
+        status="initiated", page_params=_page_params()
+    )
+    assert total_i == 1 and rows_initiated[0]["crf_id"] == "CRF-I1"
+    assert rows_initiated[0]["amount"] == Decimal("300.00")
+
+    # Status mapping is accurate, never blurred: Success CRFs never leak into
+    # Pending/Initiated amounts, and these amounts never move the order-level
+    # Payment Success/Initiated/Pending KPIs -- those still require bank
+    # evidence for Success, unchanged by this view.
+    assert s["kpis"]["payment_success"]["count"] == 0
+
+
+def _page_params():
+    from app.schemas.common import PageParams
+
+    return PageParams(page=1, page_size=50)
+
+
 async def test_empty_database_reports_that_pending_is_data_limited(db_session):
     user = await _user(db_session, "cov1@example.com")
     async with bearer_client(app, get_db, db_session, user.id) as client:
@@ -233,9 +316,25 @@ async def test_sync_follows_every_page_and_a_rerun_updates_instead_of_duplicatin
     ]
     svc = CodReconciliationService(db_session)
     first = await svc.sync_remittances(_FakeAdapter(pages))
-    assert first == {"created": 6, "updated": 0, "skipped": 0}
+    assert first == {
+        "created": 6,
+        "updated": 0,
+        "skipped": 0,
+        "lines_created": 0,
+        "lines_updated": 0,
+        "lines_matched": 0,
+        "lines_unmatched": 0,
+    }
     again = await svc.sync_remittances(_FakeAdapter(pages))
-    assert again == {"created": 0, "updated": 6, "skipped": 0}
+    assert again == {
+        "created": 0,
+        "updated": 6,
+        "skipped": 0,
+        "lines_created": 0,
+        "lines_updated": 0,
+        "lines_matched": 0,
+        "lines_unmatched": 0,
+    }
     assert (await db_session.execute(select(func.count(CodRemittance.id)))).scalar_one() == 6
 
 

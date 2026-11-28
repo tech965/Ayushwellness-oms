@@ -116,12 +116,39 @@ COD_STATUSES = ("pending", "partially_reconciled", "matched", "short", "excess")
 # used for this classification.
 #
 # One addition, from Shiprocket's DOCUMENTED order-detail response
-# (`GET /orders/show/{id}`: `remittance_utr`, `remittance_date`): an order whose
-# status is still "pending" because no remittance AMOUNT is known, but for which
-# Shiprocket reports a payout reference or date, is `payout_reported` and counts
-# as Payment Initiated, never Success. Shiprocket documents no remitted amount,
-# CRF id, or bank settlement, so that API alone can never establish "success";
-# the order keeps status "pending" and every amount stays as it was.
+# (`GET /orders/show/{id}`: `remittance_utr`, `remittance_date`, and the
+# free-text `cod_recieved_hover_text`): an order whose status is still
+# "pending" because no remittance AMOUNT is known, but for which Shiprocket
+# reports a payout reference, a date, or a non-empty hover-text label, is
+# `payout_reported` and counts as Payment Initiated, never Success. All three
+# are treated identically -- a presence check only, never a parse of the
+# hover text's wording (that vocabulary is not documented). Shiprocket
+# documents no remitted amount, CRF id, or bank settlement anywhere on this
+# endpoint, so none of these three can ever establish "success" by
+# themselves; the order keeps status "pending" and every amount stays as it
+# was -- only `payout_reported` flips to `True`.
+#
+# A second, now-CONFIRMED-live source supersedes the above when it applies:
+# `GET /v1/account/details/remittance` (the CRF feed), consumed by
+# `CodReconciliationService.sync_remittances`. Its `status` is a real,
+# three-value enum (`pending` / `initiated` / `success`), not a presence
+# check:
+#   - `success` CRFs are stored as `CodRemittanceLine` rows (summed per
+#     order, deduped by `crf_id`) and flow through the SAME `lines` branch
+#     above as an uploaded settlement report -- i.e. they become `remitted`
+#     evidence, so they still need a matched bank credit to reach
+#     Payment Success (`matched`); without one they land on
+#     `partially_reconciled`, i.e. Payment Initiated. This keeps the one
+#     hard rule in this module intact: Shiprocket's own word that money
+#     moved is never, by itself, "bank confirmed".
+#   - `initiated` CRFs are stored on the `CodRemittance` summary row and
+#     drive `payout_reported`/Payment Initiated directly (see the `elif`
+#     branch below) -- the status itself is the evidence, it does not need
+#     a reference to also be present.
+#   - `pending` CRFs are stored the same way but deliberately do NOT set
+#     `payout_reported`: a real courier-reported "not yet" is still
+#     Payment Pending, just a *known* pending rather than *no data at all*
+#     (see `_data_coverage`'s `order_payout_references`, which does count it).
 PAYMENT_INITIATED_STATUSES = ("partially_reconciled", "short", "excess")
 
 
@@ -695,6 +722,16 @@ class CodRemittanceReconciliationService:
                         bank_date = credit_date
             elif shipment is not None and shipment.awb in api:
                 rem = api[shipment.awb]
+                payload = rem.raw_external_payload or {}
+                hover_text = payload.get("cod_recieved_hover_text")
+                # A confirmed-real CRF status of "initiated" (Shiprocket has
+                # started the payout but it has not settled yet) is payout
+                # evidence on its own -- unlike a UTR/date/hover-text, it does
+                # not depend on a reference also being present. "pending" is
+                # NOT evidence of a payout in progress; it only tells
+                # `_data_coverage()` that this AWB is genuinely tracked (see
+                # there), so it is deliberately excluded here.
+                crf_initiated = payload.get("status") == "initiated"
                 if rem.remitted_amount is not None and dec(rem.remitted_amount) > 0:
                     source = "shiprocket_api"
                     remitted = dec(rem.remitted_amount)
@@ -708,9 +745,12 @@ class CodRemittanceReconciliationService:
                         manual = confirmed
                         covered = confirmed >= remitted - TOLERANCE
                         bank_date = rem.bank_credited_on
-                elif rem.remittance_reference or rem.settlement_date:
-                    # Order-detail payout indicator (UTR / date), no amount: the
-                    # amount, and so the reconciliation status, stays unknown.
+                elif rem.remittance_reference or rem.settlement_date or hover_text or crf_initiated:
+                    # Order-detail payout indicator (UTR / date / hover text /
+                    # a CRF "initiated" status), no amount: the amount, and so
+                    # the reconciliation status, stays unknown. All of these
+                    # are treated identically -- presence counts, wording
+                    # never does.
                     source = "shiprocket_order"
                     payout_indicator = True
                     remitted_on = rem.settlement_date
@@ -898,6 +938,108 @@ class CodRemittanceReconciliationService:
         count, amount = (await self.session.execute(stmt)).one()
         return count, dec(amount)
 
+    async def _crf_records(self) -> list[dict[str, Any]]:
+        """Every individual CRF transaction straight from Shiprocket's
+        `GET /v1/account/details/remittance` feed -- `crf_id`, `utr`, `awb`,
+        `order_id`, `amount`, `date`, `status`, as Shiprocket itself
+        reported them (never mocked/placeholder: this is a real, synced
+        row, or the list is simply empty if `sync_remittances` has never
+        pulled any CRF data in this environment). A `success` row comes
+        from `CodRemittanceLine` (`CodReconciliationService.sync_remittances`
+        only ever creates one there with that partner name, from a CRF
+        record). An `initiated`/`pending` row comes from `CodRemittance`'s
+        `raw_external_payload`, where the ORIGINAL `amount` Shiprocket
+        reported is preserved even though it is deliberately never written
+        to `remitted_amount` (see `sync_remittances`): this view can show
+        it precisely because it is read-only and does not feed
+        `cod_status()`/Payment Success-Initiated-Pending in any way.
+        """
+        rows: list[dict[str, Any]] = []
+        lines = (
+            (
+                await self.session.execute(
+                    select(CodRemittanceLine).where(
+                        CodRemittanceLine.partner_name == "Shiprocket (CRF)"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for ln in lines:
+            raw = ln.raw_row or {}
+            rows.append(
+                {
+                    "crf_id": raw.get("crf_id") or ln.dedupe_key.removeprefix("shiprocket_crf:"),
+                    "utr": ln.remittance_reference,
+                    "awb": ln.awb,
+                    "order_id": ln.order_ref,
+                    "amount": dec(ln.remittance_amount),
+                    "date": ln.remittance_date,
+                    "status": "success",
+                    "matched_order_id": ln.matched_order_id,
+                }
+            )
+        api_rows = (
+            (
+                await self.session.execute(
+                    select(CodRemittance).where(CodRemittance.raw_external_payload.is_not(None))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for rem in api_rows:
+            payload = rem.raw_external_payload or {}
+            status = payload.get("status")
+            if status not in ("initiated", "pending"):
+                continue
+            rows.append(
+                {
+                    "crf_id": payload.get("crf_id"),
+                    "utr": payload.get("utr") or rem.remittance_reference,
+                    "awb": rem.awb,
+                    "order_id": payload.get("order_id") or rem.shiprocket_order_id,
+                    "amount": dec(payload.get("amount")),
+                    "date": rem.settlement_date,
+                    "status": status,
+                    "matched_order_id": None,
+                }
+            )
+        rows.sort(key=lambda r: (r["date"] or datetime.min.replace(tzinfo=UTC)), reverse=True)
+        return rows
+
+    async def _crf_amounts(self) -> dict[str, dict[str, Any]]:
+        """Real Rupee totals straight from the CRF feed (see `_crf_records`),
+        for display/transparency only. These are NOT fed into `cod_status()`
+        or the Payment Success/Initiated/Pending KPIs above, which stay
+        order-level and (for Success) bank-evidence-gated -- unchanged by
+        this method."""
+        totals = {"success": ZERO, "initiated": ZERO, "pending": ZERO}
+        counts = {"success": 0, "initiated": 0, "pending": 0}
+        for row in await self._crf_records():
+            totals[row["status"]] += row["amount"]
+            counts[row["status"]] += 1
+        return {
+            "crf_success_amount": {"count": counts["success"], "amount": money(totals["success"])},
+            "crf_initiated_amount": {
+                "count": counts["initiated"],
+                "amount": money(totals["initiated"]),
+            },
+            "crf_pending_amount": {"count": counts["pending"], "amount": money(totals["pending"])},
+        }
+
+    async def crf_transactions(
+        self, *, status: str | None, page_params: PageParams
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginated transaction-detail view behind the 3 CRF amount KPIs."""
+        rows = await self._crf_records()
+        if status:
+            rows = [r for r in rows if r["status"] == status]
+        total = len(rows)
+        start = page_params.offset
+        return rows[start : start + page_params.page_size], total
+
     async def summary(self, f: Filters) -> dict[str, Any]:
         records, shared = await self._records(f)
         if f.status:  # the status filter narrows every card, percentage and chart too
@@ -960,6 +1102,7 @@ class CodRemittanceReconciliationService:
             "payment_success": {"count": len(payment_success), "amount": payment_success_amount},
             "payment_initiated": {"count": len(initiated), "amount": initiated_amount},
             "payment_pending": {"count": len(payment_pending), "amount": payment_pending_amount},
+            **await self._crf_amounts(),
         }
         pct = [
             percentage_item(
@@ -1150,14 +1293,31 @@ class CodRemittanceReconciliationService:
         api_reported = await count(
             select(func.count(CodRemittance.id)).where(CodRemittance.remitted_amount > 0)
         )
-        # Shiprocket order-detail payout indicators (UTR / date) with no amount.
-        order_payouts = await count(
-            select(func.count(CodRemittance.id)).where(
-                (CodRemittance.remitted_amount.is_(None) | (CodRemittance.remitted_amount <= 0)),
-                (
-                    CodRemittance.remittance_reference.is_not(None)
-                    | CodRemittance.settlement_date.is_not(None)
-                ),
+        # Shiprocket order-detail payout indicators (UTR / date / hover text)
+        # with no amount. The hover-text key lives inside the JSON
+        # `raw_external_payload` column (no dedicated column, no migration),
+        # so it is checked in Python rather than with a dialect-specific JSON
+        # operator -- this table is the small, order-detail-synced one, not
+        # the full orders table.
+        no_amount_rows = (
+            await self.session.execute(
+                select(
+                    CodRemittance.remittance_reference,
+                    CodRemittance.settlement_date,
+                    CodRemittance.raw_external_payload,
+                ).where(
+                    CodRemittance.remitted_amount.is_(None) | (CodRemittance.remitted_amount <= 0)
+                )
+            )
+        ).all()
+        order_payouts = sum(
+            1
+            for reference, settlement_date, raw in no_amount_rows
+            if reference
+            or settlement_date
+            or (
+                isinstance(raw, dict)
+                and (raw.get("cod_recieved_hover_text") or raw.get("status"))
             )
         )
         bank_credits = await count(select(func.count(BankCredit.id)))

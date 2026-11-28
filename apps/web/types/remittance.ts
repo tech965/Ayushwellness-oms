@@ -69,6 +69,19 @@ export interface RemittanceSummary {
   data_coverage?: RemittanceDataCoverage | null
 }
 
+/** One raw Shiprocket CRF record (`GET /v1/account/details/remittance`),
+ * behind the CRF success/initiated/pending amount KPIs. */
+export interface CrfTransactionRow {
+  crf_id: string | null
+  utr: string | null
+  awb: string | null
+  order_id: string | null
+  amount: string
+  date: string | null
+  status: "success" | "initiated" | "pending"
+  matched_order_id: string | null
+}
+
 export interface PartnerRow {
   partner: string
   delivered_orders: number

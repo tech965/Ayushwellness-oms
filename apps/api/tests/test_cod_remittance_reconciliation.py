@@ -348,6 +348,81 @@ async def test_shiprocket_api_fallback_is_not_double_counted(db_session):
     assert r2[0]["source"] == "upload" and Decimal(r2[0]["remittance_amount"]) == 1000
 
 
+async def test_hover_text_alone_is_initiated_never_success_or_pending(db_session):
+    """`cod_recieved_hover_text` with no UTR/date/amount is still only a
+    presence indicator: it must flip `payment_initiated`, but it can never
+    forge a remitted amount or a bank-confirmed "success"."""
+    user = await _user(db_session, "u-hover@example.com")
+    await _cod_order(db_session, "HOV1", "1000.00", awb="AWB-HOV1")
+    db_session.add(
+        CodRemittance(
+            awb="AWB-HOV1",
+            raw_external_payload={"cod_recieved_hover_text": "COD received"},
+        )
+    )
+    await db_session.commit()
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        rows, _ = await _records(client, q="HOV1")
+        assert rows[0]["source"] == "shiprocket_order"
+        assert rows[0]["status"] == "pending"  # no amount is ever invented
+        assert Decimal(rows[0]["remittance_amount"]) == 0
+        s = await _summary(client)
+    k = s["kpis"]
+    assert k["payment_initiated"]["count"] == 1
+    assert k["payment_success"]["count"] == 0
+    assert k["payment_pending"]["count"] == 0
+
+
+async def test_empty_hover_text_and_garbage_payload_stay_pending_without_crashing(db_session):
+    """A blank hover-text string, or a non-dict/garbage `raw_external_payload`,
+    must never be read as a payout indicator and must never crash the
+    summary -- both stay `pending`, and overall coverage reflects only the
+    genuinely-reported rows elsewhere in the same request."""
+    user = await _user(db_session, "u-garbage@example.com")
+    await _cod_order(db_session, "GARB1", "1000.00", awb="AWB-GARB1")
+    await _cod_order(db_session, "GARB2", "1000.00", awb="AWB-GARB2")
+    db_session.add_all(
+        [
+            CodRemittance(awb="AWB-GARB1", raw_external_payload={"cod_recieved_hover_text": ""}),
+            CodRemittance(awb="AWB-GARB2", raw_external_payload={"unrelated_key": "x"}),
+        ]
+    )
+    await db_session.commit()
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        rows, _ = await _records(client, q="GARB")
+    assert len(rows) == 2
+    assert all(r["status"] == "pending" and r["source"] is None for r in rows)
+
+
+async def test_data_coverage_counts_hover_text_rows_without_double_counting(db_session):
+    """`_data_coverage`'s `order_payout_references` must count a hover-text-only
+    row exactly like a UTR/date-only row, and never count a row twice just
+    because it has more than one kind of evidence."""
+    user = await _user(db_session, "u-coverage@example.com")
+    await _cod_order(db_session, "COV1", "1000.00", awb="AWB-COV1")
+    await _cod_order(db_session, "COV2", "1000.00", awb="AWB-COV2")
+    db_session.add_all(
+        [
+            CodRemittance(
+                awb="AWB-COV1",
+                raw_external_payload={"cod_recieved_hover_text": "COD received"},
+            ),
+            CodRemittance(
+                awb="AWB-COV2",
+                remittance_reference="UTR-COV2",
+                raw_external_payload={"cod_recieved_hover_text": "COD received"},
+            ),
+        ]
+    )
+    await db_session.commit()
+    async with bearer_client(app, get_db, db_session, user.id) as client:
+        s = await _summary(client)
+    coverage = s["data_coverage"]
+    assert coverage["order_payout_references"] == 2  # COV1 + COV2, each counted once
+    assert coverage["has_remittance_data"] is True
+    assert coverage["pending_is_data_limited"] is False
+
+
 async def test_every_kpi_drilldown_equals_its_count_and_statuses_partition(db_session):
     user = await _user(db_session, "u9@example.com")
     async with bearer_client(app, get_db, db_session, user.id) as client:

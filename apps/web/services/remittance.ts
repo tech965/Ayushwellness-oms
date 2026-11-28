@@ -12,6 +12,7 @@ import type {
   CashfreeSyncStart,
   CashfreeSyncStatus,
   CodRecord,
+  CrfTransactionRow,
   DrillTotals,
   ReconciliationDetail,
   MatchLookup,
@@ -117,6 +118,31 @@ export function useRemittanceRecords<T extends CodRecord | PrepaidRecord>(
     },
     enabled,
     placeholderData: keepWithinScope<DrilldownPage<T>>(scope),
+  })
+}
+
+/** The transaction-detail list behind the 3 CRF amount KPIs (COD only).
+ * Every row is a real, synced `CodRemittanceLine`/`CodRemittance` record --
+ * an empty page means no CRF data has been synced in this environment yet,
+ * never a placeholder. */
+export function useCrfTransactions(params: {
+  status?: "success" | "initiated" | "pending"
+  page: number
+  pageSize: number
+  enabled?: boolean
+}) {
+  const { status, page, pageSize, enabled = true } = params
+  return useQuery({
+    queryKey: ["remittance", "cod", "crf-transactions", status, page, pageSize],
+    queryFn: async (): Promise<PaginatedResponse<CrfTransactionRow>> => {
+      const response = await apiClient.get<PaginatedResponse<CrfTransactionRow>>(
+        `${ROOT}/cod/crf-transactions`,
+        { params: clean({ status, page, page_size: pageSize }) }
+      )
+      return response.data
+    },
+    enabled,
+    placeholderData: keepWithinScope<PaginatedResponse<CrfTransactionRow>>(status),
   })
 }
 

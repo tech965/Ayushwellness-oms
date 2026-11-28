@@ -191,6 +191,20 @@ class SettlementFileRow(BaseModel):
     created_at: datetime
 
 
+class CrfTransactionRow(BaseModel):
+    """One raw Shiprocket CRF record (`GET /v1/account/details/remittance`),
+    behind the CRF success/initiated/pending amount KPIs."""
+
+    crf_id: str | None
+    utr: str | None
+    awb: str | None
+    order_id: str | None
+    amount: Decimal
+    date: datetime | None
+    status: str
+    matched_order_id: uuid.UUID | None = None
+
+
 class SummaryResponse(BaseModel):
     kpis: dict[str, dict[str, Any]]
     percentages: list[PercentageItem]

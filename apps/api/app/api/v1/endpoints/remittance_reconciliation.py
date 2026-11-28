@@ -41,6 +41,7 @@ from app.schemas.remittance_reconciliation import (
     BankLinkRequest,
     CashfreeSyncRequest,
     CodRecordRow,
+    CrfTransactionRow,
     DrilldownResponse,
     ManualMatchRequest,
     PrepaidRecordRow,
@@ -221,6 +222,19 @@ async def cod_unmatched(
         f, kind=kind, page_params=page_params
     )
     return _drill_page(rows, total, totals, page_params, UnmatchedRow)
+
+
+@cod.get("/crf-transactions", response_model=PaginatedResponse[CrfTransactionRow])
+async def cod_crf_transactions(
+    status: Literal["success", "initiated", "pending"] | None = Query(default=None),
+    page_params: PageParams = Depends(pagination_params),
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("reconciliation.read")),
+) -> PaginatedResponse[CrfTransactionRow]:
+    rows, total = await cod_mod.CodRemittanceReconciliationService(session).crf_transactions(
+        status=status, page_params=page_params
+    )
+    return _page(rows, total, page_params, CrfTransactionRow)
 
 
 @cod.get("/drilldown/export")

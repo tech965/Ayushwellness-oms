@@ -38,7 +38,7 @@ from app.models.cod_remittance import CodRemittance
 from app.models.enums import CancellationStatus, FulfillmentStatus, OrderStatus, PaymentType
 from app.models.order import Order
 from app.models.order_workflow import OrderWorkflow
-from app.models.remittance_reconciliation import BankCredit
+from app.models.remittance_reconciliation import BankCredit, CodRemittanceLine
 from app.models.shipment import Shipment
 from app.models.shipment_ref import ShipmentRef
 from app.repositories.order import OrderRepository
@@ -165,12 +165,50 @@ class CodReconciliationService:
 
     # ---------------------------------------------------------------- sync
 
+    async def _match_crf_order(self, awb: str | None, order_ref: str | None) -> uuid.UUID | None:
+        """AWB first, then order number. Same idiom as
+        `CodRemittanceReconciliationService._auto_match`; never fuzzy."""
+        if awb:
+            order_id = await self.session.scalar(
+                select(Shipment.order_id).where(func.lower(Shipment.awb) == awb.strip().lower())
+            )
+            if order_id is not None:
+                return order_id
+        if order_ref:
+            return await self.session.scalar(
+                select(Order.id).where(
+                    func.lower(Order.order_number) == order_ref.lstrip("#").strip().lower()
+                )
+            )
+        return None
+
     async def sync_remittances(self, adapter: ShiprocketAdapter) -> dict[str, int]:
         """Upserts by AWB, so re-running never duplicates rows. Overwrites
         only Shiprocket-reported columns; never touches `bank_*`, and never
-        blanks a stored value with a missing one."""
+        blanks a stored value with a missing one.
+
+        A CRF record whose confirmed `status` is `"success"` (a completed
+        payout) is stored as a `CodRemittanceLine`, keyed by `crf_id`
+        (`dedupe_key`), NOT as a `CodRemittance` row: one AWB can have
+        several successful CRFs over time (an instant partial payout
+        followed by the final one), and `CodRemittance.awb` is unique --
+        one summary row per AWB can only ever hold the LATEST figure, which
+        would silently drop an earlier partial amount. `CodRemittanceLine`
+        has no such constraint and is already summed per matched order by
+        `CodRemittanceReconciliationService._records()`, so every distinct
+        CRF contributes its own amount exactly once (re-syncing the same
+        `crf_id` updates that one line in place, it never inserts a
+        duplicate, so re-running this sync can never double-count).
+
+        A `"pending"` or `"initiated"` CRF has no settled amount yet, so it
+        is stored on the single-row `CodRemittance` summary instead, purely
+        as a payout-reported signal for `_records()`'s existing
+        `payout_reported`/data-coverage logic -- `remitted_amount` is left
+        unset so it can never be read as settled money.
+        """
         now = datetime.now(UTC)
         created = updated = skipped = seen = 0
+        lines_created = lines_updated = lines_matched = lines_unmatched = 0
         page = 1
         while page <= SYNC_MAX_PAGES:
             records, has_more = await adapter.fetch_cod_remittances(page=page)
@@ -180,6 +218,55 @@ class CodReconciliationService:
                 if values is None:
                     skipped += 1
                     continue
+                crf_id = values.pop("crf_id", None)
+                status = (values.get("remittance_status") or "").strip().lower()
+                amount = values.get("remitted_amount")
+                if status == "success" and crf_id and amount is not None and amount > 0:
+                    dedupe_key = f"shiprocket_crf:{crf_id}"
+                    line = await self.session.scalar(
+                        select(CodRemittanceLine).where(CodRemittanceLine.dedupe_key == dedupe_key)
+                    )
+                    order_ref = values.get("shiprocket_order_id") or values.get(
+                        "channel_order_id"
+                    )
+                    if line is None:
+                        line = CodRemittanceLine(
+                            partner_name="Shiprocket (CRF)",
+                            awb=values["awb"],
+                            order_ref=order_ref,
+                            remittance_reference=values.get("remittance_reference"),
+                            remittance_amount=amount,
+                            remittance_date=values.get("settlement_date"),
+                            dedupe_key=dedupe_key,
+                            raw_row=raw,
+                        )
+                        self.session.add(line)
+                        lines_created += 1
+                    else:
+                        line.remittance_amount = amount
+                        line.remittance_date = values.get("settlement_date") or line.remittance_date
+                        line.remittance_reference = (
+                            values.get("remittance_reference") or line.remittance_reference
+                        )
+                        line.raw_row = raw
+                        lines_updated += 1
+                    await self.session.flush()
+                    if line.matched_order_id is None:
+                        order_id = await self._match_crf_order(line.awb, order_ref)
+                        if order_id is not None:
+                            line.matched_order_id = order_id
+                            line.match_method = "awb" if line.awb else "order_ref"
+                            lines_matched += 1
+                        else:
+                            lines_unmatched += 1
+                    await self.session.flush()
+                    continue
+                if crf_id and status in ("pending", "initiated"):
+                    # A genuine CRF record with no settled amount yet: store it
+                    # on the CodRemittance summary row, but never as a settled
+                    # amount -- `remitted_amount` must stay unset so it can
+                    # never be read as money that has actually moved.
+                    values.pop("remitted_amount", None)
                 existing = (
                     await self.session.execute(
                         select(CodRemittance).where(CodRemittance.awb == values["awb"])
@@ -202,14 +289,31 @@ class CodReconciliationService:
                 break
             page += 1
         await self.session.commit()
-        if seen and created + updated == 0:
+        if seen and created + updated + lines_created + lines_updated == 0:
             raise ValidationError(
                 f"Shiprocket returned {seen} records but none had a recognisable AWB. "
                 "The remittance response format is not what this sync expects; "
                 "run /revenue-reconciliation/shiprocket-probe and adjust the normalizer."
             )
-        logger.info("cod_remittance_sync_done", created=created, updated=updated, skipped=skipped)
-        return {"created": created, "updated": updated, "skipped": skipped}
+        logger.info(
+            "cod_remittance_sync_done",
+            created=created,
+            updated=updated,
+            skipped=skipped,
+            lines_created=lines_created,
+            lines_updated=lines_updated,
+            lines_matched=lines_matched,
+            lines_unmatched=lines_unmatched,
+        )
+        return {
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "lines_created": lines_created,
+            "lines_updated": lines_updated,
+            "lines_matched": lines_matched,
+            "lines_unmatched": lines_unmatched,
+        }
 
     async def verify_bank_credit(
         self,

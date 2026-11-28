@@ -2,9 +2,15 @@
 
 The public API collection shows `data.awb_data.charges` (freight, COD fee,
 weights, weight-based and RTO amounts, zone) and `data.remittance_utr`,
-`data.remittance_date`, `data.remittance_status`. It documents NO remitted
-amount, deductions or payout (CRF) id, so none is derived here. Blank or
-unreadable values stay `None`; nothing becomes 0.
+`data.remittance_date`, `data.remittance_status`, `data.cod_recieved_hover_text`
+(Shiprocket's own spelling; kept verbatim as the source key). It documents NO
+remitted amount, deductions or payout (CRF) id, so none is derived here. Blank
+or unreadable values stay `None`; nothing becomes 0.
+
+`cod_recieved_hover_text` is a free-text hover label, not a status enum or an
+amount -- it is read only as "something was reported" (non-empty), never
+parsed for specific wording. See `cod_remittance_recon_service.py` for how
+this and the UTR/date fields are turned into a reconciliation status.
 
 The order response also carries customer details, which are never kept.
 """
@@ -49,10 +55,12 @@ def parse_order_finance(body: Any) -> dict[str, Any] | None:
         "remittance_utr": _text(data.get("remittance_utr"), 128),
         "remittance_status": _text(data.get("remittance_status"), 64),
         "remittance_date": _dt(_text(data.get("remittance_date"), 40)),
+        "cod_received_hover_text": _text(data.get("cod_recieved_hover_text"), 255),
         "raw": {
             "awb_data_charges": {k: charges.get(k) for k in charges},
             "remittance_utr": data.get("remittance_utr"),
             "remittance_status": data.get("remittance_status"),
             "remittance_date": data.get("remittance_date"),
+            "cod_recieved_hover_text": data.get("cod_recieved_hover_text"),
         },
     }
