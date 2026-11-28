@@ -25,6 +25,7 @@ from app.models.remittance_reconciliation import (
 )
 from app.services import remittance_upload_parser as parser
 from app.services.remittance_common import (
+    TOLERANCE,
     ZERO,
     audit,
     auto_link_bank_credits,
@@ -39,6 +40,32 @@ from app.services.remittance_common import (
 )
 
 MODULES = ("cod", "prepaid")
+
+# Shiprocket CRF entries carry only awb / amount / status -- no UTR -- so a
+# bank credit cannot be tied to them through a report reference. When a person
+# explicitly links a credit to one CRF line, that line gets this INTERNAL,
+# per-transaction reference (derived from its unique dedupe key) and the
+# ordinary `BankCreditLink` machinery (free-money / still-needed guards,
+# audit, reversal) applies unchanged. It is never a bank or courier UTR.
+CRF_REFERENCE_PREFIX = "CRF-"
+_CRF_PARTNER = "Shiprocket (CRF)"
+
+
+def crf_line_reference(line: CodRemittanceLine) -> str:
+    return f"{CRF_REFERENCE_PREFIX}{line.dedupe_key}"
+
+
+async def lock_crf_line(session: AsyncSession, line_id: uuid.UUID) -> None:
+    """Row lock on one CRF line (`SELECT ... FOR UPDATE`; a no-op on SQLite,
+    which serialises writers itself). Re-reads the row so a request that had
+    to wait sees what the winner committed, not a stale identity-map copy.
+    Lock order for line-level links is ALWAYS line first, then bank credit."""
+    await session.execute(
+        select(CodRemittanceLine.id)
+        .where(CodRemittanceLine.id == line_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 async def _known_references(session: AsyncSession, module: str) -> list[str | None]:
@@ -231,6 +258,125 @@ class BankStatementService:
         )
         await self.session.commit()
         return link
+
+    async def _crf_line(self, line_id: uuid.UUID) -> CodRemittanceLine:
+        line = await self.session.get(CodRemittanceLine, line_id)
+        if line is None or line.partner_name != _CRF_PARTNER:
+            raise NotFoundError("Shiprocket CRF line not found.")
+        if line.remittance_reference and not line.remittance_reference.startswith(
+            CRF_REFERENCE_PREFIX
+        ):
+            raise ValidationError(
+                "This line has its own remittance reference; link the bank credit to that "
+                "reference instead."
+            )
+        return line
+
+    async def crf_line_bank_candidates(self, line_id: uuid.UUID) -> dict[str, Any]:
+        """Bank credits that COULD pay this CRF line. AWB-in-narration or a
+        free amount equal to what the line still needs is only a candidate
+        signal -- never proof; nothing is linked here."""
+        line = await self._crf_line(line_id)
+        ref = line.remittance_reference or crf_line_reference(line)
+        ledger = await load_ledger(self.session)
+        credited = evidence_from(ledger, "cod").credited.get(ref.lower(), ZERO)
+        need = money(max(dec(line.remittance_amount) - credited, ZERO))
+        awb = (line.awb or "").strip().lower()
+        candidates: list[dict[str, Any]] = []
+        for credit in ledger.credits:
+            free = money(ledger.free(credit))
+            if free <= 0 or need <= 0:
+                continue
+            text = f"{credit.narration or ''} {credit.reference or ''}".lower()
+            awb_match = bool(awb) and awb in text
+            amount_match = abs(free - need) <= TOLERANCE
+            if not (awb_match or amount_match):
+                continue
+            candidates.append(
+                {
+                    "bank_credit_id": str(credit.id),
+                    "credit_date": credit.credit_date.isoformat() if credit.credit_date else None,
+                    "credit_amount": str(money(dec(credit.amount))),
+                    "free_amount": str(free),
+                    "bank_reference": credit.reference,
+                    "narration": credit.narration,
+                    "awb_in_narration": awb_match,
+                    "amount_equals_need": amount_match,
+                }
+            )
+        return {
+            "line_id": str(line.id),
+            "awb": line.awb,
+            "line_amount": str(money(dec(line.remittance_amount))),
+            "bank_confirmed": str(money(credited)),
+            "still_needed": str(need),
+            "candidates": candidates,
+            "requires_explicit_confirmation": len(candidates) > 1,
+        }
+
+    async def link_bank_credit_to_crf_line(
+        self,
+        *,
+        line_id: uuid.UUID,
+        bank_credit_id: uuid.UUID,
+        bank_reference: str,
+        amount: Decimal,
+        reason: str,
+        confirm_ambiguous: bool,
+        user: User,
+    ) -> BankCreditLink:
+        """Explicit, audited, line-level bank verification. The chosen credit
+        must be a candidate (AWB in its narration, or its free amount equals
+        what the line still needs); when several credits are candidates the
+        caller must confirm the ambiguity. Over-allocation and duplicate
+        links are rejected by `link_bank_credit`. Each CRF entry is its own
+        line, so several/partial CRF transactions for one AWB stay separate.
+        """
+        # 1) line, 2) credit -- the same order for every caller, so two requests
+        # can never wait on each other. Everything below (candidates, still-
+        # needed, free money) is re-read AFTER both locks are held, inside this
+        # one transaction, which only `link_bank_credit`'s commit ends.
+        await lock_crf_line(self.session, line_id)
+        await lock_bank_credits(self.session, [bank_credit_id])
+        info = await self.crf_line_bank_candidates(line_id)
+        ids = {c["bank_credit_id"] for c in info["candidates"]}
+        if str(bank_credit_id) not in ids:
+            raise ValidationError(
+                "This bank credit is not a candidate for the CRF line: its narration must "
+                "contain the AWB, or its free amount must equal what the line still needs."
+            )
+        if len(ids) > 1 and not confirm_ambiguous:
+            raise ValidationError(
+                f"{len(ids)} bank credits could match this CRF line; confirm explicitly "
+                "(confirm_ambiguous) that you verified the chosen one."
+            )
+        line = await self._crf_line(line_id)
+        if not line.remittance_reference:
+            ref = crf_line_reference(line)
+            line.remittance_reference = ref
+            await self.session.flush()
+            await audit(
+                self.session,
+                user,
+                "remittance.cod.crf_line_reference_assigned",
+                "cod_remittance_line",
+                line.id,
+                previous={"reference": None},
+                new={"reference": ref, "awb": line.awb, "amount": str(line.remittance_amount)},
+            )
+        try:
+            return await self.link_bank_credit(
+                module="cod",
+                bank_credit_id=bank_credit_id,
+                reference=line.remittance_reference,
+                bank_reference=bank_reference,
+                amount=amount,
+                reason=reason,
+                user=user,
+            )
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def reverse_bank_link(self, module: str, link_id: uuid.UUID, user: User) -> None:
         link = await self.session.get(BankCreditLink, link_id)

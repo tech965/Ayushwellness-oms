@@ -275,6 +275,19 @@ class BankLinkRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=255)
 
 
+class CrfLineBankLinkRequest(BaseModel):
+    """Manual verification that a bank credit pays one Shiprocket CRF line
+    (which carries no UTR). Every field is mandatory except
+    `confirm_ambiguous`, which must be true when more than one bank credit
+    is a candidate for the line."""
+
+    bank_credit_id: uuid.UUID
+    bank_reference: str = Field(min_length=1, max_length=128)
+    amount: Decimal = Field(gt=0)
+    reason: str = Field(min_length=3, max_length=255)
+    confirm_ambiguous: bool = False
+
+
 class AdjustmentRequest(BaseModel):
     order_id: uuid.UUID
     amount: Decimal
