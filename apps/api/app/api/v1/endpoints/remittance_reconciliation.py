@@ -41,6 +41,7 @@ from app.schemas.remittance_reconciliation import (
     BankLinkRequest,
     CashfreeSyncRequest,
     CodRecordRow,
+    CrfLineBankLinkRequest,
     CrfTransactionRow,
     DrilldownResponse,
     ManualMatchRequest,
@@ -432,6 +433,28 @@ async def cod_bank_link(
         module="cod", user=user, **payload.model_dump()
     )
     return ApiResponse(data={"id": str(link.id)})
+
+
+@cod.get("/crf-lines/{line_id}/bank-candidates", response_model=ApiResponse[dict])
+async def cod_crf_line_bank_candidates(
+    line_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("reconciliation.read")),
+) -> ApiResponse[dict]:
+    return ApiResponse(data=await BankStatementService(session).crf_line_bank_candidates(line_id))
+
+
+@cod.post("/crf-lines/{line_id}/bank-links", response_model=ApiResponse[dict], status_code=201)
+async def cod_crf_line_bank_link(
+    line_id: uuid.UUID,
+    payload: CrfLineBankLinkRequest,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(require_permission("reconciliation.adjust")),
+) -> ApiResponse[dict]:
+    link = await BankStatementService(session).link_bank_credit_to_crf_line(
+        line_id=line_id, user=user, **payload.model_dump()
+    )
+    return ApiResponse(data={"id": str(link.id), "reference": link.reference})
 
 
 @cod.post("/bank-links/{link_id}/reverse", response_model=ApiResponse[dict])
