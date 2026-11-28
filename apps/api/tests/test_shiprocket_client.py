@@ -127,6 +127,55 @@ async def test_client_gives_up_after_max_retries_exhausted() -> None:
     assert exc_info.value.error_type == "http_503"
 
 
+async def test_a_500_response_body_is_captured_as_a_safe_shape_never_raw_values() -> None:
+    """Regression for the production remittance 500 investigation: the
+    raised error must carry enough to diagnose the failure from logs
+    alone (key names/types of the Shiprocket error body), while never
+    exposing an actual value -- a secret, token, or customer field in
+    that body must never surface in `.details`.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/login"):
+            return httpx.Response(200, json={"token": "tok"})
+        return httpx.Response(
+            500,
+            json={
+                "message": "Internal Server Error: something broke",
+                "errors": {"remittance": ["could not be processed"]},
+            },
+        )
+
+    client = _client_with(handler)
+    with pytest.raises(ShiprocketApiError) as exc_info:
+        await client.request("GET", "/account/details/remittance", params={"per_page": 1})
+
+    error = exc_info.value
+    assert error.error_type == "http_500"
+    assert error.status_code == 500
+    shape = error.details["response_shape"]
+    assert shape == {"message": "str", "errors": {"remittance": ["list[1]", "str"]}}
+    # The real message text and real list contents must never appear.
+    assert "something broke" not in str(error.details)
+    assert "could not be processed" not in str(error.details)
+
+
+async def test_non_json_error_body_reports_length_only_not_raw_text() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/login"):
+            return httpx.Response(200, json={"token": "tok"})
+        return httpx.Response(500, text="<html>Internal Server Error</html>")
+
+    client = _client_with(handler)
+    with pytest.raises(ShiprocketApiError) as exc_info:
+        await client.request("GET", "/account/details/remittance")
+
+    details = exc_info.value.details
+    assert details["response_body_type"] == "non_json"
+    assert isinstance(details["response_body_length"], int) and details["response_body_length"] > 0
+    assert "Internal Server Error" not in str(details)
+
+
 # 20. Non-retryable errors
 async def test_client_does_not_retry_a_validation_error() -> None:
     calls = {"orders": 0}

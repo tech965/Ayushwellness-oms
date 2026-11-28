@@ -191,6 +191,67 @@ async def test_fetch_cod_remittances_defaults_to_per_page_1(
     assert has_more is True
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("/account/details/remittance/", "/account/details/remittance"),  # trailing slash
+        ("account/details/remittance", "/account/details/remittance"),  # missing leading slash
+        ("  /account/details/remittance  ", "/account/details/remittance"),  # stray whitespace
+    ],
+)
+async def test_fetch_cod_remittances_normalizes_a_misconfigured_path(
+    monkeypatch: pytest.MonkeyPatch, configured: str, expected: str
+) -> None:
+    """Production evidence: `/shiprocket-probe` succeeds against the
+    hardcoded literal `/account/details/remittance`, while the real sync
+    (reading `SHIPROCKET_REMITTANCE_PATH` from Render's env var) has
+    returned a 500 for the same logical endpoint. A trailing slash,
+    missing leading slash, or stray whitespace in that env var would
+    silently send a DIFFERENT URL than the one already proven to work --
+    normalize so a config typo can't cause this divergence.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", configured)
+    client = _StubClient([{"data": [{"awb_code": "AWB1", "status": "success"}]}])
+    adapter = ShiprocketAdapter(client=client)
+
+    await adapter.fetch_cod_remittances(page=1)
+
+    assert client.calls[0] == ("GET", expected, {"page": 1, "per_page": 1})
+
+
+async def test_fetch_cod_remittances_propagates_safe_error_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `IntegrationError` raised on a Shiprocket failure must carry
+    the status code and safe (redacted) response shape through to
+    whatever logs/returns it -- this is what makes a future 500
+    diagnosable from Render logs without another investigation round.
+    """
+    from app.core.config import settings
+    from app.core.exceptions import IntegrationError
+    from app.integrations.shiprocket.errors import ShiprocketApiError
+
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "/account/details/remittance")
+
+    class _FailingClient:
+        async def request(self, method: str, path: str, *, params: dict | None = None) -> dict:
+            raise ShiprocketApiError(
+                "Shiprocket API returned a server error (500).",
+                error_type="http_500",
+                status_code=500,
+                details={"response_shape": {"message": "str"}},
+            )
+
+    adapter = ShiprocketAdapter(client=_FailingClient())
+    with pytest.raises(IntegrationError) as exc_info:
+        await adapter.fetch_cod_remittances(page=1)
+
+    assert exc_info.value.details["status_code"] == 500
+    assert exc_info.value.details["response_shape"] == {"message": "str"}
+
+
 async def test_fetch_cod_remittances_paginates_one_record_per_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

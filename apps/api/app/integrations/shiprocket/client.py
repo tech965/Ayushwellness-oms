@@ -169,13 +169,25 @@ class ShiprocketClient:
             if attempt > self._retry_policy.max_retries or error.error_type not in (
                 _RETRYABLE_ERROR_TYPES
             ):
+                logger.warning(
+                    "shiprocket_request_failed",
+                    method=method,
+                    path=path,
+                    error_type=error.error_type,
+                    status_code=error.status_code,
+                    **error.details,
+                )
                 raise error
 
             delay = compute_backoff_seconds(attempt=attempt, policy=self._retry_policy)
             logger.warning(
                 "shiprocket_request_retrying",
+                method=method,
+                path=path,
                 attempt=attempt,
                 error_type=error.error_type,
+                status_code=error.status_code,
                 delay_seconds=delay,
+                **error.details,
             )
             await asyncio.sleep(delay)
