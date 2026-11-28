@@ -16,6 +16,7 @@ verified" (a human matched it to a bank credit).
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -54,6 +55,26 @@ ZERO = Decimal("0")
 MAX_EXPORT_ROWS = 10_000
 SYNC_MAX_PAGES = 50
 TRACKING_URL = "https://shiprocket.co/tracking/{awb}"
+
+
+def _cod_entry_dedupe_key(*, crf_id: str | None, awb: str, amount: Decimal, status: str) -> str:
+    """Identifies one COD remittance entry for upsert/idempotency.
+
+    Uses the real `crf_id` when Shiprocket provides one (future-proofing
+    -- it does not, for the currently confirmed `/cod/remittance`
+    response, which returns only `awb`/`amount`/`status`). Otherwise
+    falls back to a deterministic fingerprint of those three real,
+    returned fields -- never an invented identifier. This makes an exact
+    repeat (the same page re-fetched, or Shiprocket re-sending the same
+    entry) correctly idempotent, but cannot distinguish two genuinely
+    separate entries that happen to share the identical (awb, amount,
+    status) -- a real, documented limitation of a response with no
+    per-entry identifier, not something a fingerprint can fix.
+    """
+    if crf_id:
+        return f"shiprocket_crf:{crf_id}"
+    fingerprint = hashlib.sha256(f"{awb}|{amount}|{status}".encode()).hexdigest()[:48]
+    return f"shiprocket_cod:{fingerprint}"
 
 
 class Bucket(BaseModel):
@@ -187,24 +208,55 @@ class CodReconciliationService:
         only Shiprocket-reported columns; never touches `bank_*`, and never
         blanks a stored value with a missing one.
 
-        A CRF record whose confirmed `status` is `"success"` (a completed
-        payout) is stored as a `CodRemittanceLine`, keyed by `crf_id`
-        (`dedupe_key`), NOT as a `CodRemittance` row: one AWB can have
-        several successful CRFs over time (an instant partial payout
-        followed by the final one), and `CodRemittance.awb` is unique --
-        one summary row per AWB can only ever hold the LATEST figure, which
-        would silently drop an earlier partial amount. `CodRemittanceLine`
-        has no such constraint and is already summed per matched order by
+        CONFIRMED DIRECTLY BY SHIPROCKET SUPPORT: `POST /cod/remittance`
+        returns `status` as one of `pending` / `processed` / `failed` (see
+        `ShiprocketAdapter.fetch_cod_remittances`, `remittance.py`). This
+        endpoint does NOT return a CRF id, UTR, date, or order id -- only
+        `awb`, `amount`, `status` -- so the per-entry identity used for
+        deduplication/idempotency below is a deterministic fingerprint of
+        those three real fields (`_cod_entry_dedupe_key`), NOT an invented
+        identifier. Honest limitation: if Shiprocket ever returns two
+        GENUINELY DISTINCT entries for the same AWB with the identical
+        amount and status, this fingerprint cannot tell them apart and the
+        second is treated as a re-sync of the first rather than a new
+        payout -- there is no way to avoid this without a real per-entry
+        identifier, which this endpoint does not provide. If a future
+        response ever includes a `crf_id` (kept as a secondary alias in
+        `normalize_cod_remittance`), that genuine identifier is used
+        instead and this limitation no longer applies.
+
+        A `"processed"` entry (a completed payout) is stored as a
+        `CodRemittanceLine`, keyed by that dedupe key, NOT as a
+        `CodRemittance` row: one AWB can have several processed entries
+        over time (an instant partial payout followed by the final one),
+        and `CodRemittance.awb` is unique -- one summary row per AWB can
+        only ever hold the LATEST figure, which would silently drop an
+        earlier partial amount. `CodRemittanceLine` has no such constraint
+        and is already summed per matched order by
         `CodRemittanceReconciliationService._records()`, so every distinct
-        CRF contributes its own amount exactly once (re-syncing the same
-        `crf_id` updates that one line in place, it never inserts a
+        entry contributes its own amount exactly once (re-syncing the same
+        entry updates that one line in place, it never inserts a
         duplicate, so re-running this sync can never double-count).
 
-        A `"pending"` or `"initiated"` CRF has no settled amount yet, so it
-        is stored on the single-row `CodRemittance` summary instead, purely
-        as a payout-reported signal for `_records()`'s existing
+        A `"pending"` entry has no settled amount yet, so it is stored on
+        the single-row `CodRemittance` summary instead, purely as a
+        payout-reported signal for `_records()`'s existing
         `payout_reported`/data-coverage logic -- `remitted_amount` is left
         unset so it can never be read as settled money.
+
+        A `"failed"` entry is stored the same way (on the `CodRemittance`
+        summary row, `remitted_amount` left unset) but with
+        `remittance_status="failed"` preserved verbatim -- it must never
+        be read as `pending` (a real failure is not "no data yet") or as
+        a success. `CodRemittanceReconciliationService` has a dedicated
+        `payment_failed` KPI/selector that reads this status explicitly,
+        separate from and taking priority over Payment Pending. If the
+        SAME AWB has both a `pending` and a `failed` entry across the
+        pages of one sync, `failed` wins (overwrites `pending`) on this
+        single-row summary -- the more protective, harder-to-miss state --
+        but a `pending` entry synced after an already-stored `failed` one
+        does NOT downgrade it back to pending (never overwrite a known
+        failure with "no data yet").
         """
         now = datetime.now(UTC)
         created = updated = skipped = seen = 0
@@ -221,8 +273,10 @@ class CodReconciliationService:
                 crf_id = values.pop("crf_id", None)
                 status = (values.get("remittance_status") or "").strip().lower()
                 amount = values.get("remitted_amount")
-                if status == "success" and crf_id and amount is not None and amount > 0:
-                    dedupe_key = f"shiprocket_crf:{crf_id}"
+                if status == "processed" and amount is not None and amount > 0:
+                    dedupe_key = _cod_entry_dedupe_key(
+                        crf_id=crf_id, awb=values["awb"], amount=amount, status=status
+                    )
                     line = await self.session.scalar(
                         select(CodRemittanceLine).where(CodRemittanceLine.dedupe_key == dedupe_key)
                     )
@@ -261,11 +315,15 @@ class CodReconciliationService:
                             lines_unmatched += 1
                     await self.session.flush()
                     continue
-                if crf_id and status in ("pending", "initiated"):
-                    # A genuine CRF record with no settled amount yet: store it
-                    # on the CodRemittance summary row, but never as a settled
-                    # amount -- `remitted_amount` must stay unset so it can
-                    # never be read as money that has actually moved.
+                if status in ("pending", "failed"):
+                    # Neither a `pending` nor a `failed` entry is a settled
+                    # payout -- the response's `amount` is what was
+                    # attempted/expected, not confirmed remitted money, so
+                    # `remitted_amount` must stay unset so it can never be
+                    # read as money that has actually moved. (Unlike the
+                    # old, disproven endpoint, this check no longer
+                    # requires `crf_id`: the confirmed real endpoint never
+                    # returns one at all.)
                     values.pop("remitted_amount", None)
                 existing = (
                     await self.session.execute(
@@ -278,11 +336,29 @@ class CodReconciliationService:
                     )
                     created += 1
                 else:
+                    # A known `failed` status is never downgraded back to
+                    # `pending` by a later/other page reporting "no data
+                    # yet" for the same AWB -- `failed` is the more
+                    # protective, harder-to-miss state and must win. This
+                    # must protect BOTH the `remittance_status` column AND
+                    # `raw_external_payload` consistently: `_records()`
+                    # (`cod_remittance_recon_service.py`) reads `status`
+                    # back out of the stored raw payload, not this column
+                    # -- overwriting only the column while still replacing
+                    # the payload with the newer "pending" JSON would
+                    # silently un-protect the failure the column claims to
+                    # preserve.
+                    downgrade_to_pending = (
+                        existing.remittance_status == "failed" and status == "pending"
+                    )
+                    if downgrade_to_pending:
+                        values.pop("remittance_status", None)
                     for key, value in values.items():
                         if value is not None:
                             setattr(existing, key, value)
                     existing.synced_at = now
-                    existing.raw_external_payload = raw
+                    if not downgrade_to_pending:
+                        existing.raw_external_payload = raw
                     updated += 1
                 await self.session.flush()
             if not has_more:

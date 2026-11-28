@@ -1,31 +1,37 @@
 """Normalizes Shiprocket COD remittance records.
 
-PENDING VERIFICATION (as of the `/cod/remittance` endpoint fix): the field
-names below were "confirmed, live-verified" against `GET
-/v1/account/details/remittance` -- which Shiprocket Support has since
-identified as the WRONG endpoint (it returned a structured HTTP 500 for
-every real sync call, independent of page size). The real endpoint,
-confirmed by Support, is `GET /cod/remittance` with `page`/`limit` query
-params (see `ShiprocketAdapter.fetch_cod_remittances`). Shiprocket's real
-sample response for `/cod/remittance` has NOT yet been supplied, so the
-alias tuples below are deliberately left UNCHANGED rather than guessed --
-do not treat `crf_id`/`utr`/`amount`/`date`/`status`/`awb`/`order_id` as
-confirmed for the real endpoint until that sample response is reviewed.
+CONFIRMED DIRECTLY BY SHIPROCKET SUPPORT (current, correct, in effect):
+`POST https://api.shiprocket.in/v1/cod/remittance` (see
+`ShiprocketAdapter.fetch_cod_remittances`) returns remittance entries with
+EXACTLY three fields: `awb`, `amount`, `status` (one of `pending` /
+`processed` / `failed`). This endpoint does NOT return a CRF id, UTR,
+transaction date, or order id at all -- `normalize_cod_remittance()` below
+correctly returns `None` for all of those (via `_first()`'s alias lookup
+finding nothing), which is intentional: this module must never invent a
+value for a field the API doesn't actually return.
 
-The (now-superseded) shape this module was built against was: `crf_id`,
-`utr`, `amount`, `date`, `status` (one of `pending` / `initiated` /
-`success`), `awb`, `order_id`. These names are listed first in every alias
-tuple below, so they win over the older, speculative aliases this module
-shipped with before any live account was reachable. Those speculative
-aliases are kept, after the confirmed names, only where they do not
-conflict -- this never invents or derives a value (e.g. it never turns
-"delivered" into "remitted").
+Two earlier, now-SUPERSEDED attempts both turned out to be wrong:
+1. `GET https://apiv2.shiprocket.in/v1/account/details/remittance` --
+   500'd on every real sync call (wrong endpoint entirely).
+2. `GET https://apiv2.shiprocket.in/v1/cod/remittance` (right path,
+   wrong base URL -- joining it onto the shared `/v1/external` base
+   produced `.../v1/external/cod/remittance`, which 404'd) with a
+   `pending`/`initiated`/`success` status vocabulary and an assumed
+   `crf_id`/`utr`/`date`/`order_id`-bearing response shape that was never
+   actually confirmed against a real response.
+The alias tuples below still list those superseded field names (`crf_id`,
+`utr`, `date`, `order_id`) as secondary aliases, in case Shiprocket ever
+adds them to a future response -- but only `awb`, `amount` (via the
+`amount` alias), and `status` are expected to ever actually match today.
 
-`crf_id` (the CRF record's own identifier) and `utr` (the bank transaction
-reference) are DIFFERENT fields and must not share one alias list: a record
-can carry both, and the CRF id is what makes repeat syncs of the same
-payout idempotent (see `_CRF_ID` / dedupe_key usage in
-`CodReconciliationService`), while the UTR is display/audit evidence only.
+`crf_id` (an entry's own identifier, when present) and `utr` (the bank
+transaction reference) are DIFFERENT fields and must not share one alias
+list: a record can carry both, and the CRF id is what makes repeat syncs
+of the same payout idempotent (see `_CRF_ID` / dedupe_key usage in
+`CodReconciliationService`) when it is present -- which, for the current
+confirmed endpoint, it never is; `CodReconciliationService` falls back to
+a deterministic (awb, amount, status) fingerprint in that case (see its
+own docstring for the honest limitation this implies).
 """
 
 from __future__ import annotations
@@ -61,8 +67,11 @@ _SETTLED = (
 
 # The CRF endpoint's own, confirmed-real status vocabulary. Nothing else is
 # ever treated as one of these three -- an unrecognised status string is
-# kept verbatim in `remittance_status` but never matched here.
-CRF_STATUSES = frozenset({"pending", "initiated", "success"})
+# kept verbatim in `remittance_status` but never matched here. `failed`
+# must never be read as `pending` or `processed` anywhere downstream
+# (see `CodReconciliationService.sync_remittances` and
+# `CodRemittanceReconciliationService`'s `payment_failed` KPI).
+CRF_STATUSES = frozenset({"pending", "processed", "failed"})
 
 
 def _first(raw: dict[str, Any], keys: tuple[str, ...]) -> Any:

@@ -24,7 +24,7 @@ class _StubClient:
     async def request(
         self, method: str, path: str, *, json: dict | None = None, params: dict | None = None
     ) -> dict:
-        self.calls.append((method, path, params))
+        self.calls.append((method, path, json if json is not None else params))
         response = self._responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -162,39 +162,53 @@ async def test_fetch_shipments_paginates() -> None:
 async def test_fetch_cod_remittances_hits_the_confirmed_endpoint_and_params(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Root-cause fix (Shiprocket Support confirmed): the real COD
-    remittance endpoint is `GET https://apiv2.shiprocket.in/v1/cod/remittance`
-    (an ABSOLUTE URL -- it lives directly under `/v1/`, not under the
-    shared `/v1/external` base every other call uses) with `page`/`limit`
-    query params -- NOT `/account/details/remittance` with `per_page`
-    (500'd), and NOT that same relative path joined onto the shared base
-    either (`.../v1/external/cod/remittance`, which 404'd). The path is a
-    fixed, hardcoded constant (`ShiprocketAdapter._COD_REMITTANCE_PATH`),
-    not read from `SHIPROCKET_REMITTANCE_PATH` -- that setting is only an
-    enable/disable flag now (its value no longer matters, only its
-    truthiness).
+    """CONFIRMED DIRECTLY BY SHIPROCKET SUPPORT (current, correct, final):
+    `POST https://api.shiprocket.in/v1/cod/remittance` -- a DIFFERENT
+    HOST (`api.shiprocket.in`, not `apiv2.shiprocket.in`) and a POST with
+    a JSON body `{"page": ..., "limit": ...}`, not a GET with query
+    params. Two earlier attempts were wrong: `GET .../account/details/
+    remittance` (500'd) and `GET .../v1/cod/remittance` joined onto the
+    shared `/v1/external` base (404'd). The path is a fixed, hardcoded
+    constant (`ShiprocketAdapter._COD_REMITTANCE_PATH`), not read from
+    `SHIPROCKET_REMITTANCE_PATH` -- that setting is only an enable/disable
+    flag now (its value no longer matters, only its truthiness).
 
     NOTE: response-field mapping (`normalize_cod_remittance`) is
-    deliberately NOT exercised/asserted here -- it is still based on an
-    earlier, disproven endpoint's assumed shape and is pending
-    Shiprocket's real sample response for `/cod/remittance`. This test
-    only proves the *request* is now correct.
+    deliberately NOT exercised/asserted here beyond the fact that the
+    confirmed response carries only `awb`/`amount`/`status` -- see
+    `test_cod_reconciliation.py` for status-mapping/aggregation tests.
+    This test only proves the *request* is correct.
     """
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "enabled")
-    client = _StubClient([{"data": [{"awb_code": "AWB1", "status": "success"}]}])
+    client = _StubClient([{"data": [{"awb": "AWB1", "amount": 500, "status": "processed"}]}])
     adapter = ShiprocketAdapter(client=client)
 
-    records, has_more = await adapter.fetch_cod_remittances(page=1)
+    records, has_more = await adapter.fetch_cod_remittances(page=1, limit=100)
 
     assert client.calls[0] == (
-        "GET",
-        "https://apiv2.shiprocket.in/v1/cod/remittance",
-        {"page": 1, "limit": 1},
+        "POST",
+        "https://api.shiprocket.in/v1/cod/remittance",
+        {"page": 1, "limit": 100},
     )
     assert len(records) == 1
-    assert has_more is True
+    # 1 record returned out of a 100-max page does not imply another page.
+    assert has_more is False
+
+
+async def test_fetch_cod_remittances_clamps_limit_to_100(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shiprocket Support confirmed the maximum `limit` is 100 -- a caller
+    passing a larger value must never send more than that, defensively."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "enabled")
+    client = _StubClient([{"data": []}])
+    adapter = ShiprocketAdapter(client=client)
+
+    await adapter.fetch_cod_remittances(page=1, limit=500)
+
+    assert client.calls[0][2] == {"page": 1, "limit": 100}
 
 
 async def test_fetch_cod_remittances_disabled_when_flag_is_empty(
@@ -229,7 +243,14 @@ async def test_fetch_cod_remittances_propagates_safe_error_details(
     monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "enabled")
 
     class _FailingClient:
-        async def request(self, method: str, path: str, *, params: dict | None = None) -> dict:
+        async def request(
+            self,
+            method: str,
+            path: str,
+            *,
+            json: dict | None = None,
+            params: dict | None = None,
+        ) -> dict:
             raise ShiprocketApiError(
                 "Shiprocket API returned a server error (500).",
                 error_type="http_500",
@@ -257,20 +278,20 @@ async def test_fetch_cod_remittances_paginates_one_record_per_page(
     monkeypatch.setattr(settings, "SHIPROCKET_REMITTANCE_PATH", "enabled")
     client = _StubClient(
         [
-            {"data": [{"awb_code": "AWB1", "status": "success"}]},
-            {"data": [{"awb_code": "AWB2", "status": "success"}]},
+            {"data": [{"awb": "AWB1", "amount": 100, "status": "processed"}]},
+            {"data": [{"awb": "AWB2", "amount": 200, "status": "processed"}]},
             {"data": []},
         ]
     )
     adapter = ShiprocketAdapter(client=client)
 
-    page1_records, page1_has_more = await adapter.fetch_cod_remittances(page=1)
-    page2_records, page2_has_more = await adapter.fetch_cod_remittances(page=2)
-    page3_records, page3_has_more = await adapter.fetch_cod_remittances(page=3)
+    page1_records, page1_has_more = await adapter.fetch_cod_remittances(page=1, limit=1)
+    page2_records, page2_has_more = await adapter.fetch_cod_remittances(page=2, limit=1)
+    page3_records, page3_has_more = await adapter.fetch_cod_remittances(page=3, limit=1)
 
-    assert [r["awb_code"] for r in page1_records] == ["AWB1"]
+    assert [r["awb"] for r in page1_records] == ["AWB1"]
     assert page1_has_more is True
-    assert [r["awb_code"] for r in page2_records] == ["AWB2"]
+    assert [r["awb"] for r in page2_records] == ["AWB2"]
     assert page2_has_more is True
     assert page3_records == []
     assert page3_has_more is False  # empty page stops pagination
